@@ -1,0 +1,24 @@
+# Git and IDE
+.git
+.gitignore
+.cursor
+*.md
+
+# Config and secrets (mount at runtime)
+config.yaml
+config.verify.yaml
+registration.yaml
+registration.verify.yaml
+*.db
+*.db-shm
+*.db-wal
+
+# Build artifacts
+/mautrix-jabber
+vendor
+
+# Logs
+logs
+
+# Plans and local dev
+*.plan.md

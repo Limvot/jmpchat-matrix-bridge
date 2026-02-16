@@ -1,0 +1,19 @@
+# Build
+/mautrix-jabber
+
+# Config and registration (contain secrets and local paths)
+config.yaml
+registration.yaml
+config.verify.yaml
+registration.verify.yaml
+mautrix-jabber-verify.db
+docker-config.yaml
+docker-registration.yaml
+docker-run/
+bridge-conf/
+
+# Logs
+logs/
+
+# Go
+vendor
