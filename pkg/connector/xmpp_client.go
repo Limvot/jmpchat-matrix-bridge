@@ -78,6 +78,10 @@ type xmppClient struct {
 	carbonsEnableMu   sync.Mutex
 	// reconnectCancel stops ReconnectLoop when the user logs out; set in LoadUserLogin, called in LogoutRemote.
 	reconnectCancel context.CancelFunc
+	// callSessions tracks in-flight XEP-0353 Jingle Message Initiation calls, keyed by session id,
+	// so accept/reject/finish (which only carry the sid) can be mapped back to the caller's portal.
+	callSessions   map[string]*callSession
+	callSessionsMu sync.Mutex
 }
 
 const (

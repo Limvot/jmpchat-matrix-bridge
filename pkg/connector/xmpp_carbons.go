@@ -19,16 +19,17 @@ const carbonsNS = "urn:xmpp:carbons:2"
 // parseInnerMessageFromCarbon reads the inner <message> from a carbon copy and returns
 // from, to, type, id, body. Per XEP-0280/0297, the stream is <received><forwarded><message>...,
 // so we capture from/to/id from the first <message> element we encounter (at any depth).
-func parseInnerMessageFromCarbon(t xmlstream.TokenReadEncoder) (from, to, typeAttr, id, body string, err error) {
+func parseInnerMessageFromCarbon(t xmlstream.TokenReadEncoder) (from, to, typeAttr, id, body string, jmi *jingleMessageInfo, err error) {
 	depth := 0
 	for {
 		tok, err := t.Token()
 		if err != nil {
-			return from, to, typeAttr, id, body, err
+			return from, to, typeAttr, id, body, jmi, err
 		}
 		switch v := tok.(type) {
 		case xml.StartElement:
 			depth++
+			jmi = detectJingleMessage(jmi, v)
 			if v.Name.Local == "message" && from == "" {
 				from = attrValue(v.Attr, "from")
 				to = attrValue(v.Attr, "to")
@@ -47,7 +48,7 @@ func parseInnerMessageFromCarbon(t xmlstream.TokenReadEncoder) (from, to, typeAt
 		case xml.EndElement:
 			depth--
 			if depth == 0 {
-				return from, to, typeAttr, id, body, nil
+				return from, to, typeAttr, id, body, jmi, nil
 			}
 		}
 	}
@@ -73,10 +74,15 @@ func (x *xmppClient) handleCarbonSent(t xmlstream.TokenReadEncoder) error {
 		consumeUntilEndElement(t, "sent")
 		return nil
 	}
-	from, to, _, id, body, err := parseInnerMessageFromCarbon(t)
+	from, to, _, id, body, jmi, err := parseInnerMessageFromCarbon(t)
 	consumeUntilEndElement(t, "sent")
 	if err != nil {
 		x.log.Debug().Err(err).Msg("Failed to parse carbon <sent> inner message")
+		return nil
+	}
+	// XEP-0353 action we performed from another of our devices (accept/reject/proceed).
+	if jmi != nil {
+		x.handleJingleMessageInitiation(*jmi, bareJID(from), true)
 		return nil
 	}
 	_ = from
@@ -124,10 +130,15 @@ func (x *xmppClient) handleCarbonReceived(t xmlstream.TokenReadEncoder) error {
 		consumeUntilEndElement(t, "received")
 		return nil
 	}
-	from, _, _, id, body, err := parseInnerMessageFromCarbon(t)
+	from, _, _, id, body, jmi, err := parseInnerMessageFromCarbon(t)
 	consumeUntilEndElement(t, "received")
 	if err != nil {
 		x.log.Debug().Err(err).Msg("Failed to parse carbon <received> inner message")
+		return nil
+	}
+	// XEP-0353 call signalling received on another device (e.g. propose/retract from the caller).
+	if jmi != nil {
+		x.handleJingleMessageInitiation(*jmi, bareJID(from), bareJID(from) == bareJID(string(x.loginID)))
 		return nil
 	}
 	fromBare := from

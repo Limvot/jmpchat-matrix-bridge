@@ -104,7 +104,7 @@ func attrValue(attrs []xml.Attr, name string) string {
 }
 
 // parseMessageBodyAndOOB reads the message stanza children from t (positioned after <message>) and returns body text, OOB URL (XEP-0066), reply ID (XEP-0461), and reaction data (XEP-0444).
-func parseMessageBodyAndOOB(t xml.TokenReader) (body, oobURL, replyID string, reactionTarget string, reactionEmojis []string, err error) {
+func parseMessageBodyAndOOB(t xml.TokenReader) (body, oobURL, replyID string, reactionTarget string, reactionEmojis []string, jmi *jingleMessageInfo, err error) {
 	var bodyBuf, urlBuf, reactionEmojiBuf strings.Builder
 	depth := 1
 	inBody, inOOB, inURL, inReactions, inReaction := false, false, false, false, false
@@ -112,11 +112,12 @@ func parseMessageBodyAndOOB(t xml.TokenReader) (body, oobURL, replyID string, re
 	for depth > 0 {
 		tok, err := t.Token()
 		if err != nil {
-			return strings.TrimSpace(bodyBuf.String()), strings.TrimSpace(urlBuf.String()), replyID, reactionTarget, reactionEmojis, err
+			return strings.TrimSpace(bodyBuf.String()), strings.TrimSpace(urlBuf.String()), replyID, reactionTarget, reactionEmojis, jmi, err
 		}
 		switch v := tok.(type) {
 		case xml.StartElement:
 			depth++
+			jmi = detectJingleMessage(jmi, v)
 			if v.Name.Local == "body" {
 				inBody = true
 			}
@@ -174,7 +175,7 @@ func parseMessageBodyAndOOB(t xml.TokenReader) (body, oobURL, replyID string, re
 			}
 		}
 	}
-	return strings.TrimSpace(bodyBuf.String()), strings.TrimSpace(urlBuf.String()), replyID, reactionTarget, reactionEmojis, nil
+	return strings.TrimSpace(bodyBuf.String()), strings.TrimSpace(urlBuf.String()), replyID, reactionTarget, reactionEmojis, jmi, nil
 }
 
 // tokenReaderWithPrefix implements xml.TokenReader by yielding one token then delegating to r.
@@ -216,17 +217,12 @@ func (x *xmppClient) handleMessageWithOOB(t xmlstream.TokenReadEncoder, start *x
 	tWithPrefix := &tokenReaderWithPrefix{first: tok, r: t}
 
 	if x.login == nil {
-		_, _, _, _, _, _ = parseMessageBodyAndOOB(tWithPrefix)
+		_, _, _, _, _, _, _ = parseMessageBodyAndOOB(tWithPrefix)
 		return nil
 	}
-	body, oobURL, replyID, reactionTarget, reactionEmojis, err := parseMessageBodyAndOOB(tWithPrefix)
+	body, oobURL, replyID, reactionTarget, reactionEmojis, jmi, err := parseMessageBodyAndOOB(tWithPrefix)
 	if err != nil {
 		x.log.Warn().Err(err).Msg("Failed to parse message body/OOB/reactions")
-		return nil
-	}
-	// Skip XEP-0085 chat state notifications (composing, paused, etc.) - messages with no body, no OOB, and no reactions.
-	if body == "" && oobURL == "" && reactionTarget == "" {
-		x.log.Debug().Str("from", attrValue(start.Attr, "from")).Msg("Skipping chat state notification (no body, no OOB, no reactions)")
 		return nil
 	}
 	from := attrValue(start.Attr, "from")
@@ -235,6 +231,16 @@ func (x *xmppClient) handleMessageWithOOB(t xmlstream.TokenReadEncoder, start *x
 		fromBare = fromBare[:i]
 	}
 	if fromBare == "" {
+		return nil
+	}
+	// XEP-0353 Jingle Message Initiation (call signalling): surface as a Matrix notice.
+	if jmi != nil {
+		x.handleJingleMessageInitiation(*jmi, fromBare, bareJID(from) == bareJID(string(x.loginID)))
+		return nil
+	}
+	// Skip XEP-0085 chat state notifications (composing, paused, etc.) - messages with no body, no OOB, and no reactions.
+	if body == "" && oobURL == "" && reactionTarget == "" {
+		x.log.Debug().Str("from", attrValue(start.Attr, "from")).Msg("Skipping chat state notification (no body, no OOB, no reactions)")
 		return nil
 	}
 	msgID := attrValue(start.Attr, "id")
@@ -350,10 +356,10 @@ func (x *xmppClient) handleGroupchatWithOOB(t xmlstream.TokenReadEncoder, start 
 		Str("from", from).
 		Msg("handleGroupchatWithOOB entered (parsing MUC stanza); reactions in XEP-0444 or body format will be detected here")
 	if x.login == nil {
-		_, _, _, _, _, _ = parseMessageBodyAndOOB(t)
+		_, _, _, _, _, _, _ = parseMessageBodyAndOOB(t)
 		return nil
 	}
-	body, oobURL, replyID, reactionTarget, reactionEmojis, err := parseMessageBodyAndOOB(t)
+	body, oobURL, replyID, reactionTarget, reactionEmojis, _, err := parseMessageBodyAndOOB(t)
 	if err != nil {
 		x.log.Warn().Err(err).Msg("Failed to parse MUC message body/OOB/reactions")
 		return nil
