@@ -87,6 +87,7 @@ type xmppClient struct {
 const (
 	mucFeatureNS       = "http://jabber.org/protocol/muc"
 	mucRoomInfoFormNS  = "http://jabber.org/protocol/muc#roominfo"
+	mucUserNS          = "http://jabber.org/protocol/muc#user"
 )
 
 func (x *xmppClient) Connect(ctx context.Context) {
@@ -1015,24 +1016,37 @@ func (x *xmppClient) GetUserInfo(ctx context.Context, ghost *bridgev2.Ghost) (*b
 	}
 	// MUC occupant: ghost ID is room@conference.domain/nick — use only the nick as display name so Matrix shows the short nick, not the full JID.
 	displayName := jidStr
+	isMUCOccupant := false
 	if idx := strings.LastIndex(jidStr, "/"); idx >= 0 && idx+1 < len(jidStr) {
 		displayName = jidStr[idx+1:]
+		isMUCOccupant = true
 		x.log.Info().Str("ghost_id", string(ghost.ID)).Str("jid", jidStr).Str("display_name", displayName).Msg("GetUserInfo: MUC occupant, using nick as display name")
 	} else if rosterName := x.lookupRosterName(jidStr); rosterName != "" {
 		displayName = rosterName
 	}
 	displayName = x.withAppServiceIDSuffix(displayName)
 	isBot := false
+	// Inbound avatar (XEP-0054 vcard-temp) for 1:1 contacts only, not MUC occupants.
+	var avatar *bridgev2.Avatar
+	var fetchedAvatarHash string
+	if !isMUCOccupant {
+		meta, _ := ghost.Metadata.(*GhostMetadata)
+		avatar, fetchedAvatarHash = x.contactAvatar(ctx, jidStr, meta)
+	}
 	// Aligned with Signal bridge: include ExtraUpdates for metadata tracking
 	return &bridgev2.UserInfo{
 		IsBot:       &isBot,
 		Identifiers: []string{jidStr},
 		Name:        &displayName,
+		Avatar:      avatar,
 		ExtraUpdates: func(ctx context.Context, g *bridgev2.Ghost) (changed bool) {
 			meta, _ := g.Metadata.(*GhostMetadata)
 			if meta != nil {
 				// Update profile fetched timestamp
 				meta.ProfileFetchedAt.Time = time.Now()
+				if fetchedAvatarHash != "" && meta.AvatarHash != fetchedAvatarHash {
+					meta.AvatarHash = fetchedAvatarHash
+				}
 				return true
 			}
 			return false

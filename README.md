@@ -302,6 +302,7 @@ Canonical list of pending work; completed items have been removed. Order is appr
 4. **At-mentions (2.4)** — Map Matrix mentions (`@user:server`) to XMPP (e.g. JID or MUC nick) and XMPP mentions to Matrix. Deprioritized; deferred.
 5. **OMEMO (4.1)** — XEP-0384; decrypt/encrypt on XMPP side in message and inbound paths; key storage. DM first; MUC later if desired.
 6. **Roster isolation (2.1b, multi-user hardening)** — Ensure roster commands (`roster-add`, `roster-sync`) and roster-derived data (ghost display names, DM room names) are strictly isolated per bridged Jabber ID and per Matrix user. When multiple accounts are bridged, roster data from one login must not affect another. Fix mixup behavior where roster or display names from one account leak or override another.
+7. **SRV lookup / per-account server override** — `dialXMPP` only does an A/AAAA lookup on the JID's domain and connects on port 5222; it does not resolve `_xmpp-client._tcp.<domain>` SRV records. Accounts on servers where the client-connect host differs from the JID domain (a common setup) can't connect. Add SRV lookup and wire up the reserved `JabberLoginMeta.Server`/`Port` override fields. Revisit if more connection-failure issues are reported (context: closed GitHub issue #1).
 
 ## Contributing
 

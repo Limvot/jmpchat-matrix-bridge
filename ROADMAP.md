@@ -110,6 +110,10 @@ Technical context for future work. See [README](README.md#to-do-unimplemented-wo
 
 When one Matrix user is logged into multiple Jabber accounts, DMs with the same remote JID exist as separate portals. Roster names and ghost/room display can differ per login. Observed: mixup behavior when multiple accounts are bridged—roster commands or roster-derived data may not be strictly isolated per login and per Matrix user. See **2.1b Roster isolation per login and per Matrix user** in Phase 2.
 
+### Server connection: A/AAAA only, no SRV lookup
+
+`dialXMPP` derives the connection host from the JID's domain via a plain A/AAAA lookup on port 5222; it does not resolve `_xmpp-client._tcp.<domain>` SRV records, and the `JabberLoginMeta.Server`/`Port` override fields are reserved but not wired in. This means accounts on servers where the client-connect host differs from the JID domain (e.g. `user@example.com` connecting to `xmpp.example.com`) cannot connect. The bridge is otherwise fully server-independent (any account whose domain resolves directly works). See README to-do item 7 (context: closed GitHub issue #1).
+
 ---
 
 ## Future phases (documented for later)

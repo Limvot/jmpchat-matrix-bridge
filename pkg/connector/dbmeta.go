@@ -16,6 +16,9 @@ type PortalMetadata struct {
 // GhostMetadata stores ghost user metadata for profile refresh tracking.
 type GhostMetadata struct {
 	ProfileFetchedAt jsontime.UnixMilli `json:"profile_fetched_at"`
+	// AvatarHash is the SHA-1 hex (XEP-0153 photo hash) of the last vCard photo applied to
+	// this ghost. Used to skip redundant vCard fetches and to detect changes from presence.
+	AvatarHash string `json:"avatar_hash,omitempty"`
 }
 
 // MessageMetadata stores message-specific metadata for Jabber messages.

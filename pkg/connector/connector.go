@@ -23,10 +23,8 @@ import (
 
 // JabberConfig is the connector-specific config under network.jabber (framework nests it by network ID).
 type JabberConfig struct {
-	DefaultServer        string `yaml:"default_server"`
-	DefaultPort          int    `yaml:"default_port"`
-	ResourcePrefix       string `yaml:"resource_prefix"`
-	Cheogram       bool `yaml:"cheogram"` // resolve phone numbers and short codes to Cheogram JIDs (SMS/MMS)
+	ResourcePrefix string `yaml:"resource_prefix"`
+	Cheogram       bool   `yaml:"cheogram"` // resolve phone numbers and short codes to Cheogram JIDs (SMS/MMS)
 }
 
 // BackfillConfig holds backfill settings from config.backfill, used by MAM backfill-on-view and full backfill on login / sync-roster.
@@ -190,8 +188,7 @@ func (c *JabberConnector) GetCapabilities() *bridgev2.NetworkGeneralCapabilities
 // otherwise the framework writes the example value (false) and overwrites the user's true on restart.
 func (c *JabberConnector) GetConfig() (example string, data any, upgrader configupgrade.Upgrader) {
 	example = `# Connector config (under network by the framework).
-# default_server: "jabber.org"
-# default_port: 5222
+# The XMPP server is derived from the JID's domain at login; there is no server setting here.
 # resource_prefix: "mautrix"
 # Resolve phone numbers and short codes to Cheogram JIDs (SMS/MMS). Set to true to enable.
 cheogram: false

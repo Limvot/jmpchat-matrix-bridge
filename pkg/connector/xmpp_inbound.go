@@ -674,8 +674,12 @@ func (x *xmppClient) handlePresence(t xmlstream.TokenReadEncoder, start *xml.Sta
 	ourNick := fromJID.Resourcepart()
 
 	// Consume the rest of the presence stanza and detect error/conflict (409).
+	// Also capture the XEP-0153 vcard-temp:x:update photo hash (avatar change signal), and
+	// note whether this is MUC presence so we don't treat occupant presence as a 1:1 contact.
 	depth := 1
 	var hasConflict bool
+	var sawMUCUser, sawVCardUpdate, inVCardUpdate, inPhoto bool
+	var photoHash strings.Builder
 	for depth > 0 {
 		tok, err := t.Token()
 		if err != nil {
@@ -695,9 +699,35 @@ func (x *xmppClient) handlePresence(t xmlstream.TokenReadEncoder, start *xml.Sta
 			if v.Name.Local == "conflict" {
 				hasConflict = true
 			}
+			if v.Name.Space == mucUserNS {
+				sawMUCUser = true
+			}
+			if v.Name.Local == "x" && v.Name.Space == vcardUpdateNS {
+				sawVCardUpdate = true
+				inVCardUpdate = true
+			}
+			if inVCardUpdate && v.Name.Local == "photo" {
+				inPhoto = true
+			}
+		case xml.CharData:
+			if inPhoto {
+				photoHash.Write(v)
+			}
 		case xml.EndElement:
 			depth--
+			if v.Name.Local == "photo" {
+				inPhoto = false
+			}
+			if v.Name.Local == "x" && v.Name.Space == vcardUpdateNS {
+				inVCardUpdate = false
+			}
 		}
+	}
+
+	// XEP-0153: a 1:1 contact advertised (or cleared) their avatar hash. Refresh the ghost avatar
+	// out-of-band. Skip MUC presence (occupant ghosts are keyed by full JID, not bare).
+	if sawVCardUpdate && typeVal != "error" && !sawMUCUser {
+		go x.refreshContactAvatarFromPresence(fromJID.Bare().String(), strings.TrimSpace(photoHash.String()))
 	}
 
 	if typeVal == "error" {
