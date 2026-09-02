@@ -97,39 +97,47 @@ func (x *xmppClient) fetchContactAvatar(ctx context.Context, bareJIDStr string) 
 }
 
 // contactAvatar builds a *bridgev2.Avatar for a 1:1 contact, fetching the vCard photo only when
-// the cached copy is stale (never fetched, or older than avatarRefreshInterval). When not stale it
-// reuses the cached hash so the framework skips both the network round-trip and any reupload.
-// Returns (nil, "") when there is no avatar to apply (no photo, fetch error, or MUC occupant).
-// fetchedHash is non-empty only when a fresh fetch obtained a photo, so ExtraUpdates can persist it.
-func (x *xmppClient) contactAvatar(ctx context.Context, bareJID string, meta *GhostMetadata) (avatar *bridgev2.Avatar, fetchedHash string) {
-	stale := meta == nil || meta.ProfileFetchedAt.Time.IsZero() || time.Since(meta.ProfileFetchedAt.Time) > avatarRefreshInterval
-	if stale {
-		data, _, hash, err := x.fetchContactAvatar(ctx, bareJID)
-		if err != nil {
-			x.log.Debug().Err(err).Str("jid", bareJID).Msg("Failed to fetch contact avatar (vCard)")
-			return nil, ""
+// the last fetch attempt is stale (never attempted, or older than avatarRefreshInterval). Gating on
+// AvatarFetchedAt — not ProfileFetchedAt — ensures pre-existing ghosts get an initial fetch even
+// though they already have a recent ProfileFetchedAt. When not stale it reuses the cached hash so
+// the framework skips both the network round-trip and any reupload.
+//
+// Returns avatar=nil when there is nothing to apply (no photo, fetch error, or cache miss).
+// fetchedHash is non-empty only when a fresh fetch obtained a photo. markFetched is true when a
+// fetch completed with a definitive answer (photo or confirmed no-photo) so the caller can stamp
+// AvatarFetchedAt; it stays false on transient errors so the next sync retries.
+func (x *xmppClient) contactAvatar(ctx context.Context, bareJID string, meta *GhostMetadata) (avatar *bridgev2.Avatar, fetchedHash string, markFetched bool) {
+	stale := meta == nil || meta.AvatarFetchedAt.Time.IsZero() || time.Since(meta.AvatarFetchedAt.Time) > avatarRefreshInterval
+	if !stale {
+		if meta.AvatarHash == "" {
+			return nil, "", false
 		}
-		if hash == "" {
-			return nil, "" // no photo; leave any existing avatar untouched
-		}
-		avatarData := data
+		// Keep the known avatar without a network round-trip. Get is a lazy fallback the framework
+		// only calls if the ghost doesn't already have this AvatarID.
+		hash := meta.AvatarHash
 		return &bridgev2.Avatar{
-			ID:  avatarIDFromHash(hash),
-			Get: func(ctx context.Context) ([]byte, error) { return avatarData, nil },
-		}, hash
+			ID: avatarIDFromHash(hash),
+			Get: func(ctx context.Context) ([]byte, error) {
+				d, _, _, err := x.fetchContactAvatar(ctx, bareJID)
+				return d, err
+			},
+		}, "", false
 	}
-	if meta.AvatarHash == "" {
-		return nil, ""
+	data, _, hash, err := x.fetchContactAvatar(ctx, bareJID)
+	if err != nil {
+		x.log.Debug().Err(err).Str("jid", bareJID).Msg("Failed to fetch contact avatar (vCard)")
+		return nil, "", false // transient: don't stamp, retry next sync
 	}
-	// Not stale: keep the known avatar without a network round-trip. Get is a lazy fallback the
-	// framework only calls if the ghost doesn't already have this AvatarID.
+	if hash == "" {
+		x.log.Debug().Str("jid", bareJID).Msg("Contact has no vCard avatar")
+		return nil, "", true // fetched successfully, no photo present
+	}
+	avatarData := data
+	x.log.Debug().Str("jid", bareJID).Str("photo_hash", hash).Int("bytes", len(data)).Msg("Fetched contact avatar (vCard)")
 	return &bridgev2.Avatar{
-		ID: avatarIDFromHash(meta.AvatarHash),
-		Get: func(ctx context.Context) ([]byte, error) {
-			d, _, _, err := x.fetchContactAvatar(ctx, bareJID)
-			return d, err
-		},
-	}, ""
+		ID:  avatarIDFromHash(hash),
+		Get: func(ctx context.Context) ([]byte, error) { return avatarData, nil },
+	}, hash, true
 }
 
 // refreshContactAvatarFromPresence is triggered by an XEP-0153 vcard-temp:x:update presence hash.
@@ -161,8 +169,11 @@ func (x *xmppClient) refreshContactAvatarFromPresence(bareJID, photoHash string)
 			if prev != nil {
 				changed = prev(ctx, g)
 			}
-			if m, ok := g.Metadata.(*GhostMetadata); ok && m != nil && m.AvatarHash != "" {
-				m.AvatarHash = ""
+			if m, ok := g.Metadata.(*GhostMetadata); ok && m != nil {
+				m.AvatarFetchedAt.Time = time.Now()
+				if m.AvatarHash != "" {
+					m.AvatarHash = ""
+				}
 				changed = true
 			}
 			return changed
@@ -172,9 +183,9 @@ func (x *xmppClient) refreshContactAvatarFromPresence(bareJID, photoHash string)
 		return
 	}
 
-	// Hash changed: clear staleness so GetUserInfo re-fetches the new vCard photo.
+	// Hash changed: clear avatar staleness so GetUserInfo re-fetches the new vCard photo.
 	if meta, ok := ghost.Metadata.(*GhostMetadata); ok && meta != nil {
-		meta.ProfileFetchedAt.Time = time.Time{}
+		meta.AvatarFetchedAt.Time = time.Time{}
 	}
 	info, ierr := x.GetUserInfo(ctx, ghost)
 	if ierr != nil || info == nil {

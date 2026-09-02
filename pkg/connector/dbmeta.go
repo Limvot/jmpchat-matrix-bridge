@@ -19,6 +19,10 @@ type GhostMetadata struct {
 	// AvatarHash is the SHA-1 hex (XEP-0153 photo hash) of the last vCard photo applied to
 	// this ghost. Used to skip redundant vCard fetches and to detect changes from presence.
 	AvatarHash string `json:"avatar_hash,omitempty"`
+	// AvatarFetchedAt is when we last attempted a vCard avatar fetch for this ghost. Kept
+	// separate from ProfileFetchedAt so pre-existing ghosts (which already have a recent
+	// ProfileFetchedAt but no avatar) still get an initial fetch on the next sync.
+	AvatarFetchedAt jsontime.UnixMilli `json:"avatar_fetched_at,omitempty"`
 }
 
 // MessageMetadata stores message-specific metadata for Jabber messages.

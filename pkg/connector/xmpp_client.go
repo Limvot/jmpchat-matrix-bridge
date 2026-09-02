@@ -1029,9 +1029,10 @@ func (x *xmppClient) GetUserInfo(ctx context.Context, ghost *bridgev2.Ghost) (*b
 	// Inbound avatar (XEP-0054 vcard-temp) for 1:1 contacts only, not MUC occupants.
 	var avatar *bridgev2.Avatar
 	var fetchedAvatarHash string
+	var avatarMarkFetched bool
 	if !isMUCOccupant {
 		meta, _ := ghost.Metadata.(*GhostMetadata)
-		avatar, fetchedAvatarHash = x.contactAvatar(ctx, jidStr, meta)
+		avatar, fetchedAvatarHash, avatarMarkFetched = x.contactAvatar(ctx, jidStr, meta)
 	}
 	// Aligned with Signal bridge: include ExtraUpdates for metadata tracking
 	return &bridgev2.UserInfo{
@@ -1044,6 +1045,9 @@ func (x *xmppClient) GetUserInfo(ctx context.Context, ghost *bridgev2.Ghost) (*b
 			if meta != nil {
 				// Update profile fetched timestamp
 				meta.ProfileFetchedAt.Time = time.Now()
+				if avatarMarkFetched {
+					meta.AvatarFetchedAt.Time = time.Now()
+				}
 				if fetchedAvatarHash != "" && meta.AvatarHash != fetchedAvatarHash {
 					meta.AvatarHash = fetchedAvatarHash
 				}
