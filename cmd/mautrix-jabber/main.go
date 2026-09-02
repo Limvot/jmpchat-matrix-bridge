@@ -1,13 +1,14 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
 	"github.com/mautrix/jabber/pkg/connector"
 	"maunium.net/go/mautrix/bridgev2/commands"
-	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/bridgev2/matrix/mxmain"
+	"maunium.net/go/mautrix/bridgev2/networkid"
 )
 
 // Filled at build time with -X linker flags (e.g. -X main.Tag=... -X main.Commit=... -X main.BuildTime=...)
@@ -53,46 +54,46 @@ func main() {
 			prefix = "!jabber"
 		}
 		br.Bridge.Commands.(*commands.Processor).AddHandler(&commands.FullHandler{
-			Func:   cmdSyncRoster,
-			Name:   "sync-roster",
+			Func:          cmdSyncRoster,
+			Name:          "sync-roster",
 			RequiresLogin: true,
-			Help:   commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Re-fetch roster from server and update Matrix display/room names; when backfill is enabled, also runs full MAM backfill for roster DMs. Usage: `%s sync-roster`", prefix)},
+			Help:          commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Re-fetch roster from server and update Matrix display/room names; when backfill is enabled, also runs full MAM backfill for roster DMs. Usage: `%s sync-roster`", prefix)},
 		})
 		br.Bridge.Commands.(*commands.Processor).AddHandler(&commands.FullHandler{
-			Func:   cmdAddToRoster,
-			Name:   "add-to-roster",
+			Func:          cmdAddToRoster,
+			Name:          "add-to-roster",
 			RequiresLogin: true,
-			Help:   commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Add or rename a contact in your Jabber roster. Usage: `%s add-to-roster <jid> <name>`", prefix)},
+			Help:          commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Add or rename a contact in your Jabber roster. Usage: `%s add-to-roster <jid> <name>`", prefix)},
 		})
 		br.Bridge.Commands.(*commands.Processor).AddHandler(&commands.FullHandler{
-			Func:   cmdSearchRoster,
-			Name:   "search-roster",
+			Func:          cmdSearchRoster,
+			Name:          "search-roster",
 			RequiresLogin: true,
-			Help:   commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Search your Jabber roster for contacts matching a JID or name. Usage: `%s search-roster <query>`", prefix)},
+			Help:          commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Search your Jabber roster for contacts matching a JID or name. Usage: `%s search-roster <query>`", prefix)},
 		})
 		br.Bridge.Commands.(*commands.Processor).AddHandler(&commands.FullHandler{
-			Func:   cmdMUCJoin,
-			Name:   "join",
+			Func:          cmdMUCJoin,
+			Name:          "join",
 			RequiresLogin: true,
-			Help:   commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Join a multi-user chat (MUC) room. Usage: `%s join <room-jid>` (e.g. room@conference.example.com)", prefix)},
+			Help:          commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Join a multi-user chat (MUC) room. Usage: `%s join <room-jid>` (e.g. room@conference.example.com)", prefix)},
 		})
 		br.Bridge.Commands.(*commands.Processor).AddHandler(&commands.FullHandler{
-			Func:   cmdMUCLeave,
-			Name:   "leave",
+			Func:          cmdMUCLeave,
+			Name:          "leave",
 			RequiresLogin: true,
-			Help:   commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Leave a multi-user chat (MUC) room. Usage: `%s leave <room-jid>`", prefix)},
+			Help:          commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Leave a multi-user chat (MUC) room. Usage: `%s leave <room-jid>`", prefix)},
 		})
 		br.Bridge.Commands.(*commands.Processor).AddHandler(&commands.FullHandler{
-			Func:   cmdMUCNick,
-			Name:   "muc-nick",
+			Func:          cmdMUCNick,
+			Name:          "muc-nick",
 			RequiresLogin: true,
-			Help:   commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Set preferred MUC nickname for a room. Usage: `%s muc-nick <room-jid> <nick>`", prefix)},
+			Help:          commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Set preferred MUC nickname for a room. Usage: `%s muc-nick <room-jid> <nick>`", prefix)},
 		})
 		br.Bridge.Commands.(*commands.Processor).AddHandler(&commands.FullHandler{
-			Func:   cmdMUCNickDefault,
-			Name:   "muc-nick-default",
+			Func:          cmdMUCNickDefault,
+			Name:          "muc-nick-default",
 			RequiresLogin: true,
-			Help:   commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Set default MUC nickname for all rooms. Usage: `%s muc-nick-default <nick>`", prefix)},
+			Help:          commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Set default MUC nickname for all rooms. Usage: `%s muc-nick-default <nick>`", prefix)},
 		})
 	}
 	br.InitVersion(Tag, Commit, BuildTime)
@@ -110,15 +111,25 @@ func cmdSyncRoster(ce *commands.Event) {
 		ce.Reply("Not connected to Jabber. Reconnect (or wait for auto-reconnect) and try again.")
 		return
 	}
-	rs.SyncRoster(ce.Ctx)
-	// When backfill is enabled, run full MAM backfill for all roster DMs so portals get history
-	// without needing to log out and back in (or wait for full_backfill_on_login on next connect).
-	if bf, ok := login.Client.(connector.FullBackfillRunner); ok {
-		go bf.RunFullBackfill(ce.Ctx)
+	// Roster sync now fetches a vCard avatar per contact, so it can take a while. Reply
+	// immediately and run the sync (and optional full backfill) in the background so the
+	// "started" message isn't held until the whole sync completes. Detach from ce.Ctx so the
+	// work isn't cancelled when the command handler returns.
+	bf, hasBackfill := login.Client.(connector.FullBackfillRunner)
+	if hasBackfill {
 		ce.Reply("Roster sync started. Display names and room names will update shortly. Full backfill (if enabled) is running in the background.")
-		return
+	} else {
+		ce.Reply("Roster sync started. Display names and room names will update shortly.")
 	}
-	ce.Reply("Roster sync started. Display names and room names will update shortly.")
+	ctx := context.WithoutCancel(ce.Ctx)
+	go func() {
+		rs.SyncRoster(ctx)
+		if hasBackfill {
+			// Full MAM backfill for all roster DMs so portals get history without needing to log
+			// out and back in (or wait for full_backfill_on_login on next connect).
+			bf.RunFullBackfill(ctx)
+		}
+	}()
 }
 
 func cmdAddToRoster(ce *commands.Event) {
