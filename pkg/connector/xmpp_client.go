@@ -82,7 +82,17 @@ type xmppClient struct {
 	// so accept/reject/finish (which only carry the sid) can be mapped back to the caller's portal.
 	callSessions   map[string]*callSession
 	callSessionsMu sync.Mutex
+	// avatarRefreshing dedups concurrent background vCard avatar fetches per bare JID so a
+	// burst of GetUserInfo/presence triggers only fetches once at a time per contact.
+	// avatarFetchSem bounds how many of those background fetches run at once (thundering-herd
+	// guard for large-roster syncs). Both are lazily initialized in queueAvatarRefresh.
+	avatarRefreshing   map[string]bool
+	avatarFetchSem     chan struct{}
+	avatarRefreshingMu sync.Mutex
 }
+
+// maxConcurrentAvatarFetches caps simultaneous background vCard avatar fetches.
+const maxConcurrentAvatarFetches = 4
 
 const (
 	mucFeatureNS       = "http://jabber.org/protocol/muc"
@@ -1026,13 +1036,12 @@ func (x *xmppClient) GetUserInfo(ctx context.Context, ghost *bridgev2.Ghost) (*b
 	}
 	displayName = x.withAppServiceIDSuffix(displayName)
 	isBot := false
-	// Inbound avatar (XEP-0054 vcard-temp) for 1:1 contacts only, not MUC occupants.
+	// Inbound avatar (XEP-0054 vcard-temp) for 1:1 contacts only, not MUC occupants. This never
+	// blocks: it returns the cached avatar (if any) and refreshes stale avatars in the background.
 	var avatar *bridgev2.Avatar
-	var fetchedAvatarHash string
-	var avatarMarkFetched bool
 	if !isMUCOccupant {
 		meta, _ := ghost.Metadata.(*GhostMetadata)
-		avatar, fetchedAvatarHash, avatarMarkFetched = x.contactAvatar(ctx, jidStr, meta)
+		avatar = x.cachedContactAvatar(jidStr, meta)
 	}
 	// Aligned with Signal bridge: include ExtraUpdates for metadata tracking
 	return &bridgev2.UserInfo{
@@ -1045,12 +1054,6 @@ func (x *xmppClient) GetUserInfo(ctx context.Context, ghost *bridgev2.Ghost) (*b
 			if meta != nil {
 				// Update profile fetched timestamp
 				meta.ProfileFetchedAt.Time = time.Now()
-				if avatarMarkFetched {
-					meta.AvatarFetchedAt.Time = time.Now()
-				}
-				if fetchedAvatarHash != "" && meta.AvatarHash != fetchedAvatarHash {
-					meta.AvatarHash = fetchedAvatarHash
-				}
 				return true
 			}
 			return false
