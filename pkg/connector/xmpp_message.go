@@ -8,10 +8,14 @@ import (
 	"fmt"
 
 	"github.com/rs/zerolog"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"mellium.im/xmpp"
 	"mellium.im/xmpp/jid"
 	"mellium.im/xmpp/stanza"
 	"mellium.im/xmlstream"
+
+	"github.com/mautrix/jabber/pkg/telemetry"
 )
 
 const (
@@ -144,6 +148,17 @@ func generateXMPPMessageID() (string, error) {
 // to indicate this is a reply to a previous message (XEP-0461).
 // Returns the XMPP message ID that was assigned to the message (for storage in MessageMetadata).
 func sendXMPPMessageWithOOB(ctx context.Context, sess *xmpp.Session, to jid.JID, body string, oobURL string, replyID string, replyToJID string, msgType stanza.MessageType) (string, error) {
+	ctx, span := telemetry.StartChild(ctx, "xmpp.send_message", trace.WithSpanKind(trace.SpanKindProducer))
+	defer span.End()
+	if span.IsRecording() {
+		span.SetAttributes(
+			attribute.String("xmpp.peer.jid", to.String()),
+			attribute.String("xmpp.message.type", string(msgType)),
+			attribute.Bool("xmpp.has_oob", oobURL != ""),
+			attribute.Bool("xmpp.has_reply", replyID != ""),
+			attribute.Bool("xmpp.reaction", false),
+		)
+	}
 	log := zerolog.Ctx(ctx)
 	log.Debug().
 		Str("input_body", body).
@@ -175,7 +190,11 @@ func sendXMPPMessageWithOOB(ctx context.Context, sess *xmpp.Session, to jid.JID,
 	// Generate XMPP message ID for this message (required for XEP-0461 replies)
 	xmppMsgID, err := generateXMPPMessageID()
 	if err != nil {
+		telemetry.Fail(span, err)
 		return "", fmt.Errorf("failed to generate XMPP message ID: %w", err)
+	}
+	if span.IsRecording() {
+		span.SetAttributes(attribute.String("xmpp.stanza.id", xmppMsgID))
 	}
 	log.Debug().Str("xmpp_msg_id", xmppMsgID).Msg("DEBUG: Generated XMPP message ID")
 	
@@ -212,6 +231,7 @@ func sendXMPPMessageWithOOB(ctx context.Context, sess *xmpp.Session, to jid.JID,
 	}
 	err = sess.Send(ctx, msg.Wrap(payload))
 	if err != nil {
+		telemetry.Fail(span, err)
 		log.Debug().Err(err).Msg("DEBUG: sendXMPPMessageWithOOB send failed")
 		return "", err
 	}
@@ -234,6 +254,15 @@ func sendXMPPReaction(ctx context.Context, sess *xmpp.Session, to jid.JID, targe
 // msgType should be groupchat for MUC rooms so the server accepts the message.
 // Returns the XMPP message ID that was assigned to the reaction message.
 func sendXMPPReactions(ctx context.Context, sess *xmpp.Session, to jid.JID, targetMessageID string, emojis []string, msgType stanza.MessageType) (string, error) {
+	ctx, span := telemetry.StartChild(ctx, "xmpp.send_message", trace.WithSpanKind(trace.SpanKindProducer))
+	defer span.End()
+	if span.IsRecording() {
+		span.SetAttributes(
+			attribute.String("xmpp.peer.jid", to.String()),
+			attribute.String("xmpp.message.type", string(msgType)),
+			attribute.Bool("xmpp.reaction", true),
+		)
+	}
 	log := zerolog.Ctx(ctx)
 	log.Debug().
 		Str("target_message_id", targetMessageID).
@@ -245,7 +274,11 @@ func sendXMPPReactions(ctx context.Context, sess *xmpp.Session, to jid.JID, targ
 	// Generate XMPP message ID for this reaction message
 	xmppMsgID, err := generateXMPPMessageID()
 	if err != nil {
+		telemetry.Fail(span, err)
 		return "", fmt.Errorf("failed to generate XMPP message ID: %w", err)
+	}
+	if span.IsRecording() {
+		span.SetAttributes(attribute.String("xmpp.stanza.id", xmppMsgID))
 	}
 	log.Debug().Str("xmpp_msg_id", xmppMsgID).Msg("DEBUG: Generated XMPP message ID for reaction")
 	if msgType == "" {
@@ -265,6 +298,7 @@ func sendXMPPReactions(ctx context.Context, sess *xmpp.Session, to jid.JID, targ
 	
 	err = sess.Send(ctx, msg.Wrap(payload))
 	if err != nil {
+		telemetry.Fail(span, err)
 		log.Debug().Err(err).Msg("DEBUG: sendXMPPReactions send failed")
 		return "", err
 	}

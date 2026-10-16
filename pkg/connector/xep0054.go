@@ -15,11 +15,15 @@ import (
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/networkid"
 	"mellium.im/xmlstream"
 	"mellium.im/xmpp/jid"
 	"mellium.im/xmpp/stanza"
+
+	"github.com/mautrix/jabber/pkg/telemetry"
 )
 
 const (
@@ -78,7 +82,16 @@ func (x *xmppClient) fetchContactAvatar(ctx context.Context, bareJIDStr string) 
 	payload := xmlstream.Wrap(nil, xml.StartElement{Name: xml.Name{Space: vcardTempNS, Local: "vCard"}})
 	iq := stanza.IQ{Type: stanza.GetIQ, To: to, ID: newStanzaID()}
 	var res vcardResult
-	if err := sess.UnmarshalIQElement(fetchCtx, payload, iq, &res); err != nil {
+	ctx, span := telemetry.StartChild(fetchCtx, "xmpp.iq.vcard_get", trace.WithSpanKind(trace.SpanKindClient))
+	defer span.End()
+	if span.IsRecording() {
+		span.SetAttributes(
+			attribute.String("xmpp.iq.namespace", vcardTempNS),
+			attribute.String("xmpp.peer.jid", to.String()),
+		)
+	}
+	if err := sess.UnmarshalIQElement(ctx, payload, iq, &res); err != nil {
+		telemetry.Fail(span, err)
 		return nil, "", "", fmt.Errorf("vcard fetch %s: %w", to, err)
 	}
 	binval := stripWhitespace(res.Photo.BinVal)
@@ -154,9 +167,14 @@ func (x *xmppClient) queueAvatarRefresh(bareJID string) {
 // or leaves (unchanged) the ghost avatar, then stamps AvatarFetchedAt/AvatarHash. Runs on its own
 // goroutine (via queueAvatarRefresh) so it never blocks GetUserInfo or the presence handler.
 func (x *xmppClient) doAvatarRefresh(bareJID string) {
-	ctx := context.Background()
+	ctx, span := telemetry.Start(context.Background(), "xmpp.avatar.refresh")
+	defer span.End()
+	if span.IsRecording() {
+		span.SetAttributes(attribute.String("xmpp.peer.jid", bareJID))
+	}
 	data, _, hash, err := x.fetchContactAvatar(ctx, bareJID)
 	if err != nil {
+		telemetry.Fail(span, err)
 		x.log.Debug().Err(err).Str("jid", bareJID).Msg("Failed to fetch contact avatar (vCard)")
 		return // transient: don't stamp, so the next trigger retries
 	}
@@ -187,6 +205,9 @@ func (x *xmppClient) doAvatarRefresh(bareJID string) {
 		// unchanged; only stamp AvatarFetchedAt below
 	}
 
+	if span.IsRecording() {
+		span.SetAttributes(attribute.Bool("xmpp.avatar.changed", avatar != nil))
+	}
 	info := &bridgev2.UserInfo{
 		Avatar: avatar, // nil = no change; UpdateInfo leaves name/other fields untouched
 		ExtraUpdates: func(ctx context.Context, g *bridgev2.Ghost) (changed bool) {
