@@ -563,9 +563,18 @@ func (x *xmppClient) serveMessages() {
 		mux.IQ(stanza.ResultIQ, mamFinPayload, mamFinHandler{x: x}),
 	)
 	wrapper := &messageLoggingHandler{inner: m, log: &x.log, x: x}
-	if err := sess.Serve(wrapper); err != nil && x.login != nil {
-		x.log.Debug().Err(err).Msg("XMPP Serve ended")
+	serveStart := time.Now()
+	serveErr := sess.Serve(wrapper)
+	if serveErr != nil && x.login != nil {
+		x.log.Debug().Err(serveErr).Msg("XMPP Serve ended")
 	}
+	// Post-hoc session span (never held open while Serve runs).
+	_, sessSpan := telemetry.Start(context.Background(), "xmpp.session", trace.WithTimestamp(serveStart))
+	if sessSpan.IsRecording() {
+		sessSpan.SetAttributes(attribute.String("xmpp.login.jid", string(x.loginID)))
+	}
+	telemetry.Fail(sessSpan, serveErr)
+	sessSpan.End()
 	// Clear the session so ReconnectLoop knows to reconnect after disconnects.
 	x.mu.Lock()
 	// Only tear down state if x.session is still the session this loop served; after Disconnect
@@ -1247,7 +1256,8 @@ func (m *jabberRemoteMessage) scheduleStanzaIDMetadataUpdate(ctx context.Context
 }
 
 func (m *jabberRemoteMessage) ConvertMessage(ctx context.Context, portal *bridgev2.Portal, intent bridgev2.MatrixAPI) (*bridgev2.ConvertedMessage, error) {
-	ctx, span := telemetry.Start(ctx, "bridge.convert_message")
+	// Child-only: normally parented by bridge.handle_remote_event; never start a root trace here.
+	ctx, span := telemetry.StartChild(ctx, "bridge.convert_message")
 	defer span.End()
 	if span.IsRecording() {
 		span.SetAttributes(attribute.Bool("xmpp.has_oob", m.oobURL != ""))

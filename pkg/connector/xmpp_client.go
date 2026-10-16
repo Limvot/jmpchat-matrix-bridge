@@ -1685,9 +1685,10 @@ func (x *xmppClient) handleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 			// Own root linked to this handler's span; the goroutine must not hold the handler's span.
 			origin := ctx
 			go func() {
-				bctx, bspan := telemetry.StartLinkedRoot(x.log.WithContext(context.Background()), "mam.backfill_on_send", origin)
+				bctx, bspan := telemetry.StartLinkedRoot(x.log.WithContext(context.Background()), "mam.backfill_on_view", origin,
+					trace.WithAttributes(attribute.String("mam.trigger", "send")))
 				defer bspan.End()
-				x.mamBackfillOnView(bctx, toJIDStr)
+				x.doMAMBackfillOnView(bctx, bspan, toJIDStr, x.mamBackfillMaxMessages())
 			}()
 		}
 	}

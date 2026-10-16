@@ -658,7 +658,8 @@ func (x *xmppClient) maybeTriggerBackfillOnNewPortal(ctx context.Context, portal
 		if err != nil || portal == nil || portal.MXID != "" || x.portalIsMUC(lctx, portal) {
 			return
 		}
-		bctx, span := telemetry.StartLinkedRoot(x.log.WithContext(context.Background()), "mam.backfill_on_view", origin)
+		bctx, span := telemetry.StartLinkedRoot(x.log.WithContext(context.Background()), "mam.backfill_on_view", origin,
+			trace.WithAttributes(attribute.String("mam.trigger", "new_portal")))
 		defer span.End()
 		x.doMAMBackfillOnView(bctx, span, string(portalKey.ID), x.mamBackfillMaxMessages())
 	}()
