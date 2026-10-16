@@ -52,6 +52,10 @@ All bridge logic lives in `pkg/connector/`. The bridgev2 framework handles Matri
 
 - **`pkg/connector/cheogram.go`** — Cheogram/JMP.chat integration. Phone number normalization (+1 default), short code handling, group MMS JID construction (comma-separated sorted numbers), sender extraction from body prefix.
 
+### Telemetry
+
+- **`pkg/telemetry/`** — Optional OpenTelemetry tracing (`telemetry.go`: `Init`/`Shutdown`/env resolution; `span.go`: span and log-correlation helpers; `http.go`: HTTP transport wrapping; `env.go`: injectable getenv). Off unless an OTLP endpoint env var is set; when off nothing is installed and helpers are no-ops that return the input ctx unchanged. `Init` never fails the bridge (problems log one warning and leave tracing disabled). Conventions: goroutines never receive a live span (start their own span, or a linked root); leaf operations use child-only spans so uninstrumented paths do not create orphan roots; never record message bodies, captions, emoji, filenames or URLs (full JIDs are allowed); never block or do IQ round trips on the mellium Serve goroutine.
+
 ### Data & Metadata
 
 - **`pkg/connector/dbmeta.go`** — Database metadata types: `PortalMetadata` (last sync, MUC nick), `GhostMetadata` (profile fetch time), `MessageMetadata` (XMPP stanza ID, backfill source).
@@ -129,6 +133,8 @@ See `README.md` for full Docker usage with registration generation and volume mo
 - `cheogram` — Enable Cheogram phone number resolution (also via `MAUTRIX_JABBER_CHEOGRAM=1` env var)
 
 The bridge is not bound to any single XMPP server: the connection host is derived from the JID's domain at login (`dialXMPP` does A/AAAA lookup on the domain, port 5222). There is no server/port config setting. Note: `dialXMPP` does not yet do SRV lookup, so servers whose client-connect host differs from the JID domain aren't supported yet — see the SRV/override to-do in README.md.
+
+Tracing is configured only through environment variables (no config-file keys), see `pkg/telemetry` and the README "Tracing (OpenTelemetry)" section. It is enabled iff `OTEL_EXPORTER_OTLP_ENDPOINT` or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` is set. Protocol comes from `OTEL_EXPORTER_OTLP_(TRACES_)PROTOCOL` and defaults to `http/protobuf` per the OTel spec (the code does not infer it from the port; always set it explicitly: `grpc` for :4317, `http/protobuf` for :4318). `OTEL_SDK_DISABLED=true` or `OTEL_TRACES_EXPORTER=none` disables it. `DD_SERVICE`/`DD_VERSION`/`DD_ENV` are fallbacks for resource attributes; `OTEL_SERVICE_NAME`/`OTEL_RESOURCE_ATTRIBUTES` override them.
 
 Other relevant framework config sections: `bridge.permissions`, `matrix.delivery_receipts`, `backfill.enabled` / `backfill.max_initial_messages`, `encryption.*`.
 

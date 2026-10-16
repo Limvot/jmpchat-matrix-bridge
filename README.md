@@ -261,6 +261,113 @@ docker run -d --name mautrix-jabber \
 
 Use `appservice.hostname: 0.0.0.0` in config so the bridge listens on all interfaces. For SQLite, set `database.uri` to `file:/app/data/mautrix-jabber.db?_txlock=immediate` and mount a volume at `/app/data`. Postgres is also supported.
 
+## Tracing (OpenTelemetry)
+
+Tracing is optional and **off by default**. It is enabled purely by environment variables; there is no config-file setting. When no endpoint is set, nothing is installed (no exporter, goroutines or sockets), so there is no overhead. Export problems are logged as rate-limited warnings and never stop or block the bridge.
+
+**Enabling.** Tracing turns on only when `OTEL_EXPORTER_OTLP_ENDPOINT` or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` is non-empty. Always include the `http://` or `https://` scheme. These standard variables are read:
+
+| Variable | Notes |
+|----------|-------|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` / `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | Required to enable. For `http/protobuf`, the base variable gets `/v1/traces` appended; the `TRACES` variant is used as-is. |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` / `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL` | `grpc` or `http/protobuf`. **Set this explicitly.** Per the OTel spec the default is `http/protobuf`, and the bridge does not guess from the port. Any other value (e.g. `http/json`) logs a warning and disables tracing. |
+| `OTEL_EXPORTER_OTLP_HEADERS`, `_TIMEOUT`, `_COMPRESSION`, `_CERTIFICATE`, `_INSECURE`, ... | Handled by the OTLP exporters themselves (also in `TRACES_` variants). |
+| `OTEL_SDK_DISABLED=true` | Disable tracing without removing the rest of the config. An unparseable value logs a warning and is treated as false. |
+| `OTEL_TRACES_EXPORTER` | Only `otlp` (or unset) is supported; `none` disables; other values warn and disable. Setting `otlp` alone does not enable tracing. |
+| `OTEL_TRACES_SAMPLER`, `OTEL_TRACES_SAMPLER_ARG` | Standard sampling, e.g. `parentbased_traceidratio` / `0.25`. |
+| `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES` | Standard resource settings; these override the `DD_*` fallbacks below. |
+
+Resource defaults: `service.name` is `mautrix-jabber` and `service.version` is the bridge version. `DD_SERVICE`, `DD_VERSION` and `DD_ENV` (sets `deployment.environment.name`) are used as fallbacks, and the `OTEL_*` variables above take precedence over them.
+
+**Match the protocol to the port.** Port 4317 is gRPC and port 4318 is HTTP. If the configured protocol and port disagree (for example `http/protobuf` against `:4317`), the bridge logs a startup warning and you will see export errors in the log. On success it logs one `OpenTelemetry tracing enabled` line with the protocol, `scheme://host:port` and sampler.
+
+### Generic OpenTelemetry collector
+
+```bash
+# gRPC (collector port 4317)
+OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+OTEL_EXPORTER_OTLP_PROTOCOL=grpc
+
+# or HTTP (collector port 4318)
+OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
+OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+
+OTEL_SERVICE_NAME=mautrix-jabber
+OTEL_RESOURCE_ATTRIBUTES=deployment.environment.name=prod
+```
+
+### Datadog Agent (OTLP ingest)
+
+Enable OTLP ingest on the Agent (APM must be enabled, which is the default; set `DD_APM_ENABLED=true` to be explicit):
+
+```bash
+DD_API_KEY=<your key>
+DD_SITE=datadoghq.com
+DD_APM_ENABLED=true
+DD_OTLP_CONFIG_RECEIVER_PROTOCOLS_GRPC_ENDPOINT=0.0.0.0:4317
+DD_OTLP_CONFIG_RECEIVER_PROTOCOLS_HTTP_ENDPOINT=0.0.0.0:4318
+```
+
+Then point the bridge at it (`DD_AGENT_HOST` alone does nothing):
+
+```bash
+# gRPC
+OTEL_EXPORTER_OTLP_ENDPOINT=http://datadog-agent:4317
+OTEL_EXPORTER_OTLP_PROTOCOL=grpc
+
+# or HTTP
+OTEL_EXPORTER_OTLP_ENDPOINT=http://datadog-agent:4318
+OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+
+DD_SERVICE=mautrix-jabber   # optional
+DD_ENV=prod                 # optional
+DD_VERSION=0.1.8            # optional
+```
+
+### docker-compose example (bridge + Datadog Agent)
+
+```yaml
+services:
+  mautrix-jabber:
+    image: williamkray/mautrix-jabber
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ./registration.yaml:/app/registration.yaml:ro
+      - bridge-data:/app/data
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://datadog-agent:4317
+      OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+      DD_SERVICE: mautrix-jabber
+      DD_ENV: prod
+    depends_on: [datadog-agent]
+
+  datadog-agent:
+    image: gcr.io/datadoghq/agent:7
+    environment:
+      DD_API_KEY: ${DD_API_KEY}
+      DD_SITE: datadoghq.com
+      DD_APM_ENABLED: "true"
+      DD_OTLP_CONFIG_RECEIVER_PROTOCOLS_GRPC_ENDPOINT: 0.0.0.0:4317
+      DD_OTLP_CONFIG_RECEIVER_PROTOCOLS_HTTP_ENDPOINT: 0.0.0.0:4318
+
+volumes:
+  bridge-data:
+```
+
+To use a plain collector instead, swap the second service for `otel/opentelemetry-collector-contrib` with an `otlp` receiver (grpc and http) and your exporter of choice, and keep the endpoint/protocol pair above consistent with the port.
+
+### What is traced
+
+Spans cover Matrix-to-XMPP handlers (messages, reactions, viewing a chat, identifier resolution, chat/user info, MUC join/leave), inbound XMPP stanzas (messages, carbons, MUC, Jingle notices), delivery to the bridge framework (`bridge.handle_remote_event` and message conversion share one trace with the inbound stanza), XEP-0363 uploads, OOB downloads, MAM backfill and catch-up, roster sync, avatar refresh, connect/dial, login, bot commands, and outbound Matrix HTTP calls.
+
+### Privacy
+
+Trace attributes include **full JIDs** (including Cheogram phone-number JIDs), XMPP stanza ids, Matrix room and event ids, timings, file sizes, MIME types and error messages. Message bodies, captions, reaction emoji, filenames and URLs are **never** recorded, and URLs inside error messages are reduced to scheme and host. Anyone with access to your trace backend can still see conversation metadata (who talks to whom, and when), so restrict access accordingly.
+
+### Log correlation
+
+Log lines for traced work carry `trace_id` (32 hex characters) and `dd.trace_id` (decimal, low 64 bits, the Datadog log-correlation format). Correlation covers the bridge framework's per-event logs and logs from traced contexts; not every bridge log line carries the fields.
+
 ## Verifying
 
 1. **Registration** – `registration.yaml` is valid YAML and has `id`, `url`, `as_token`, `hs_token`, `sender_localpart`, and `namespaces.users` with `exclusive: true` and regexes that match your `username_template` (e.g. `@jabber_.*`). If using E2BE, verify `de.sorunome.msc2409.push_ephemeral: true`, `io.element.msc4190: true`, and `org.matrix.msc3202: true` are present.
