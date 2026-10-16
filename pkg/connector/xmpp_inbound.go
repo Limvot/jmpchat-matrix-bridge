@@ -302,6 +302,7 @@ func (x *xmppClient) handleMessageWithOOB(t xmlstream.TokenReadEncoder, start *x
 	}
 	ctx, span := startReceiveSpan(kind, attrValue(start.Attr, "type"), from, fromBare, msgID, oobURL != "", replyID != "", reactionTarget != "")
 	defer span.End()
+	log := x.logFor(ctx)
 	portalKey := networkid.PortalKey{
 		ID:       networkid.PortalID(fromBare),
 		Receiver: x.loginID,
@@ -371,19 +372,19 @@ func (x *xmppClient) handleMessageWithOOB(t xmlstream.TokenReadEncoder, start *x
 		})
 	}
 	if replyID != "" {
-		x.log.Debug().
+		log.Debug().
 			Str("reply_id", replyID).
 			Str("body_preview", truncate(body, 80)).
 			Msg("DEBUG: Received XMPP message with XEP-0461 reply")
 	}
 	if reactionTarget != "" {
-		x.log.Debug().
+		log.Debug().
 			Str("reaction_target", reactionTarget).
 			Strs("reaction_emojis", reactionEmojis).
 			Msg("DEBUG: Received XMPP message with XEP-0444 reactions")
 	}
 	if oobURL != "" {
-		x.log.Info().
+		log.Info().
 			Str("type", attrValue(start.Attr, "type")).
 			Str("id", msgID).
 			Str("body_preview", truncate(body, 80)).
@@ -392,7 +393,7 @@ func (x *xmppClient) handleMessageWithOOB(t xmlstream.TokenReadEncoder, start *x
 			Str("reaction_target", reactionTarget).
 			Msg("XMPP message received with OOB URL, queued for bridge")
 	} else {
-		x.log.Info().
+		log.Info().
 			Str("type", attrValue(start.Attr, "type")).
 			Str("id", msgID).
 			Str("body_preview", truncate(body, 80)).
@@ -449,6 +450,7 @@ func (x *xmppClient) handleGroupchatWithOOB(t xmlstream.TokenReadEncoder, start 
 	}
 	ctx, span := startReceiveSpan(kind, "groupchat", occupantFull, roomJID, msgID, oobURL != "", replyID != "", reactionTarget != "")
 	defer span.End()
+	log := x.logFor(ctx)
 	portalKey := networkid.PortalKey{
 		ID:       networkid.PortalID(roomJID),
 		Receiver: x.loginID,
@@ -466,7 +468,7 @@ func (x *xmppClient) handleGroupchatWithOOB(t xmlstream.TokenReadEncoder, start 
 			reactionEmojis = []string{emoji}
 			body = ""
 			span.SetAttributes(attribute.String("xmpp.message.kind", "reaction"), attribute.Bool("xmpp.reaction", true))
-			x.log.Debug().
+			log.Debug().
 				Str("room", roomJID).
 				Str("occupant", occupantFull).
 				Str("reaction_target", targetID).
@@ -476,7 +478,7 @@ func (x *xmppClient) handleGroupchatWithOOB(t xmlstream.TokenReadEncoder, start 
 	}
 
 	// Log every inbound MUC message (and reaction) for debugging.
-	x.log.Info().
+	log.Info().
 		Str("room", roomJID).
 		Str("occupant", occupantFull).
 		Str("id", msgID).
@@ -485,7 +487,7 @@ func (x *xmppClient) handleGroupchatWithOOB(t xmlstream.TokenReadEncoder, start 
 		Strs("reaction_emojis", reactionEmojis).
 		Msg("Inbound MUC message received, queuing for bridge")
 	if reactionTarget != "" && len(reactionEmojis) > 0 {
-		x.log.Warn().
+		log.Warn().
 			Str("room", roomJID).
 			Str("occupant", occupantFull).
 			Str("reaction_target", reactionTarget).
@@ -955,7 +957,7 @@ func (m *jabberRemoteMessage) GetType() bridgev2.RemoteEventType {
 	// XEP-0444 reactions take precedence - if present, this is a reaction
 	if m.reactionTarget != "" {
 		if m.x != nil {
-			m.x.log.Debug().
+			telemetry.LoggerSC(m.spanCtx, &m.x.log).Debug().
 				Str("reaction_target", m.reactionTarget).
 				Strs("reaction_emojis", m.reactionEmojis).
 				Msg("DEBUG: Detected Jabber reaction (XEP-0444)")
@@ -970,7 +972,7 @@ func (m *jabberRemoteMessage) GetType() bridgev2.RemoteEventType {
 	if m.replyID != "" && isSingleEmoji(m.body) {
 		// Log debug info for reaction detection
 		if m.x != nil {
-			m.x.log.Debug().
+			telemetry.LoggerSC(m.spanCtx, &m.x.log).Debug().
 				Str("reply_id", m.replyID).
 				Str("emoji", strings.TrimSpace(m.body)).
 				Msg("DEBUG: Detected Jabber reaction (reply with single emoji, legacy)")
@@ -984,8 +986,7 @@ func (m *jabberRemoteMessage) GetPortalKey() networkid.PortalKey  { return m.por
 func (m *jabberRemoteMessage) GetSender() bridgev2.EventSender   { return m.sender }
 func (m *jabberRemoteMessage) GetID() networkid.MessageID         { return m.id }
 func (m *jabberRemoteMessage) AddLogContext(c zerolog.Context) zerolog.Context {
-	c = c.Str("message_id", string(m.id))
-	return telemetry.AddLogFields(c, m.spanCtx)
+	return c.Str("message_id", string(m.id))
 }
 
 // MutateContext starts the remote-event handling span (no-op without a span context).
@@ -1018,13 +1019,14 @@ func (m *jabberRemoteMessage) GetTargetMessage() (target networkid.MessageID) {
 	if m.reactionTarget != "" {
 		// Look up the database message ID from the XMPP reaction target ID
 		if m.x != nil && m.x.conn != nil && m.x.conn.br != nil {
-			m.x.log.Debug().
+			telemetry.LoggerSC(m.spanCtx, &m.x.log).Debug().
 				Str("reaction_target", m.reactionTarget).
 				Str("portal_id", string(m.portalKey.ID)).
 				Str("reaction_message_id", string(m.id)).
 				Msg("Looking up reaction target (XMPP message ID -> Matrix event) for inbound reaction")
 			// No ctx parameter here: parent the lookup span on the span context queueRemoteEvent stored.
 			ctx, span := telemetry.StartChild(telemetry.WithParent(context.Background(), m.spanCtx), "bridge.lookup_reaction_target")
+			log := m.x.logFor(ctx)
 			retried := false
 			defer func() {
 				span.SetAttributes(attribute.Bool("bridge.found", target != ""), attribute.Bool("bridge.retried", retried))
@@ -1036,7 +1038,7 @@ func (m *jabberRemoteMessage) GetTargetMessage() (target networkid.MessageID) {
 			xmppMsgID := networkid.MessageID(m.reactionTarget)
 			dbMsg, err := m.x.conn.br.DB.Message.GetFirstPartByID(ctx, m.x.loginID, xmppMsgID)
 			if err == nil && dbMsg != nil {
-				m.x.log.Debug().
+				log.Debug().
 					Str("reaction_target", m.reactionTarget).
 					Str("db_message_id", string(dbMsg.ID)).
 					Msg("Found reaction target via direct GetFirstPartByID lookup")
@@ -1048,14 +1050,14 @@ func (m *jabberRemoteMessage) GetTargetMessage() (target networkid.MessageID) {
 			tryFind := func() networkid.MessageID {
 				dbMessages, err := m.x.conn.br.DB.Message.GetMessagesBetweenTimeQuery(ctx, m.portalKey, searchStart, time.Now())
 				if err != nil {
-					m.x.log.Warn().Err(err).Str("reaction_target", m.reactionTarget).Msg("GetMessagesBetweenTimeQuery failed for reaction target lookup")
+					log.Warn().Err(err).Str("reaction_target", m.reactionTarget).Msg("GetMessagesBetweenTimeQuery failed for reaction target lookup")
 					return ""
 				}
-				m.x.log.Debug().Int("candidate_count", len(dbMessages)).Str("reaction_target", m.reactionTarget).Msg("Searching portal messages for reaction target (Matrix-originated messages have XMPPMessageID in metadata)")
+				log.Debug().Int("candidate_count", len(dbMessages)).Str("reaction_target", m.reactionTarget).Msg("Searching portal messages for reaction target (Matrix-originated messages have XMPPMessageID in metadata)")
 				for _, msg := range dbMessages {
 					if msg.Metadata != nil {
 						if meta, ok := msg.Metadata.(*MessageMetadata); ok && meta != nil && meta.XMPPMessageID == m.reactionTarget {
-							m.x.log.Debug().
+							log.Debug().
 								Str("reaction_target", m.reactionTarget).
 								Str("db_message_id", string(msg.ID)).
 								Msg("Found reaction target via metadata XMPPMessageID match")
@@ -1063,7 +1065,7 @@ func (m *jabberRemoteMessage) GetTargetMessage() (target networkid.MessageID) {
 						}
 					}
 					if string(msg.ID) == m.reactionTarget {
-						m.x.log.Debug().
+						log.Debug().
 							Str("reaction_target", m.reactionTarget).
 							Str("db_message_id", string(msg.ID)).
 							Msg("Found reaction target via message ID match")
@@ -1081,7 +1083,7 @@ func (m *jabberRemoteMessage) GetTargetMessage() (target networkid.MessageID) {
 							xmppID = meta.XMPPMessageID
 						}
 					}
-					m.x.log.Debug().
+					log.Debug().
 						Str("candidate_id", string(msg.ID)).
 						Str("candidate_xmpp_id", xmppID).
 						Msg("Reaction target lookup candidate")
@@ -1097,7 +1099,7 @@ func (m *jabberRemoteMessage) GetTargetMessage() (target networkid.MessageID) {
 			if found := tryFind(); found != "" {
 				return found
 			}
-			m.x.log.Warn().
+			log.Warn().
 				Str("reaction_target", m.reactionTarget).
 				Str("portal_id", string(m.portalKey.ID)).
 				Msg("Reaction target not found: no message with this XMPP ID in portal (reaction will not be bridged to Matrix)")
@@ -1112,6 +1114,7 @@ func (m *jabberRemoteMessage) GetTargetMessage() (target networkid.MessageID) {
 	// This is similar to what we do in ConvertMessage for replies
 	if m.x != nil && m.x.conn != nil && m.x.conn.br != nil {
 		ctx, span := telemetry.StartChild(telemetry.WithParent(context.Background(), m.spanCtx), "bridge.lookup_reaction_target")
+		log := m.x.logFor(ctx)
 		defer func() {
 			span.SetAttributes(attribute.Bool("bridge.found", target != ""), attribute.Bool("bridge.retried", false))
 			span.End()
@@ -1123,7 +1126,7 @@ func (m *jabberRemoteMessage) GetTargetMessage() (target networkid.MessageID) {
 		dbMsg, err := m.x.conn.br.DB.Message.GetFirstPartByID(ctx, m.x.loginID, xmppMsgID)
 		if err == nil && dbMsg != nil {
 			if m.x != nil {
-				m.x.log.Debug().
+				log.Debug().
 					Str("reply_id", m.replyID).
 					Str("db_message_id", string(dbMsg.ID)).
 					Msg("DEBUG: Found target message for reaction via direct lookup")
@@ -1138,7 +1141,7 @@ func (m *jabberRemoteMessage) GetTargetMessage() (target networkid.MessageID) {
 				if msg.Metadata != nil {
 					if meta, ok := msg.Metadata.(*MessageMetadata); ok && meta != nil && meta.XMPPMessageID == m.replyID {
 						if m.x != nil {
-							m.x.log.Debug().
+							log.Debug().
 								Str("reply_id", m.replyID).
 								Str("db_message_id", string(msg.ID)).
 								Msg("DEBUG: Found target message for reaction via metadata search")
@@ -1148,7 +1151,7 @@ func (m *jabberRemoteMessage) GetTargetMessage() (target networkid.MessageID) {
 				}
 				if string(msg.ID) == m.replyID {
 					if m.x != nil {
-						m.x.log.Debug().
+						log.Debug().
 							Str("reply_id", m.replyID).
 							Str("db_message_id", string(msg.ID)).
 							Msg("DEBUG: Found target message for reaction via ID match")
@@ -1158,7 +1161,7 @@ func (m *jabberRemoteMessage) GetTargetMessage() (target networkid.MessageID) {
 			}
 		}
 		if m.x != nil {
-			m.x.log.Debug().
+			log.Debug().
 				Str("reply_id", m.replyID).
 				Msg("DEBUG: Could not find target message for reaction")
 		}
@@ -1203,7 +1206,7 @@ func (m *jabberRemoteMessage) scheduleStanzaIDMetadataUpdate(ctx context.Context
 	senderID := m.sender.Sender
 	stanzaID := string(m.id)
 	br := m.x.conn.br
-	log := m.x.log
+	x := m.x
 	// Carry only the span context into the goroutine (not ctx itself: it is the framework's event
 	// context and may hold a DB transaction or portal cancellation).
 	gctx := telemetry.CarrySpan(context.Background(), ctx)
@@ -1215,6 +1218,7 @@ func (m *jabberRemoteMessage) scheduleStanzaIDMetadataUpdate(ctx context.Context
 			span.SetAttributes(attribute.Bool("bridge.found", found))
 			span.End()
 		}()
+		log := x.logFor(ctx)
 		ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
 		searchStart := time.Now().Add(-15 * time.Second)

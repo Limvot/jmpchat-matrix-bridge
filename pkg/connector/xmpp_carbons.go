@@ -116,7 +116,7 @@ func (x *xmppClient) handleCarbonSent(t xmlstream.TokenReadEncoder) error {
 	}
 	sender := x.makeEventSender(string(x.loginID)) // "from me" for puppeting
 	x.maybeTriggerBackfillOnNewPortal(ctx, portalKey)
-	x.log.Debug().
+	x.logFor(ctx).Debug().
 		Str("to", toBare).
 		Str("body_preview", truncate(body, 60)).
 		Msg("Carbon <sent>: queuing message sent from another client")
