@@ -389,7 +389,7 @@ Datadog recognises both pairs by default (Logs > Pipelines > Preprocessing for J
 
 Expected in a correlated trace: XMPP message handling (text only, OOB URL, MUC, carbons, reactions), the framework's per-event lines, Matrix message handler debug lines, upload lines, and Matrix HTTP client lines made inside a handler.
 
-Not expected: XMPP stanza receipt before mux dispatch, Serve start and stop, presence, reconnect loop, roster push, lines logged before a span starts, and queue-level framework errors.
+Not expected: XMPP stanza receipt before mux dispatch, Serve start and stop, presence, reconnect loop, the "Roster push applied" line (the roster refresh it triggers is correlated), lines logged before a span starts, and queue-level framework errors.
 
 **Fallback.** If the Logs side panel shows the fields but no link to the trace, go to Logs > Pipelines > Preprocessing for JSON logs and set the Trace Id attributes to only `trace_id` and the Span Id attributes to only `span_id`. Wait a few minutes, send a new message, and check again. If it still fails, try only `dd.trace_id` and `dd.span_id`.
 
