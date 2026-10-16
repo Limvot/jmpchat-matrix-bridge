@@ -3,6 +3,7 @@ module github.com/mautrix/jabber
 go 1.26.0
 
 require (
+	github.com/go-logr/logr v1.4.4
 	github.com/rs/xid v1.6.0
 	github.com/rs/zerolog v1.35.1
 	go.mau.fi/util v0.11.0
@@ -24,7 +25,6 @@ require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/coder/websocket v1.8.15 // indirect
 	github.com/coreos/go-systemd/v22 v22.7.0 // indirect
-	github.com/go-logr/logr v1.4.4 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.30.0 // indirect

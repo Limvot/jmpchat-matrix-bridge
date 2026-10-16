@@ -92,9 +92,9 @@ func EndRemoteEvent(ctx context.Context) {
 	}
 }
 
-var urlRe = regexp.MustCompile(`https?://\S+`)
+var urlRe = regexp.MustCompile(`(?:https?|mxc)://\S+`)
 
-// stripURLs replaces every http(s) URL in s with scheme://host.
+// stripURLs replaces every http(s) or mxc URL in s with scheme://host.
 func stripURLs(s string) string {
 	return urlRe.ReplaceAllStringFunc(s, func(m string) string {
 		u, err := url.Parse(m)

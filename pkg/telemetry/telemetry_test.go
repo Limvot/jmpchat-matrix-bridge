@@ -3,6 +3,7 @@ package telemetry
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/rs/zerolog"
 	"go.opentelemetry.io/otel/attribute"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -393,5 +395,21 @@ func TestInitUnreachableShutdown(t *testing.T) {
 	Shutdown(context.Background())
 	if d := time.Since(start); d > 4*time.Second {
 		t.Fatalf("shutdown took %s", d)
+	}
+}
+
+func TestStripURLsMXC(t *testing.T) {
+	got := stripURLs("download mxc://hs.example/AbCdSecret failed")
+	if got != "download mxc://hs.example failed" {
+		t.Errorf("got %q", got)
+	}
+}
+
+func TestOTelLogSinkDropsValues(t *testing.T) {
+	var buf strings.Builder
+	l := logr.New(otelLogSink{log: zerolog.New(&buf)})
+	l.Error(errors.New("missing '="), "parse headers", "input", "DD-API-KEY secretvalue")
+	if strings.Contains(buf.String(), "secretvalue") || !strings.Contains(buf.String(), "parse headers") {
+		t.Errorf("unexpected log: %s", buf.String())
 	}
 }

@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/rs/zerolog"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -148,6 +149,9 @@ func initWith(ctx context.Context, o Options, getenv func(string) string) {
 	if !cfg.enabled {
 		return
 	}
+	// Replace the SDK's default stderr logger before the exporters parse their env: its key/value
+	// pairs can contain raw env values (e.g. a malformed OTEL_EXPORTER_OTLP_HEADERS with an API key).
+	otel.SetLogger(logr.New(otelLogSink{log: log}))
 
 	var exp *otlptrace.Exporter
 	var err error
@@ -257,4 +261,21 @@ func newErrorHandler(log zerolog.Logger) otel.ErrorHandler {
 		}
 		ev.Str("error", stripURLs(fmt.Sprint(err))).Msg("OpenTelemetry export error")
 	})
+}
+
+// otelLogSink routes the OTel SDK's internal error log to zerolog. Key/value pairs are dropped
+// (they may carry header values or URLs); only the message and the URL-stripped error are kept.
+type otelLogSink struct{ log zerolog.Logger }
+
+func (otelLogSink) Init(logr.RuntimeInfo)            {}
+func (otelLogSink) Enabled(int) bool                 { return false }
+func (otelLogSink) Info(int, string, ...any)         {}
+func (s otelLogSink) WithValues(...any) logr.LogSink { return s }
+func (s otelLogSink) WithName(string) logr.LogSink   { return s }
+func (s otelLogSink) Error(err error, msg string, _ ...any) {
+	ev := s.log.Warn()
+	if err != nil {
+		ev = ev.Str("error", stripURLs(err.Error()))
+	}
+	ev.Msg("OpenTelemetry: " + msg)
 }
