@@ -45,6 +45,9 @@ type xmppClient struct {
 	conn        *JabberConnector
 	mu          sync.Mutex
 	session     *xmpp.Session
+	// sessionCancel cancels the context shared by this session's background goroutines (roster
+	// sync/backfill, MAM catch-up loop). Guarded by mu; see endSessionLocked.
+	sessionCancel context.CancelFunc
 	uploadJID   *jid.JID // Cached upload service JID (discovered via common subdomains)
 	uploadJIDMu sync.Mutex
 	// roster holds the latest fetched XMPP roster for this login, keyed by bare JID.
@@ -124,6 +127,10 @@ func (x *xmppClient) Connect(ctx context.Context) {
 		return
 	}
 	x.session = sess
+	// Background goroutines of this session run on sessCtx so they end with the session (Serve loop
+	// exit or Disconnect) instead of leaking one set per reconnect.
+	sessCtx, cancelSess := context.WithCancel(context.Background())
+	x.sessionCancel = cancelSess
 
 	if x.login != nil {
 		x.login.BridgeState.Send(status.BridgeState{StateEvent: status.StateConnected})
@@ -177,9 +184,19 @@ func (x *xmppClient) Connect(ctx context.Context) {
 	// another client) after this. This must run here rather than in ReconnectLoop: the framework
 	// also calls Connect directly at startup, and in that case the loop never sees a connect of
 	// its own. When backfill.enabled, also run full MAM backfill for roster DMs.
-	go x.runFullBackfillAfterRosterSync(context.Background())
+	go x.runFullBackfillAfterRosterSync(sessCtx)
 	// Periodic MAM catch-up so messages sent from other clients appear within ~45s if carbons aren't used.
-	go x.runMAMCatchUpLoop(context.Background())
+	go x.runMAMCatchUpLoop(sessCtx)
+}
+
+// endSessionLocked cancels the current session's background goroutine context. Requires x.mu held.
+// Callers clear x.session themselves; a later Connect creates a fresh context, so a new session's
+// goroutines are never affected by an old session's teardown.
+func (x *xmppClient) endSessionLocked() {
+	if x.sessionCancel != nil {
+		x.sessionCancel()
+		x.sessionCancel = nil
+	}
 }
 
 // enableCarbons sends the XEP-0280 enable IQ and waits for the server response.
@@ -337,6 +354,7 @@ func (x *xmppClient) Disconnect() {
 		_ = x.session.Close()
 		x.session = nil
 	}
+	x.endSessionLocked()
 	x.mucCacheMu.Lock()
 	x.mucCache = nil
 	x.mucCacheMu.Unlock()

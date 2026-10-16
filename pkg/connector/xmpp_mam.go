@@ -359,6 +359,7 @@ const mamCatchUpWindow = 2 * time.Minute // first run: messages from last 2 minu
 // runMAMCatchUpLoop runs periodic MAM catch-up so messages sent from other Jabber clients
 // appear in the Matrix room within roughly one interval (e.g. 45s) when carbons are not used.
 func (x *xmppClient) runMAMCatchUpLoop(ctx context.Context) {
+	defer func() { x.log.Debug().Msg("MAM catch-up loop exited") }()
 	ticker := time.NewTicker(mamCatchUpInterval)
 	defer ticker.Stop()
 	for {
@@ -451,7 +452,7 @@ func (x *xmppClient) runFullBackfill(ctx context.Context) {
 		done++
 		select {
 		case <-ctx.Done():
-			break
+			return
 		case <-time.After(200 * time.Millisecond):
 		}
 	}

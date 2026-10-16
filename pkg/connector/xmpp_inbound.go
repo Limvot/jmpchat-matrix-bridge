@@ -508,10 +508,13 @@ func (x *xmppClient) serveMessages() {
 	}
 	// Clear the session so ReconnectLoop knows to reconnect after disconnects.
 	x.mu.Lock()
-	hadSession := x.session != nil
+	// Only tear down state if x.session is still the session this loop served; after Disconnect
+	// (or a reconnect) it is nil or belongs to a newer session whose goroutines must keep running.
+	hadSession := x.session != nil && x.session == sess
 	if hadSession {
 		x.log.Debug().Msg("Clearing XMPP session after Serve loop ended")
 		x.session = nil
+		x.endSessionLocked()
 	}
 	login := x.login
 	x.mu.Unlock()
