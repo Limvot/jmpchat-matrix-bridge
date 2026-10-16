@@ -107,7 +107,7 @@ func (x *xmppClient) handleCarbonSent(t xmlstream.TokenReadEncoder) error {
 		msgID = networkid.MessageID("xmp:" + time.Now().Format("20060102150405.000"))
 	}
 	sender := x.makeEventSender(string(x.loginID)) // "from me" for puppeting
-	x.maybeTriggerBackfillOnNewPortal(portalKey)
+	x.maybeTriggerBackfillOnNewPortal(context.Background(), portalKey)
 	x.log.Debug().
 		Str("to", toBare).
 		Str("body_preview", truncate(body, 60)).
@@ -162,7 +162,7 @@ func (x *xmppClient) handleCarbonReceived(t xmlstream.TokenReadEncoder) error {
 		msgID = networkid.MessageID("xmp:" + time.Now().Format("20060102150405.000"))
 	}
 	sender := x.makeEventSender(fromBare)
-	x.maybeTriggerBackfillOnNewPortal(portalKey)
+	x.maybeTriggerBackfillOnNewPortal(context.Background(), portalKey)
 	zerolog.Ctx(context.Background()).Debug().
 		Str("from", fromBare).
 		Str("body_preview", truncate(body, 60)).

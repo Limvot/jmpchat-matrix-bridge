@@ -19,6 +19,7 @@
 package connector
 
 import (
+	"context"
 	"encoding/xml"
 	"strings"
 	"time"
@@ -152,7 +153,7 @@ func (x *xmppClient) handleJingleMessageInitiation(jmi jingleMessageInfo, fromBa
 		portalKey := networkid.PortalKey{ID: networkid.PortalID(fromBare), Receiver: x.loginID}
 		sender := x.makeEventSender(fromBare)
 		x.storeCallSession(jmi.sid, &callSession{portalKey: portalKey, sender: sender, media: jmi.media})
-		x.maybeTriggerBackfillOnNewPortal(portalKey)
+		x.maybeTriggerBackfillOnNewPortal(context.Background(), portalKey)
 		emoji := "📞"
 		if jmi.media == "video" {
 			emoji = "📹"

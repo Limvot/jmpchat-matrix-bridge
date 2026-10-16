@@ -276,7 +276,7 @@ func (x *xmppClient) handleMessageWithOOB(t xmlstream.TokenReadEncoder, start *x
 		}
 	}
 	sender := x.makeEventSender(senderJID)
-	x.maybeTriggerBackfillOnNewPortal(portalKey)
+	x.maybeTriggerBackfillOnNewPortal(context.Background(), portalKey)
 
 	// For XEP-0444 reactions with multiple emojis, queue a separate event for each emoji
 	// This allows Matrix to display each reaction separately
@@ -433,7 +433,7 @@ func (x *xmppClient) handleGroupchatWithOOB(t xmlstream.TokenReadEncoder, start 
 			Msg("Inbound MUC reaction: will look up target and bridge to Matrix")
 	}
 
-	x.maybeTriggerBackfillOnNewPortal(portalKey)
+	x.maybeTriggerBackfillOnNewPortal(context.Background(), portalKey)
 	if reactionTarget != "" && len(reactionEmojis) > 0 {
 		for i, emoji := range reactionEmojis {
 			reactionMsgID := msgID
@@ -577,7 +577,7 @@ func (x *xmppClient) handleIncomingMessage(msg stanza.Message, rw xmlstream.Toke
 		}
 	}
 	sender := x.makeEventSender(senderJID)
-	x.maybeTriggerBackfillOnNewPortal(portalKey)
+	x.maybeTriggerBackfillOnNewPortal(context.Background(), portalKey)
 	x.login.QueueRemoteEvent(&jabberRemoteMessage{
 		portalKey: portalKey,
 		sender:    sender,
@@ -641,7 +641,7 @@ func (x *xmppClient) handleIncomingGroupchat(msg stanza.Message, rw xmlstream.To
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	x.ensureMUCGhostDisplayName(ctx, occupantFull)
 	cancel()
-	x.maybeTriggerBackfillOnNewPortal(portalKey)
+	x.maybeTriggerBackfillOnNewPortal(context.Background(), portalKey)
 	msgID := networkid.MessageID(msg.ID)
 	if msgID == "" {
 		msgID = networkid.MessageID("xmp:" + time.Now().Format("20060102150405.000"))

@@ -560,22 +560,24 @@ const mamBackfillMaxMessagesDefault = 50
 // maybeTriggerBackfillOnNewPortal is called when queueing an inbound remote event. If the portal
 // has no Matrix room yet (MXID empty), the bridge will create one. Trigger MAM backfill in a
 // goroutine—must be async because the XMPP handler must return for the mellium Serve loop to
-// read MAM IQ results; blocking here would deadlock (handler waits for MAM results, but results
-// arrive only when the loop reads the next stanza). Respects backfill.enabled and skips MUC.
-func (x *xmppClient) maybeTriggerBackfillOnNewPortal(portalKey networkid.PortalKey) {
+// read IQ results; the portal lookup (DB) and portalIsMUC (disco#info IQ) would otherwise block
+// the loop that has to deliver their responses. Only the cheap config guard runs synchronously.
+// Respects backfill.enabled and skips MUC. ctx is reserved as the trace link origin; it is not
+// used for cancellation. Several messages arriving before the room exists may each trigger a
+// backfill (same race as before).
+func (x *xmppClient) maybeTriggerBackfillOnNewPortal(ctx context.Context, portalKey networkid.PortalKey) {
 	if x.login == nil || x.conn.backfillConfig == nil || !x.conn.backfillConfig.Enabled {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	portal, err := x.conn.br.GetPortalByKey(ctx, portalKey)
-	if err != nil || portal == nil || portal.MXID != "" {
-		return
-	}
-	if x.portalIsMUC(ctx, portal) {
-		return
-	}
-	go x.mamBackfillOnView(x.log.WithContext(context.Background()), string(portalKey.ID))
+	go func() {
+		lctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		portal, err := x.conn.br.GetPortalByKey(lctx, portalKey)
+		if err != nil || portal == nil || portal.MXID != "" || x.portalIsMUC(lctx, portal) {
+			return
+		}
+		x.mamBackfillOnView(x.log.WithContext(context.Background()), string(portalKey.ID))
+	}()
 }
 
 // mamBackfillOnView fetches historical MAM messages for a DM portal and queues them as remote events.
