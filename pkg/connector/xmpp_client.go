@@ -118,6 +118,7 @@ func (x *xmppClient) Connect(ctx context.Context) {
 	// from this ctx) so they never outlive or inherit the span.
 	ctx, span := telemetry.Start(ctx, "xmpp.connect")
 	defer span.End()
+	log := x.logFor(ctx)
 	if span.IsRecording() {
 		span.SetAttributes(attribute.String("xmpp.login.jid", string(x.loginID)))
 	}
@@ -133,7 +134,7 @@ func (x *xmppClient) Connect(ctx context.Context) {
 		}
 		return
 	}
-	sess, err := dialXMPP(ctx, origin, x.meta.Password, &x.log)
+	sess, err := dialXMPP(ctx, origin, x.meta.Password, log)
 	if err != nil {
 		telemetry.Fail(span, err)
 		span.SetAttributes(attribute.String("xmpp.connect.result", "failed"))
@@ -156,14 +157,14 @@ func (x *xmppClient) Connect(ctx context.Context) {
 	// Send initial presence so the server delivers messages to this resource.
 	// Without this, many servers (including Snikket/Prosody) do not push messages to the client.
 	if err := sess.Send(ctx, stanza.Presence{}.Wrap(nil)); err != nil {
-		x.log.Warn().Err(err).Msg("Failed to send initial presence; message delivery may not work")
+		log.Warn().Err(err).Msg("Failed to send initial presence; message delivery may not work")
 	} else {
 		span.AddEvent("initial_presence_sent")
-		x.log.Debug().Msg("Sent initial presence (available)")
+		log.Debug().Msg("Sent initial presence (available)")
 	}
 
 	// #region agent log
-	x.log.Debug().Str("hypothesis", "H1").Msg("DEBUG: Connect about to start serveMessages")
+	log.Debug().Str("hypothesis", "H1").Msg("DEBUG: Connect about to start serveMessages")
 	// #endregion
 	go x.serveMessages()
 	// Release lock so serveMessages can acquire it and run Serve (processes carbons response).
@@ -174,26 +175,26 @@ func (x *xmppClient) Connect(ctx context.Context) {
 	select {
 	case <-ctx.Done():
 		// #region agent log
-		x.log.Debug().Str("hypothesis", "H5").Msg("DEBUG: Connect ctx.Done during sleep")
+		log.Debug().Str("hypothesis", "H5").Msg("DEBUG: Connect ctx.Done during sleep")
 		// #endregion
 		x.mu.Lock()
 		return
 	case <-time.After(100 * time.Millisecond):
 	}
 	// #region agent log
-	x.log.Debug().Str("hypothesis", "H1").Msg("DEBUG: Connect sleep done, calling enableCarbons")
+	log.Debug().Str("hypothesis", "H1").Msg("DEBUG: Connect sleep done, calling enableCarbons")
 	// #endregion
 	// Enable XEP-0280 Message Carbons so we receive copies of messages sent/received on other clients.
 	if err := x.enableCarbons(ctx); err != nil {
-		x.log.Warn().Err(err).Msg("Failed to enable message carbons; other-client sync may use MAM catch-up only")
+		log.Warn().Err(err).Msg("Failed to enable message carbons; other-client sync may use MAM catch-up only")
 	} else {
 		// #region agent log
-		x.log.Debug().Str("hypothesis", "H4").Msg("DEBUG: Connect enableCarbons succeeded")
+		log.Debug().Str("hypothesis", "H4").Msg("DEBUG: Connect enableCarbons succeeded")
 		// #endregion
-		x.log.Debug().Msg("Enabled message carbons (XEP-0280)")
+		log.Debug().Msg("Enabled message carbons (XEP-0280)")
 	}
 	// #region agent log
-	x.log.Debug().Str("hypothesis", "H1").Msg("DEBUG: Connect after enableCarbons")
+	log.Debug().Str("hypothesis", "H1").Msg("DEBUG: Connect after enableCarbons")
 	// #endregion
 	x.mu.Lock() // Re-acquire before return (defer will unlock)
 	// Fetch the roster on every new session. Besides mapping roster names to ghosts and DM room
@@ -232,6 +233,7 @@ func (x *xmppClient) enableCarbons(ctx context.Context) error {
 	}
 	ctx, span := telemetry.StartChild(ctx, "xmpp.carbons.enable", trace.WithSpanKind(trace.SpanKindClient))
 	defer span.End()
+	log := x.logFor(ctx)
 	if span.IsRecording() {
 		span.SetAttributes(attribute.String("xmpp.iq.namespace", carbonsNS))
 	}
@@ -240,7 +242,7 @@ func (x *xmppClient) enableCarbons(ctx context.Context) error {
 	x.carbonsEnableCh = make(chan error, 1)
 	x.carbonsEnableMu.Unlock()
 	// #region agent log
-	x.log.Debug().Str("hypothesis", "H2").Str("carbonsEnableID", x.carbonsEnableID).Msg("DEBUG: enableCarbons sent IQ, waiting for response")
+	log.Debug().Str("hypothesis", "H2").Str("carbonsEnableID", x.carbonsEnableID).Msg("DEBUG: enableCarbons sent IQ, waiting for response")
 	// #endregion
 	enableStart := xml.StartElement{
 		Name: xml.Name{Space: carbonsNS, Local: "enable"},
@@ -258,19 +260,19 @@ func (x *xmppClient) enableCarbons(ctx context.Context) error {
 	select {
 	case <-ctx.Done():
 		// #region agent log
-		x.log.Debug().Str("hypothesis", "H5").Msg("DEBUG: enableCarbons ctx.Done")
+		log.Debug().Str("hypothesis", "H5").Msg("DEBUG: enableCarbons ctx.Done")
 		// #endregion
 		telemetry.Fail(span, ctx.Err())
 		return ctx.Err()
 	case err := <-x.carbonsEnableCh:
 		// #region agent log
-		x.log.Debug().Str("hypothesis", "H2").Bool("hasErr", err != nil).Msg("DEBUG: enableCarbons got response from channel")
+		log.Debug().Str("hypothesis", "H2").Bool("hasErr", err != nil).Msg("DEBUG: enableCarbons got response from channel")
 		// #endregion
 		telemetry.Fail(span, err)
 		return err
 	case <-time.After(5 * time.Second):
 		// #region agent log
-		x.log.Debug().Str("hypothesis", "H4").Msg("DEBUG: enableCarbons timeout 5s")
+		log.Debug().Str("hypothesis", "H4").Msg("DEBUG: enableCarbons timeout 5s")
 		// #endregion
 		x.carbonsEnableMu.Lock()
 		x.carbonsEnableID = ""
@@ -484,7 +486,7 @@ func (x *xmppClient) SetRosterItem(ctx context.Context, jidStr, displayName stri
 	}
 	x.rosterMu.Unlock()
 
-	x.log.Info().Str("jid", key).Str("name", item.Name).Msg("Roster item set from Matrix")
+	x.logFor(ctx).Info().Str("jid", key).Str("name", item.Name).Msg("Roster item set from Matrix")
 	x.refreshRosterGhostsAndPortals(ctx, map[string]string{strings.ToLower(key): item.Name})
 	return nil
 }
@@ -501,6 +503,7 @@ func (x *xmppClient) syncRoster(ctx context.Context) {
 	}
 	ctx, span := telemetry.Start(ctx, "xmpp.roster.sync")
 	defer span.End()
+	log := x.logFor(ctx)
 
 	fetchCtx, fetchSpan := telemetry.StartChild(ctx, "xmpp.iq.roster_fetch", trace.WithSpanKind(trace.SpanKindClient))
 	if fetchSpan.IsRecording() {
@@ -509,7 +512,7 @@ func (x *xmppClient) syncRoster(ctx context.Context) {
 	iter := roster.Fetch(fetchCtx, sess)
 	defer func() {
 		if err := iter.Close(); err != nil {
-			x.log.Debug().Err(err).Msg("Failed to close roster iterator")
+			log.Debug().Err(err).Msg("Failed to close roster iterator")
 		}
 	}()
 
@@ -519,7 +522,7 @@ func (x *xmppClient) syncRoster(ctx context.Context) {
 		item := iter.Item()
 		bare := item.JID.Bare().String()
 		itemCount++
-		x.log.Info().Str("jid", bare).Str("name", item.Name).Str("subscription", item.Subscription).Msg("Roster item from server")
+		log.Info().Str("jid", bare).Str("name", item.Name).Str("subscription", item.Subscription).Msg("Roster item from server")
 		if bare == "" {
 			continue
 		}
@@ -534,7 +537,7 @@ func (x *xmppClient) syncRoster(ctx context.Context) {
 	fetchSpan.End()
 	if iterErr != nil {
 		telemetry.Fail(span, iterErr)
-		x.log.Warn().Err(iterErr).Msg("Failed to fetch XMPP roster")
+		log.Warn().Err(iterErr).Msg("Failed to fetch XMPP roster")
 		return
 	}
 	span.SetAttributes(attribute.Int("roster.count", len(newRoster)))
@@ -543,7 +546,7 @@ func (x *xmppClient) syncRoster(ctx context.Context) {
 	x.roster = newRoster
 	x.rosterMu.Unlock()
 
-	x.log.Info().Int("item_count", itemCount).Int("entry_count", len(newRoster)).Msg("Synced XMPP roster for login")
+	log.Info().Int("item_count", itemCount).Int("entry_count", len(newRoster)).Msg("Synced XMPP roster for login")
 
 	// Push updated names to Matrix for all roster contacts that have ghosts/portals.
 	// Otherwise Matrix keeps showing old display names until the user opens the chat.
@@ -560,6 +563,7 @@ func (x *xmppClient) refreshRosterGhostsAndPortals(ctx context.Context, rosterMa
 	}
 	ctx, span := telemetry.Start(ctx, "bridge.refresh_roster_ghosts")
 	defer span.End()
+	log := x.logFor(ctx)
 	span.SetAttributes(attribute.Int("roster.count", len(rosterMap)))
 	for bareJID, rosterName := range rosterMap {
 		// Ensure we use the same form the bridge uses (lowercase JID).
@@ -567,30 +571,30 @@ func (x *xmppClient) refreshRosterGhostsAndPortals(ctx context.Context, rosterMa
 		// Refresh ghost so Matrix shows the roster name.
 		ghost, err := x.conn.br.GetExistingGhostByID(ctx, networkid.UserID(jidForLookup))
 		if err != nil {
-			x.log.Debug().Err(err).Str("bare_jid", bareJID).Msg("GetExistingGhostByID failed")
+			log.Debug().Err(err).Str("bare_jid", bareJID).Msg("GetExistingGhostByID failed")
 			continue
 		}
 		if ghost == nil {
-			x.log.Debug().Str("bare_jid", jidForLookup).Msg("No existing ghost for roster JID")
+			log.Debug().Str("bare_jid", jidForLookup).Msg("No existing ghost for roster JID")
 		} else {
 			info, err := x.GetUserInfo(ctx, ghost)
 			if err != nil {
-				x.log.Debug().Err(err).Str("bare_jid", jidForLookup).Msg("GetUserInfo failed")
+				log.Debug().Err(err).Str("bare_jid", jidForLookup).Msg("GetUserInfo failed")
 				continue
 			}
 			if info != nil && info.Name != nil {
 				ghost.UpdateInfo(ctx, info)
-				x.log.Info().Str("bare_jid", jidForLookup).Str("display_name", *info.Name).Msg("Updated ghost from roster")
+				log.Info().Str("bare_jid", jidForLookup).Str("display_name", *info.Name).Msg("Updated ghost from roster")
 			}
 		}
 		// Refresh DM portal room name if it exists.
 		portal, err := x.conn.br.GetDMPortal(ctx, x.login.ID, networkid.UserID(jidForLookup))
 		if err != nil {
-			x.log.Debug().Err(err).Str("bare_jid", bareJID).Msg("GetDMPortal failed")
+			log.Debug().Err(err).Str("bare_jid", bareJID).Msg("GetDMPortal failed")
 			continue
 		}
 		if portal == nil || portal.MXID == "" {
-			x.log.Debug().Str("bare_jid", jidForLookup).Msg("No DM portal for roster JID")
+			log.Debug().Str("bare_jid", jidForLookup).Msg("No DM portal for roster JID")
 		} else {
 			portal.UpdateBridgeInfo(ctx)
 			// Queue ChatResync so the bridge re-fetches GetChatInfo and applies the new room name to Matrix.
@@ -601,7 +605,7 @@ func (x *xmppClient) refreshRosterGhostsAndPortals(ctx context.Context, rosterMa
 				},
 				GetChatInfoFunc: x.GetChatInfo,
 			})
-			x.log.Info().Str("bare_jid", jidForLookup).Str("room_id", portal.MXID.String()).Str("roster_name", rosterName).Msg("Updated portal from roster (queued room name sync)")
+			log.Info().Str("bare_jid", jidForLookup).Str("room_id", portal.MXID.String()).Str("roster_name", rosterName).Msg("Updated portal from roster (queued room name sync)")
 		}
 	}
 	x.refreshGroupMMSPortals(ctx, rosterMap)
@@ -610,12 +614,13 @@ func (x *xmppClient) refreshRosterGhostsAndPortals(ctx context.Context, rosterMa
 // refreshGroupMMSPortals queues a ChatResync for this login's Cheogram group MMS portals that
 // include any of the given JIDs, since their room names are built from participants' roster names.
 func (x *xmppClient) refreshGroupMMSPortals(ctx context.Context, rosterMap map[string]string) {
+	log := x.logFor(ctx)
 	if !CheogramEnabled(x.conn.br) || len(rosterMap) == 0 {
 		return
 	}
 	portals, err := x.conn.br.DB.Portal.GetAllWithMXID(ctx)
 	if err != nil {
-		x.log.Debug().Err(err).Msg("Failed to list portals for group MMS roster refresh")
+		log.Debug().Err(err).Msg("Failed to list portals for group MMS roster refresh")
 		return
 	}
 	for _, p := range portals {
@@ -635,7 +640,7 @@ func (x *xmppClient) refreshGroupMMSPortals(ctx context.Context, rosterMap map[s
 					},
 					GetChatInfoFunc: x.GetChatInfo,
 				})
-				x.log.Info().Str("portal_id", string(p.ID)).Str("bare_jid", j).Msg("Queued group MMS room name sync from roster")
+				log.Info().Str("portal_id", string(p.ID)).Str("bare_jid", j).Msg("Queued group MMS room name sync from roster")
 				break
 			}
 		}
@@ -821,7 +826,7 @@ func (x *xmppClient) isMUC(ctx context.Context, jidStr string) bool {
 	}
 	info, err := x.discoInfoTraced(ctx, sess, toJID)
 	if err != nil {
-		x.log.Debug().Err(err).Str("jid", jidStr).Msg("Disco info failed; using MUC heuristic")
+		x.logFor(ctx).Debug().Err(err).Str("jid", jidStr).Msg("Disco info failed; using MUC heuristic")
 		return isMUCJID(jidStr)
 	}
 	isMUC := false
@@ -912,7 +917,7 @@ func (x *xmppClient) getMUCRoomMetadata(ctx context.Context, roomJID string) (na
 	}
 	info, err := x.discoInfoTraced(ctx, sess, toJID)
 	if err != nil {
-		x.log.Debug().Err(err).Str("room", roomJID).Msg("Disco info for MUC metadata failed")
+		x.logFor(ctx).Debug().Err(err).Str("room", roomJID).Msg("Disco info for MUC metadata failed")
 		return "", ""
 	}
 	// Use first conference identity name as room name if present.
@@ -1115,12 +1120,13 @@ func (x *xmppClient) withAppServiceIDSuffix(name string) string {
 // ensureMUCGhostDisplayName ensures the ghost for the given MUC occupant (room@conf/nick) has the correct display name (nick).
 // Call before queueing a MUC message so Matrix shows the short nick instead of the full JID.
 func (x *xmppClient) ensureMUCGhostDisplayName(ctx context.Context, occupantFull string) {
+	log := x.logFor(ctx)
 	if x.conn == nil || x.conn.br == nil || occupantFull == "" || !strings.Contains(occupantFull, "/") {
 		return
 	}
 	ghost, err := x.conn.br.GetGhostByID(ctx, networkid.UserID(occupantFull))
 	if err != nil {
-		x.log.Debug().Err(err).Str("occupant", occupantFull).Msg("Could not get ghost for MUC sender display name")
+		log.Debug().Err(err).Str("occupant", occupantFull).Msg("Could not get ghost for MUC sender display name")
 		return
 	}
 	if ghost == nil {
@@ -1131,7 +1137,7 @@ func (x *xmppClient) ensureMUCGhostDisplayName(ctx context.Context, occupantFull
 		return
 	}
 	ghost.UpdateInfo(ctx, info)
-	x.log.Info().Str("occupant", occupantFull).Str("display_name", *info.Name).Msg("Updated MUC ghost display name")
+	log.Info().Str("occupant", occupantFull).Str("display_name", *info.Name).Msg("Updated MUC ghost display name")
 }
 
 func (x *xmppClient) GetUserInfo(ctx context.Context, ghost *bridgev2.Ghost) (*bridgev2.UserInfo, error) {
@@ -1173,7 +1179,7 @@ func (x *xmppClient) getUserInfo(ctx context.Context, ghost *bridgev2.Ghost) (*b
 	if idx := strings.LastIndex(jidStr, "/"); idx >= 0 && idx+1 < len(jidStr) {
 		displayName = jidStr[idx+1:]
 		isMUCOccupant = true
-		x.log.Info().Str("ghost_id", string(ghost.ID)).Str("jid", jidStr).Str("display_name", displayName).Msg("GetUserInfo: MUC occupant, using nick as display name")
+		x.logFor(ctx).Info().Str("ghost_id", string(ghost.ID)).Str("jid", jidStr).Str("display_name", displayName).Msg("GetUserInfo: MUC occupant, using nick as display name")
 	} else if rosterName := x.lookupRosterName(jidStr); rosterName != "" {
 		displayName = rosterName
 	}
@@ -1220,10 +1226,11 @@ func (x *xmppClient) ResolveIdentifier(ctx context.Context, identifier string, c
 }
 
 func (x *xmppClient) resolveIdentifier(ctx context.Context, identifier string, createChat bool) (*bridgev2.ResolveIdentifierResponse, error) {
+	log := x.logFor(ctx)
 	trimmed := strings.TrimSpace(identifier)
 	if trimmed == "" {
 		warnIfDebugIdentifiers(&x.log)
-		x.log.Debug().Str("identifier", identifier).Msg("ResolveIdentifier: empty identifier")
+		log.Debug().Str("identifier", identifier).Msg("ResolveIdentifier: empty identifier")
 		return nil, fmt.Errorf("invalid JID: must be like user@domain.example")
 	}
 	jidStr := trimmed
@@ -1237,19 +1244,19 @@ func (x *xmppClient) resolveIdentifier(ctx context.Context, identifier string, c
 					jidStr = strings.ToLower(resolved)
 				} else {
 					warnIfDebugIdentifiers(&x.log)
-					x.log.Debug().Str("identifier", identifier).Msg("ResolveIdentifier: comma-separated list but Cheogram multi resolve failed")
+					log.Debug().Str("identifier", identifier).Msg("ResolveIdentifier: comma-separated list but Cheogram multi resolve failed")
 					return nil, fmt.Errorf("invalid JID: use user@domain or comma-separated phone numbers when Cheogram is enabled")
 				}
 			} else if resolved, ok := ResolveCheogramIdentifier(trimmed, true); ok {
 				jidStr = strings.ToLower(resolved)
 			} else {
 				warnIfDebugIdentifiers(&x.log)
-				x.log.Debug().Str("identifier", identifier).Msg("ResolveIdentifier: not a JID and Cheogram resolution failed")
+				log.Debug().Str("identifier", identifier).Msg("ResolveIdentifier: not a JID and Cheogram resolution failed")
 				return nil, fmt.Errorf("invalid JID: use user@domain or enable Cheogram for phone/short codes")
 			}
 		} else {
 			warnIfDebugIdentifiers(&x.log)
-			x.log.Debug().Str("identifier", identifier).Msg("ResolveIdentifier: invalid JID (missing @)")
+			log.Debug().Str("identifier", identifier).Msg("ResolveIdentifier: invalid JID (missing @)")
 			return nil, fmt.Errorf("invalid JID: must be like user@domain.example")
 		}
 	} else {
@@ -1259,7 +1266,7 @@ func (x *xmppClient) resolveIdentifier(ctx context.Context, identifier string, c
 		parsed, err := jid.Parse(jidStr)
 		if err != nil {
 			warnIfDebugIdentifiers(&x.log)
-			x.log.Debug().Str("identifier", identifier).Msg("ResolveIdentifier: invalid JID format")
+			log.Debug().Str("identifier", identifier).Msg("ResolveIdentifier: invalid JID format")
 			return nil, fmt.Errorf("invalid JID format (use user@domain)")
 		}
 		jidStr = parsed.String()
@@ -1425,7 +1432,7 @@ func (x *xmppClient) joinMUC(ctx context.Context, roomJIDStr string) error {
 		x.mucPendingJoinMu.Unlock()
 		return fmt.Errorf("send MUC join presence: %w", err)
 	}
-	x.log.Info().
+	x.logFor(ctx).Info().
 		Str("room", roomJIDStr).
 		Str("nick", nick).
 		Msg("Sent MUC join presence")
@@ -1437,6 +1444,7 @@ func (x *xmppClient) joinMUC(ctx context.Context, roomJIDStr string) error {
 func (x *xmppClient) retryMUCJoinAfterConflict(roomBare, triedNick string) {
 	ctx, span := telemetry.Start(context.Background(), "xmpp.muc.join_retry", trace.WithSpanKind(trace.SpanKindProducer))
 	defer span.End()
+	log := x.logFor(ctx)
 	if span.IsRecording() {
 		span.SetAttributes(attribute.String("xmpp.room.jid", roomBare))
 	}
@@ -1445,17 +1453,17 @@ func (x *xmppClient) retryMUCJoinAfterConflict(roomBare, triedNick string) {
 	sess := x.session
 	x.mu.Unlock()
 	if sess == nil {
-		x.log.Warn().Str("room", roomBare).Msg("MUC 409 retry skipped: not connected")
+		log.Warn().Str("room", roomBare).Msg("MUC 409 retry skipped: not connected")
 		return
 	}
 	roomJID, err := jid.Parse(roomBare)
 	if err != nil {
-		x.log.Warn().Err(err).Str("room", roomBare).Msg("MUC 409 retry: invalid room JID")
+		log.Warn().Err(err).Str("room", roomBare).Msg("MUC 409 retry: invalid room JID")
 		return
 	}
 	toJID, err := roomJID.WithResource(altNick)
 	if err != nil {
-		x.log.Warn().Err(err).Str("room", roomBare).Msg("MUC 409 retry: failed to build JID")
+		log.Warn().Err(err).Str("room", roomBare).Msg("MUC 409 retry: failed to build JID")
 		return
 	}
 	x.mucPendingJoinMu.Lock()
@@ -1472,10 +1480,10 @@ func (x *xmppClient) retryMUCJoinAfterConflict(roomBare, triedNick string) {
 		x.mucPendingJoinMu.Lock()
 		delete(x.mucPendingJoin, roomBare)
 		x.mucPendingJoinMu.Unlock()
-		x.log.Warn().Err(err).Str("room", roomBare).Str("nick", altNick).Msg("MUC 409 retry: send failed")
+		log.Warn().Err(err).Str("room", roomBare).Str("nick", altNick).Msg("MUC 409 retry: send failed")
 		return
 	}
-	x.log.Info().Str("room", roomBare).Str("nick", altNick).Msg("MUC 409 retry: sent join with alternative nick")
+	log.Info().Str("room", roomBare).Str("nick", altNick).Msg("MUC 409 retry: sent join with alternative nick")
 }
 
 // getMUCOurOccupantJID returns our full occupant JID (room@service/nick) for the given MUC room if known.
@@ -1534,7 +1542,7 @@ func (x *xmppClient) leaveMUC(ctx context.Context, roomJIDStr string) error {
 		delete(x.mucOurOccupantJID, roomJIDStr)
 	}
 	x.mucOurOccupantJIDMu.Unlock()
-	x.log.Info().
+	x.logFor(ctx).Info().
 		Str("room", roomJIDStr).
 		Str("nick", nick).
 		Msg("Sent MUC leave presence")
@@ -1549,6 +1557,7 @@ func (x *xmppClient) HandleMatrixViewingChat(ctx context.Context, msg *bridgev2.
 	}
 	ctx, span := telemetry.Start(ctx, "matrix.handle_viewing_chat", trace.WithSpanKind(trace.SpanKindConsumer))
 	defer span.End()
+	log := x.logFor(ctx)
 	if span.IsRecording() {
 		span.SetAttributes(attribute.String("matrix.room_id", msg.Portal.MXID.String()))
 		setPortalTypeAttr(span, msg.Portal)
@@ -1557,7 +1566,7 @@ func (x *xmppClient) HandleMatrixViewingChat(ctx context.Context, msg *bridgev2.
 	// For MUC portals, join the room on XMPP so we can send and receive groupchat.
 	if x.portalIsMUC(ctx, msg.Portal) {
 		if err := x.JoinMUC(ctx, string(msg.Portal.ID)); err != nil {
-			x.log.Warn().Err(err).Str("portal_id", string(msg.Portal.ID)).Msg("Failed to join MUC on view; messages may not send until joined")
+			log.Warn().Err(err).Str("portal_id", string(msg.Portal.ID)).Msg("Failed to join MUC on view; messages may not send until joined")
 		}
 	}
 
@@ -1573,7 +1582,7 @@ func (x *xmppClient) HandleMatrixViewingChat(ctx context.Context, msg *bridgev2.
 		}
 		if userIntent != nil {
 			if err := userIntent.EnsureJoined(ctx, msg.Portal.MXID); err != nil {
-				x.log.Warn().Err(err).Str("room_id", msg.Portal.MXID.String()).Msg("Failed to ensure user is joined to portal room")
+				log.Warn().Err(err).Str("room_id", msg.Portal.MXID.String()).Msg("Failed to ensure user is joined to portal room")
 			}
 		}
 	}
@@ -1582,7 +1591,7 @@ func (x *xmppClient) HandleMatrixViewingChat(ctx context.Context, msg *bridgev2.
 	if msg.Portal.OtherUserID != "" {
 		ghost, err := x.conn.br.GetExistingGhostByID(ctx, msg.Portal.OtherUserID)
 		if err != nil {
-			x.log.Warn().Err(err).Str("other_user_id", string(msg.Portal.OtherUserID)).Msg("Failed to get ghost for sync")
+			log.Warn().Err(err).Str("other_user_id", string(msg.Portal.OtherUserID)).Msg("Failed to get ghost for sync")
 		} else if ghost != nil {
 			meta, _ := ghost.Metadata.(*GhostMetadata)
 			if meta != nil && meta.ProfileFetchedAt.Time.Add(5*time.Minute).Before(time.Now()) {
@@ -1590,7 +1599,7 @@ func (x *xmppClient) HandleMatrixViewingChat(ctx context.Context, msg *bridgev2.
 				meta.ProfileFetchedAt.Time = time.Time{}
 				info, err := x.GetUserInfo(ctx, ghost)
 				if err != nil {
-					x.log.Warn().Err(err).Str("ghost_id", string(ghost.ID)).Msg("Failed to get user info for ghost sync")
+					log.Warn().Err(err).Str("ghost_id", string(ghost.ID)).Msg("Failed to get user info for ghost sync")
 				} else if info != nil {
 					ghost.UpdateInfo(ctx, info)
 				}
@@ -1649,6 +1658,7 @@ func (x *xmppClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 }
 
 func (x *xmppClient) handleMatrixMessage(ctx context.Context, msg *bridgev2.MatrixMessage) (*bridgev2.MatrixMessageResponse, error) {
+	log := x.logFor(ctx)
 	x.mu.Lock()
 	sess := x.session
 	x.mu.Unlock()
@@ -1662,7 +1672,7 @@ func (x *xmppClient) handleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 	toJID, err := jid.Parse(toJIDStr)
 	if err != nil {
 		warnIfDebugIdentifiers(&x.log)
-		x.log.Debug().Str("portal_id", toJIDStr).Msg("HandleMatrixMessage: invalid portal JID format")
+		log.Debug().Str("portal_id", toJIDStr).Msg("HandleMatrixMessage: invalid portal JID format")
 		return nil, bridgev2.WrapErrorInStatus(fmt.Errorf("invalid portal JID format")).WithSendNotice(true)
 	}
 	// Ensure this portal is included in MAM catch-up (e.g. Cheogram groups not in roster).
@@ -1696,7 +1706,7 @@ func (x *xmppClient) handleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 	// For MUC portals, ensure we're in the room before sending (join on view may not have run yet).
 	if x.portalIsMUC(ctx, msg.Portal) {
 		if joinErr := x.JoinMUC(ctx, toJIDStr); joinErr != nil {
-			x.log.Warn().Err(joinErr).Str("portal_id", toJIDStr).Msg("Failed to join MUC before send; message may be rejected")
+			log.Warn().Err(joinErr).Str("portal_id", toJIDStr).Msg("Failed to join MUC before send; message may be rejected")
 		} else {
 			// Give the MUC server time to process our presence before sending (cross-server MUCs can be slow).
 			select {
@@ -1707,7 +1717,7 @@ func (x *xmppClient) handleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 		}
 	}
 
-	x.log.Debug().
+	log.Debug().
 		Str("content_body", msg.Content.Body).
 		Str("content_body_len", fmt.Sprintf("%d", len(msg.Content.Body))).
 		Str("content_formatted_body", msg.Content.FormattedBody).
@@ -1721,10 +1731,10 @@ func (x *xmppClient) handleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 	body := msg.Content.Body
 	if body == "" && msg.Content.FormattedBody != "" {
 		body = msg.Content.FormattedBody
-		x.log.Debug().Str("using_formatted_body", body).Msg("DEBUG: Using FormattedBody instead of Body")
+		log.Debug().Str("using_formatted_body", body).Msg("DEBUG: Using FormattedBody instead of Body")
 	}
 	
-	x.log.Debug().
+	log.Debug().
 		Str("resolved_body", body).
 		Str("resolved_body_len", fmt.Sprintf("%d", len(body))).
 		Msg("DEBUG: Body resolved from Matrix content")
@@ -1745,7 +1755,7 @@ func (x *xmppClient) handleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 			// Fill FileName from raw event if Content.FileName is empty
 			if msg.Content.FileName == "" && mc.FileName != "" {
 				msg.Content.FileName = mc.FileName
-				x.log.Debug().Str("event_filename", mc.FileName).Msg("DEBUG: Got filename from event content")
+				log.Debug().Str("event_filename", mc.FileName).Msg("DEBUG: Got filename from event content")
 			}
 		}
 	}
@@ -1780,7 +1790,7 @@ func (x *xmppClient) handleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 		case event.MsgAudio:
 			mediaLabel = "audio"
 		}
-		x.log.Debug().
+		log.Debug().
 			Str("msg_type", string(msg.Content.MsgType)).
 			Str("media_label", mediaLabel).
 			Str("raw_body", body).
@@ -1798,7 +1808,7 @@ func (x *xmppClient) handleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 		if mediaURL == "" {
 			return nil, bridgev2.WrapErrorInStatus(fmt.Errorf("%w: %s has no URL", bridgev2.ErrUnsupportedMessageType, msg.Content.MsgType)).WithSendNotice(true)
 		}
-		x.log.Debug().Str("media_url", string(mediaURL)).Msg("DEBUG: Resolved media URL")
+		log.Debug().Str("media_url", string(mediaURL)).Msg("DEBUG: Resolved media URL")
 		
 		// Extract user-provided caption (if any). For OOB messages, we only include actual user text.
 		// Matrix often includes the filename in body for media messages; if body equals filename, treat as no caption.
@@ -1812,7 +1822,7 @@ func (x *xmppClient) handleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 			}
 		}
 		
-		x.log.Debug().
+		log.Debug().
 			Str("trimmed_body", userCaption).
 			Str("content_filename", msg.Content.FileName).
 			Str("resolved_filename", filename).
@@ -1821,7 +1831,7 @@ func (x *xmppClient) handleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 		
 		if filename != "" && userCaption == filename {
 			// Body is just the filename (Matrix default), not a user caption
-			x.log.Debug().Msg("DEBUG: Body equals filename, treating as empty caption")
+			log.Debug().Msg("DEBUG: Body equals filename, treating as empty caption")
 			userCaption = ""
 		} else if filename == "" && userCaption != "" {
 			// If filename is still empty but body looks like a filename (ends with extension, no spaces),
@@ -1833,7 +1843,7 @@ func (x *xmppClient) handleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 				strings.HasSuffix(userCaption, ".mp3") || strings.HasSuffix(userCaption, ".ogg") ||
 				strings.HasSuffix(userCaption, ".pdf") || strings.HasSuffix(userCaption, ".zip") ||
 				strings.Contains(userCaption, ".")) {
-				x.log.Debug().Str("body_looks_like_filename", userCaption).Msg("DEBUG: Body looks like filename (has extension, no spaces), treating as empty caption")
+				log.Debug().Str("body_looks_like_filename", userCaption).Msg("DEBUG: Body looks like filename (has extension, no spaces), treating as empty caption")
 				userCaption = ""
 			}
 		}
@@ -1846,7 +1856,7 @@ func (x *xmppClient) handleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 				fallbackCaption += ": " + msg.Content.FileName
 			}
 		}
-		x.log.Debug().
+		log.Debug().
 			Str("user_caption", userCaption).
 			Str("user_caption_len", fmt.Sprintf("%d", len(userCaption))).
 			Str("fallback_caption", fallbackCaption).
@@ -1861,7 +1871,7 @@ func (x *xmppClient) handleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 		}
 		dlSpan.End()
 		if err != nil {
-			x.log.Warn().Err(err).Str("mxc", string(mediaURL)).Msg("Media download failed; sending MXC link anyway")
+			log.Warn().Err(err).Str("mxc", string(mediaURL)).Msg("Media download failed; sending MXC link anyway")
 			messageBody = fallbackCaption + " " + string(mediaURL)
 		} else {
 			filename := msg.Content.FileName
@@ -1877,15 +1887,15 @@ func (x *xmppClient) handleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 			// Use sender's (our) domain for XEP-0363: we upload to our server, then send the GET URL.
 			origin, err := jid.Parse(string(x.loginID))
 			if err != nil {
-				x.log.Warn().Err(err).Str("login_id", string(x.loginID)).Msg("Failed to parse loginID for upload JID; sending MXC link")
+				log.Warn().Err(err).Str("login_id", string(x.loginID)).Msg("Failed to parse loginID for upload JID; sending MXC link")
 				messageBody = fallbackCaption + " " + string(mediaURL)
 			} else {
 				uploadJID := x.getUploadJID(ctx, sess, origin.Domain().String())
 				if uploadJID == nil {
-					x.log.Warn().Str("domain", origin.Domain().String()).Msg("Could not discover upload service; sending MXC link")
+					log.Warn().Str("domain", origin.Domain().String()).Msg("Could not discover upload service; sending MXC link")
 					messageBody = fallbackCaption + " " + string(mediaURL)
 				} else {
-					x.log.Debug().Str("upload_jid", uploadJID.String()).Str("filename", filename).Int("size", len(data)).Str("content_type", contentType).Msg("Requesting XEP-0363 upload slot")
+					log.Debug().Str("upload_jid", uploadJID.String()).Str("filename", filename).Int("size", len(data)).Str("content_type", contentType).Msg("Requesting XEP-0363 upload slot")
 					slotCtx, slotSpan := telemetry.StartChild(ctx, "xmpp.iq.upload_slot", trace.WithSpanKind(trace.SpanKindClient))
 					if slotSpan.IsRecording() {
 						slotSpan.SetAttributes(
@@ -1898,13 +1908,13 @@ func (x *xmppClient) handleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 					telemetry.Fail(slotSpan, upErr)
 					slotSpan.End()
 					if upErr != nil {
-						x.log.Warn().Err(upErr).Str("upload_jid", uploadJID.String()).Str("mxc", string(mediaURL)).Msg("XEP-0363 slot request failed; sending MXC link anyway")
+						log.Warn().Err(upErr).Str("upload_jid", uploadJID.String()).Str("mxc", string(mediaURL)).Msg("XEP-0363 slot request failed; sending MXC link anyway")
 						messageBody = fallbackCaption + " " + string(mediaURL)
 					} else {
-						x.log.Debug().Str("put_url", slot.PutURL.String()).Str("get_url", slot.GetURL.String()).Msg("Got XEP-0363 slot, uploading file")
+						log.Debug().Str("put_url", slot.PutURL.String()).Str("get_url", slot.GetURL.String()).Msg("Got XEP-0363 slot, uploading file")
 						putReq, putErr := slot.Put(ctx, bytes.NewReader(data))
 						if putErr != nil {
-							x.log.Warn().Err(putErr).Str("mxc", string(mediaURL)).Msg("XEP-0363 PUT build failed; sending MXC link anyway")
+							log.Warn().Err(putErr).Str("mxc", string(mediaURL)).Msg("XEP-0363 PUT build failed; sending MXC link anyway")
 							messageBody = fallbackCaption + " " + string(mediaURL)
 						} else {
 							client := &http.Client{Timeout: 60 * time.Second}
@@ -1922,19 +1932,19 @@ func (x *xmppClient) handleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 							}
 							putSpan.End()
 							if doErr != nil {
-								x.log.Warn().Err(doErr).Str("put_url", slot.PutURL.String()).Str("mxc", string(mediaURL)).Msg("XEP-0363 upload PUT failed; sending MXC link anyway")
+								log.Warn().Err(doErr).Str("put_url", slot.PutURL.String()).Str("mxc", string(mediaURL)).Msg("XEP-0363 upload PUT failed; sending MXC link anyway")
 								messageBody = fallbackCaption + " " + string(mediaURL)
 							} else {
 								resp.Body.Close()
 								if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-									x.log.Warn().Int("status", resp.StatusCode).Str("put_url", slot.PutURL.String()).Str("mxc", string(mediaURL)).Msg("XEP-0363 upload returned error status; sending MXC link anyway")
+									log.Warn().Int("status", resp.StatusCode).Str("put_url", slot.PutURL.String()).Str("mxc", string(mediaURL)).Msg("XEP-0363 upload returned error status; sending MXC link anyway")
 									messageBody = fallbackCaption + " " + string(mediaURL)
 								} else {
 									getURLStr := slot.GetURL.String()
 									// When OOB is present, use user caption only (empty if none) so client displays media inline
 									messageBody = userCaption
 									oobURL = getURLStr
-									x.log.Info().
+									log.Info().
 										Str("get_url", getURLStr).
 										Str("filename", filename).
 										Str("user_caption", userCaption).
@@ -1968,17 +1978,17 @@ func (x *xmppClient) handleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 			if msg.ReplyTo.Metadata != nil {
 				if meta, ok := msg.ReplyTo.Metadata.(*MessageMetadata); ok && meta != nil && meta.XMPPMessageID != "" {
 					xmppMsgID = meta.XMPPMessageID
-					x.log.Debug().
+					log.Debug().
 						Str("matrix_event_id", dbMsgID).
 						Str("xmpp_msg_id", xmppMsgID).
 						Msg("DEBUG: Found XMPP message ID in metadata for Matrix-originated message")
 				} else {
-					x.log.Debug().
+					log.Debug().
 						Str("matrix_event_id", dbMsgID).
 						Msg("DEBUG: Matrix-originated message has no XMPP message ID in metadata; sending without XEP-0461 reply")
 				}
 			} else {
-				x.log.Debug().
+				log.Debug().
 					Str("matrix_event_id", dbMsgID).
 					Msg("DEBUG: Matrix-originated message has no metadata; sending without XEP-0461 reply")
 			}
@@ -1994,12 +2004,12 @@ func (x *xmppClient) handleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 			senderIDStr := string(msg.ReplyTo.SenderID)
 			if senderIDStr != "" {
 				replyToJID = senderIDStr
-				x.log.Debug().
+				log.Debug().
 					Str("reply_id", replyID).
 					Str("reply_to_jid", replyToJID).
 					Msg("DEBUG: Found reply target, will include XEP-0461 reply element")
 			} else {
-				x.log.Debug().Str("reply_id", replyID).Msg("DEBUG: Reply target has no sender ID; sending reply without 'to' attribute")
+				log.Debug().Str("reply_id", replyID).Msg("DEBUG: Reply target has no sender ID; sending reply without 'to' attribute")
 			}
 		}
 	}
@@ -2009,7 +2019,7 @@ func (x *xmppClient) handleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 	if x.portalIsMUC(ctx, msg.Portal) {
 		msgType = stanza.MessageType("groupchat")
 	}
-	x.log.Debug().
+	log.Debug().
 		Str("final_message_body", messageBody).
 		Str("final_message_body_len", fmt.Sprintf("%d", len(messageBody))).
 		Str("final_oob_url", oobURL).
@@ -2025,7 +2035,7 @@ func (x *xmppClient) handleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 		return nil, bridgev2.WrapErrorInStatus(fmt.Errorf("failed to send XMPP message: %w", err)).WithSendNotice(true)
 	}
 	
-	x.log.Debug().
+	log.Debug().
 		Str("xmpp_msg_id", xmppMsgID).
 		Str("matrix_event_id", string(msg.Event.ID)).
 		Msg("DEBUG: sendXMPPMessageWithOOB completed successfully, storing XMPP message ID in metadata")
@@ -2036,7 +2046,7 @@ func (x *xmppClient) handleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 	msgMeta := &MessageMetadata{
 		XMPPMessageID: xmppMsgID,
 	}
-	x.log.Debug().
+	log.Debug().
 		Str("matrix_event_id", string(msg.Event.ID)).
 		Str("xmpp_msg_id", xmppMsgID).
 		Str("db_message_id", string(id)).
@@ -2045,9 +2055,9 @@ func (x *xmppClient) handleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 	// Send read receipt from bridge bot only when matrix.delivery_receipts is enabled.
 	if x.conn.deliveryReceipts && msg.Portal != nil && msg.Portal.MXID != "" && msg.Event != nil && msg.Event.ID != "" {
 		if err := x.conn.br.Bot.MarkRead(ctx, msg.Portal.MXID, msg.Event.ID, now); err != nil {
-			x.log.Warn().Err(err).Str("room_id", msg.Portal.MXID.String()).Str("event_id", string(msg.Event.ID)).Msg("Failed to send read receipt for bridged message")
+			log.Warn().Err(err).Str("room_id", msg.Portal.MXID.String()).Str("event_id", string(msg.Event.ID)).Msg("Failed to send read receipt for bridged message")
 		} else {
-			x.log.Debug().Str("event_id", string(msg.Event.ID)).Msg("Sent read receipt for bridged message")
+			log.Debug().Str("event_id", string(msg.Event.ID)).Msg("Sent read receipt for bridged message")
 		}
 	}
 
@@ -2099,6 +2109,7 @@ func (x *xmppClient) HandleMatrixReaction(ctx context.Context, msg *bridgev2.Mat
 }
 
 func (x *xmppClient) handleMatrixReaction(ctx context.Context, msg *bridgev2.MatrixReaction) (*database.Reaction, error) {
+	log := x.logFor(ctx)
 	x.mu.Lock()
 	sess := x.session
 	x.mu.Unlock()
@@ -2125,12 +2136,12 @@ func (x *xmppClient) handleMatrixReaction(ctx context.Context, msg *bridgev2.Mat
 		if msg.TargetMessage.Metadata != nil {
 			if meta, ok := msg.TargetMessage.Metadata.(*MessageMetadata); ok && meta != nil && meta.XMPPMessageID != "" {
 				targetMessageID = meta.XMPPMessageID
-				x.log.Debug().
+				log.Debug().
 					Str("matrix_event_id", dbMsgID).
 					Str("xmpp_msg_id", targetMessageID).
 					Msg("DEBUG: Found XMPP message ID in metadata for Matrix-originated reaction target")
 			} else {
-				x.log.Debug().
+				log.Debug().
 					Str("matrix_event_id", dbMsgID).
 					Msg("DEBUG: Matrix-originated reaction target has no XMPP message ID in metadata")
 				return nil, fmt.Errorf("target message has no XMPP message ID")
@@ -2141,7 +2152,7 @@ func (x *xmppClient) handleMatrixReaction(ctx context.Context, msg *bridgev2.Mat
 	} else {
 		// XMPP-originated message: ID is stored directly in database.Message.ID
 		targetMessageID = dbMsgID
-		x.log.Debug().
+		log.Debug().
 			Str("xmpp_msg_id", targetMessageID).
 			Msg("DEBUG: Using XMPP message ID directly for XMPP-originated reaction target")
 	}
@@ -2154,7 +2165,7 @@ func (x *xmppClient) handleMatrixReaction(ctx context.Context, msg *bridgev2.Mat
 	// we only send the new emoji here, so Jabber shows one reaction per user (consistent with
 	// Jabber→Matrix). Future: see README "To-do (unimplemented work)" — multiple reactions per user per message.
 	emoji := msg.PreHandleResp.Emoji
-	x.log.Debug().
+	log.Debug().
 		Str("emoji", emoji).
 		Str("target_message_id", targetMessageID).
 		Msg("DEBUG: Sending Matrix reaction to XMPP using XEP-0444 format")
@@ -2198,6 +2209,7 @@ func (x *xmppClient) getUploadJID(ctx context.Context, sess *xmpp.Session, domai
 	commonSubdomains := []string{"upload", "share", "files", "http_upload"}
 	ctx, span := telemetry.StartChild(ctx, "xmpp.upload.discover")
 	defer span.End()
+	log := x.logFor(ctx)
 	span.SetAttributes(attribute.Int("candidate.count", len(commonSubdomains)))
 	for _, subdomain := range commonSubdomains {
 		candidate := subdomain + "." + domain
@@ -2213,15 +2225,15 @@ func (x *xmppClient) getUploadJID(ctx context.Context, sess *xmpp.Session, domai
 		if err == nil {
 			// Success! Cache this JID
 			x.uploadJID = &uploadJID
-			x.log.Info().Str("upload_jid", uploadJID.String()).Msg("Discovered XEP-0363 upload service")
+			log.Info().Str("upload_jid", uploadJID.String()).Msg("Discovered XEP-0363 upload service")
 			return x.uploadJID
 		}
 		// Log debug info but continue trying other subdomains
 		span.AddEvent("candidate_failed", trace.WithAttributes(attribute.String("server.address", candidate)))
-		x.log.Debug().Err(err).Str("candidate", candidate).Msg("Upload service discovery attempt failed")
+		log.Debug().Err(err).Str("candidate", candidate).Msg("Upload service discovery attempt failed")
 	}
 	// None of the common subdomains worked
 	span.SetStatus(codes.Error, "no upload service found")
-	x.log.Warn().Str("domain", domain).Msg("Could not discover upload service via common subdomains")
+	log.Warn().Str("domain", domain).Msg("Could not discover upload service via common subdomains")
 	return nil
 }
