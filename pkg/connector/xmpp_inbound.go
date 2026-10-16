@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	"go.opentelemetry.io/otel/trace"
 	"mellium.im/xmpp"
 	"mellium.im/xmpp/jid"
 	"mellium.im/xmpp/mux"
@@ -24,6 +25,8 @@ import (
 	"maunium.net/go/mautrix/bridgev2/status"
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
+
+	"github.com/mautrix/jabber/pkg/telemetry"
 )
 
 const jabberClientNS = "jabber:client"
@@ -818,12 +821,15 @@ type jabberRemoteMessage struct {
 	reactionEmojis []string // XEP-0444 reaction emojis
 	timestamp      time.Time
 	x              *xmppClient // Reference to xmppClient for database access
+	spanCtx        trace.SpanContext // trace context set by queueRemoteEvent before queueing (zero when tracing is off)
 }
 
 var (
 	_ bridgev2.RemoteMessage    = (*jabberRemoteMessage)(nil)
 	_ bridgev2.RemoteReaction   = (*jabberRemoteMessage)(nil)
 	_ bridgev2.RemoteReactionRemove = (*jabberRemoteMessage)(nil)
+	_ bridgev2.RemoteEventWithContextMutation = (*jabberRemoteMessage)(nil)
+	_ bridgev2.RemotePostHandler = (*jabberRemoteMessage)(nil)
 )
 
 // parseBodyReaction detects body-based reaction format used by some clients (e.g. "message-id🥳> quoted text").
@@ -914,7 +920,18 @@ func (m *jabberRemoteMessage) GetPortalKey() networkid.PortalKey  { return m.por
 func (m *jabberRemoteMessage) GetSender() bridgev2.EventSender   { return m.sender }
 func (m *jabberRemoteMessage) GetID() networkid.MessageID         { return m.id }
 func (m *jabberRemoteMessage) AddLogContext(c zerolog.Context) zerolog.Context {
-	return c.Str("message_id", string(m.id))
+	c = c.Str("message_id", string(m.id))
+	return telemetry.AddLogFields(c, m.spanCtx)
+}
+
+// MutateContext starts the remote-event handling span (no-op without a span context).
+func (m *jabberRemoteMessage) MutateContext(ctx context.Context) context.Context {
+	return telemetry.StartRemoteEvent(ctx, m.spanCtx)
+}
+
+// PostHandle ends the span started in MutateContext.
+func (m *jabberRemoteMessage) PostHandle(ctx context.Context, _ *bridgev2.Portal) {
+	telemetry.EndRemoteEvent(ctx)
 }
 
 // GetMessageMetadata returns metadata to store with the message when the bridge persists an inbound (XMPP-originated) message.
