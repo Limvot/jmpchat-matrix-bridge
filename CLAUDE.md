@@ -14,7 +14,7 @@ Builds use Docker to ensure a repeatable environment with all C dependencies (CG
 ./build.sh
 ```
 
-This runs `docker build` and extracts the binary. For a local build without encryption support (requires Go 1.25+, CGO, sqlite-dev):
+This runs `docker build` and extracts the binary. For a local build without encryption support (requires Go 1.26+, CGO, sqlite-dev):
 
 ```bash
 go build -tags nocrypto -ldflags "-s -w" -o mautrix-jabber ./cmd/mautrix-jabber
@@ -112,9 +112,9 @@ See `README.md` for full Docker usage with registration generation and volume mo
 
 ## Key Dependencies
 
-- Go 1.25+ (per `go.mod`)
-- `maunium.net/go/mautrix v0.27.0` — bridgev2 framework (Matrix protocol, appservice, DB schema)
-- `go.mau.fi/util v0.9.8` — shared utilities
+- Go 1.26+ (per `go.mod`)
+- `maunium.net/go/mautrix v0.32.0` — bridgev2 framework (Matrix protocol, appservice, DB schema)
+- `go.mau.fi/util v0.11.0` — shared utilities
 - `mellium.im/xmpp v0.22.0` — XMPP client library
 - `mellium.im/sasl v0.3.2` — SASL authentication
 - `mellium.im/xmlstream v0.15.4` — XML stream processing

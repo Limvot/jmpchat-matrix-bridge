@@ -1,5 +1,5 @@
 # Build stage (CGO required: sqlite3, libolm for E2BE)
-FROM golang:1.25-alpine AS builder
+FROM golang:1.26-alpine AS builder
 
 RUN apk add --no-cache ca-certificates gcc g++ musl-dev sqlite-dev olm-dev
 

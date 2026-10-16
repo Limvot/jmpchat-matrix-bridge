@@ -76,7 +76,7 @@ type xmppClient struct {
 	carbonsEnableCh   chan error
 	carbonsEnableID   string
 	carbonsEnableMu   sync.Mutex
-	// reconnectCancel stops ReconnectLoop when the user logs out; set in LoadUserLogin, called in LogoutRemote.
+	// reconnectCancel stops ReconnectLoop; set in LoadUserLogin, called in Disconnect (which LogoutRemote uses).
 	reconnectCancel context.CancelFunc
 	// callSessions tracks in-flight XEP-0353 Jingle Message Initiation calls, keyed by session id,
 	// so accept/reject/finish (which only carry the sid) can be mapped back to the caller's portal.
@@ -321,8 +321,17 @@ func (x *xmppClient) ReconnectLoop(ctx context.Context) {
 	}
 }
 
+// Disconnect is terminal for this client: the framework only calls it when stopping the bridge,
+// replacing the client (re-login with the same account, network reset), or logging out. Stop the
+// reconnect loop too, otherwise the old client would reconnect alongside its replacement and
+// the account would end up with duplicate XMPP sessions. Unexpected connection drops don't go
+// through here (serveMessages just clears the session), so ReconnectLoop still handles those.
 func (x *xmppClient) Disconnect() {
 	x.mu.Lock()
+	if x.reconnectCancel != nil {
+		x.reconnectCancel()
+		x.reconnectCancel = nil
+	}
 	hadSession := x.session != nil
 	if hadSession {
 		_ = x.session.Close()
@@ -351,13 +360,6 @@ func (x *xmppClient) IsLoggedIn() bool {
 }
 
 func (x *xmppClient) LogoutRemote(ctx context.Context) {
-	x.mu.Lock()
-	cancel := x.reconnectCancel
-	x.reconnectCancel = nil
-	x.mu.Unlock()
-	if cancel != nil {
-		cancel()
-	}
 	x.Disconnect()
 }
 
