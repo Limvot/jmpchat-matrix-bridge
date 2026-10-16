@@ -171,6 +171,13 @@ func (x *xmppClient) Connect(ctx context.Context) {
 	x.log.Debug().Str("hypothesis", "H1").Msg("DEBUG: Connect after enableCarbons")
 	// #endregion
 	x.mu.Lock() // Re-acquire before return (defer will unlock)
+	// Fetch the roster on every new session. Besides mapping roster names to ghosts and DM room
+	// names, requesting the roster is what makes the server treat this resource as "interested"
+	// (RFC 6121 §2.1.6), so it only sends us roster pushes (contact renamed/added/removed on
+	// another client) after this. This must run here rather than in ReconnectLoop: the framework
+	// also calls Connect directly at startup, and in that case the loop never sees a connect of
+	// its own. When backfill.enabled, also run full MAM backfill for roster DMs.
+	go x.runFullBackfillAfterRosterSync(context.Background())
 	// Periodic MAM catch-up so messages sent from other clients appear within ~45s if carbons aren't used.
 	go x.runMAMCatchUpLoop(context.Background())
 }
@@ -299,10 +306,7 @@ func (x *xmppClient) ReconnectLoop(ctx context.Context) {
 		cancel()
 
 		if x.IsLoggedIn() {
-			// Sync roster once after a successful (re)connect so display names can be mapped
-			// from the Jabber roster to Matrix ghosts and DM room names. When backfill.enabled,
-			// also run full MAM backfill for roster DMs so portals get history before new messages.
-			go x.runFullBackfillAfterRosterSync(context.Background())
+			// Roster sync (and optional full backfill) is started by Connect itself.
 			// Reset backoff on successful connection.
 			backoff = 5 * time.Second
 			continue
@@ -531,6 +535,42 @@ func (x *xmppClient) refreshRosterGhostsAndPortals(ctx context.Context, rosterMa
 			x.log.Info().Str("bare_jid", jidForLookup).Str("room_id", portal.MXID.String()).Str("roster_name", rosterName).Msg("Updated portal from roster (queued room name sync)")
 		}
 	}
+	x.refreshGroupMMSPortals(ctx, rosterMap)
+}
+
+// refreshGroupMMSPortals queues a ChatResync for this login's Cheogram group MMS portals that
+// include any of the given JIDs, since their room names are built from participants' roster names.
+func (x *xmppClient) refreshGroupMMSPortals(ctx context.Context, rosterMap map[string]string) {
+	if !CheogramEnabled(x.conn.br) || len(rosterMap) == 0 {
+		return
+	}
+	portals, err := x.conn.br.DB.Portal.GetAllWithMXID(ctx)
+	if err != nil {
+		x.log.Debug().Err(err).Msg("Failed to list portals for group MMS roster refresh")
+		return
+	}
+	for _, p := range portals {
+		if p.Receiver != x.loginID {
+			continue
+		}
+		individuals, ok := ParseCheogramGroupMMSJID(string(p.ID))
+		if !ok {
+			continue
+		}
+		for _, j := range individuals {
+			if _, changed := rosterMap[strings.ToLower(j)]; changed {
+				x.login.QueueRemoteEvent(&simplevent.ChatResync{
+					EventMeta: simplevent.EventMeta{
+						Type:      bridgev2.RemoteEventChatResync,
+						PortalKey: p.PortalKey,
+					},
+					GetChatInfoFunc: x.GetChatInfo,
+				})
+				x.log.Info().Str("portal_id", string(p.ID)).Str("bare_jid", j).Msg("Queued group MMS room name sync from roster")
+				break
+			}
+		}
+	}
 }
 
 // lookupRosterName returns the roster name for the given bare JID, if available.
@@ -602,13 +642,12 @@ func (x *xmppClient) ensureRosterSynced(ctx context.Context) {
 }
 
 // handleRosterPush is called by the mellium roster handler when the server sends a roster push IQ
-// (contact added, updated, or removed). We update the in-memory roster cache and refresh the
-// affected ghost so Matrix display name and DM room name stay in sync without reconnect.
+// (contact added, renamed, or removed, e.g. from another client like Cheogram/Conversations). We
+// update the in-memory roster cache and refresh the affected ghost and DM/group MMS room names.
 //
-// Note: Rename-after-add often does not trigger a roster push. Many clients (e.g. Movim) and
-// servers only push on add (with name) and remove; a name-only update may not be sent or may
-// be sent with an omitted/empty name attribute. When we get a non-remove push with empty name,
-// we keep the previous roster name so we don't clear it on updates that omit the attribute.
+// Per RFC 6121 §2.1.6 a push carries the complete item as it now stands, so a missing name means
+// the contact has no roster name anymore (fall back to the JID). The server only sends pushes to
+// resources that have fetched the roster this session; Connect does that on every new session.
 func (x *xmppClient) handleRosterPush(ver string, item roster.Item) error {
 	bareJID := item.JID.Bare().String()
 	if bareJID == "" {
@@ -620,14 +659,10 @@ func (x *xmppClient) handleRosterPush(ver string, item roster.Item) error {
 	if x.roster == nil {
 		x.roster = make(map[string]string)
 	}
-	if item.Subscription == "remove" {
+	if item.Subscription == "remove" || item.Name == "" {
 		delete(x.roster, key)
 	} else {
-		if item.Name != "" {
-			x.roster[key] = item.Name
-		}
-		// Empty name: do not delete. Server may send an update (e.g. subscription/group) without
-		// repeating the name; keep existing cache so rename-on-server still shows until we resync.
+		x.roster[key] = item.Name
 	}
 	x.rosterMu.Unlock()
 
@@ -637,29 +672,10 @@ func (x *xmppClient) handleRosterPush(ver string, item roster.Item) error {
 		Str("name", item.Name).
 		Msg("Roster push applied")
 
-	// Refresh the ghost so Matrix sees the new display name.
-	ctx := context.Background()
-	ghost, err := x.conn.br.GetExistingGhostByID(ctx, networkid.UserID(key))
-	if err == nil && ghost != nil {
-		if info, err := x.GetUserInfo(ctx, ghost); err == nil && info != nil {
-			ghost.UpdateInfo(ctx, info)
-		}
-	}
-
-	// Refresh the DM portal room name if it exists (so Matrix room name matches roster).
-	if x.login != nil {
-		portal, err := x.conn.br.GetDMPortal(ctx, x.login.ID, networkid.UserID(key))
-		if err == nil && portal != nil && portal.MXID != "" {
-			portal.UpdateBridgeInfo(ctx)
-			x.login.QueueRemoteEvent(&simplevent.ChatResync{
-				EventMeta: simplevent.EventMeta{
-					Type:      bridgev2.RemoteEventChatResync,
-					PortalKey: portal.PortalKey,
-				},
-				GetChatInfoFunc: x.GetChatInfo,
-			})
-		}
-	}
+	// Refresh off the Serve goroutine: this handler runs inside the XMPP read loop, and the ghost/
+	// portal updates make Matrix requests (and may lazily fetch an avatar over XMPP, which would
+	// deadlock waiting for a response the blocked read loop can never deliver).
+	go x.refreshRosterGhostsAndPortals(x.log.WithContext(context.Background()), map[string]string{key: item.Name})
 	return nil
 }
 
