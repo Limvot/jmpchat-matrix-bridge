@@ -19,6 +19,10 @@ import (
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/bridgev2/networkid"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/mautrix/jabber/pkg/telemetry"
 )
 
 // JabberConfig is the connector-specific config under network.jabber (framework nests it by network ID).
@@ -290,6 +294,11 @@ func (j *jabberLoginProcess) SubmitUserInput(ctx context.Context, input map[stri
 		return nil, fmt.Errorf("password is required")
 	}
 
+	ctx, span := telemetry.Start(ctx, "bridge.login.submit",
+		trace.WithSpanKind(trace.SpanKindConsumer),
+		trace.WithAttributes(attribute.String("login.jid", jidStr)))
+	defer span.End()
+
 	log := j.conn.br.Log.With().Logger()
 	warnIfDebugIdentifiers(&log)
 	log.Debug().Str("jid", jidStr).Msg("XMPP login: attempting connection (this may take 1–2 minutes)")
@@ -299,10 +308,12 @@ func (j *jabberLoginProcess) SubmitUserInput(ctx context.Context, input map[stri
 	defer cancel()
 	origin, err := parseJID(jidStr)
 	if err != nil {
+		telemetry.Fail(span, err)
 		return nil, fmt.Errorf("invalid JID format (use user@domain)")
 	}
 	session, err := dialXMPP(dialCtx, origin, password, &log)
 	if err != nil {
+		telemetry.Fail(span, err)
 		log.Debug().Str("jid", jidStr).Msg("XMPP login: connection or auth failed")
 		if dialCtx.Err() != nil {
 			return nil, fmt.Errorf("connection timed out (is the server reachable?): %w", err)
@@ -322,6 +333,7 @@ func (j *jabberLoginProcess) SubmitUserInput(ctx context.Context, input map[stri
 
 	ul, err := j.user.NewLogin(ctx, data, nil)
 	if err != nil {
+		telemetry.Fail(span, err)
 		return nil, fmt.Errorf("failed to create login: %w", err)
 	}
 
@@ -381,15 +393,27 @@ func dialXMPP(ctx context.Context, origin jid.JID, password string, log *zerolog
 	t0 := time.Now()
 	domain := origin.Domainpart()
 
+	ctx, dialSpan := telemetry.StartChild(ctx, "xmpp.dial",
+		trace.WithAttributes(attribute.String("server.address", domain)))
+	defer dialSpan.End()
+
 	// Step 1: resolve domain with a bounded timeout
+	_, dnsSpan := telemetry.StartChild(ctx, "xmpp.dial.dns")
 	resolveCtx, resolveCancel := context.WithTimeout(ctx, 15*time.Second)
 	ips, err := net.DefaultResolver.LookupHost(resolveCtx, domain)
 	resolveCancel()
 	if err != nil {
+		telemetry.Fail(dnsSpan, err)
+		dnsSpan.End()
+		telemetry.Fail(dialSpan, err)
 		return nil, fmt.Errorf("DNS lookup %s: %w", domain, err)
 	}
+	dnsSpan.SetAttributes(attribute.Int("ip_count", len(ips)))
+	dnsSpan.End()
 	if len(ips) == 0 {
-		return nil, fmt.Errorf("DNS lookup %s: no addresses", domain)
+		err = fmt.Errorf("DNS lookup %s: no addresses", domain)
+		telemetry.Fail(dialSpan, err)
+		return nil, err
 	}
 	// Phase 2.2: dual-stack — try IPv6 first when both families are present
 	ips = sortIPsPreferIPv6(ips)
@@ -405,7 +429,10 @@ func dialXMPP(ctx context.Context, origin jid.JID, password string, log *zerolog
 	t1 := time.Now()
 	dialer := net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}
 	var conn net.Conn
+	_, tcpSpan := telemetry.StartChild(ctx, "xmpp.dial.tcp")
+	attempts := 0
 	for _, ip := range ips {
+		attempts++
 		addr := net.JoinHostPort(ip, xmppDefaultPort)
 		conn, err = dialer.DialContext(ctx, "tcp", addr)
 		if err == nil {
@@ -418,9 +445,14 @@ func dialXMPP(ctx context.Context, origin jid.JID, password string, log *zerolog
 			break
 		}
 	}
+	tcpSpan.SetAttributes(attribute.Int("tcp.attempts", attempts))
 	if conn == nil {
+		telemetry.Fail(tcpSpan, err)
+		tcpSpan.End()
+		telemetry.Fail(dialSpan, err)
 		return nil, fmt.Errorf("TCP connect %s (tried %d IPs): %w", domain, len(ips), err)
 	}
+	tcpSpan.End()
 
 	// Step 3: XMPP stream (TLS + SASL + bind)
 	features := []xmpp.StreamFeature{
@@ -428,11 +460,16 @@ func dialXMPP(ctx context.Context, origin jid.JID, password string, log *zerolog
 		xmpp.SASL("", password, saslMechanisms...),
 		xmpp.BindResource(),
 	}
-	sess, err := xmpp.NewClientSession(ctx, origin, conn, features...)
+	streamCtx, streamSpan := telemetry.StartChild(ctx, "xmpp.dial.stream")
+	sess, err := xmpp.NewClientSession(streamCtx, origin, conn, features...)
 	if err != nil {
+		telemetry.Fail(streamSpan, err)
+		streamSpan.End()
+		telemetry.Fail(dialSpan, err)
 		conn.Close()
 		return nil, err
 	}
+	streamSpan.End()
 	if log != nil {
 		log.Debug().
 			Dur("stream_ms", time.Since(t1)).
