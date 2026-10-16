@@ -226,5 +226,5 @@ func (x *xmppClient) emitCallNotice(ctx context.Context, portalKey networkid.Por
 		Data: cm,
 		ID:   networkid.MessageID("jmi:" + sid + ":" + action),
 	})
-	x.log.Info().Str("sid", sid).Str("action", action).Str("portal", string(portalKey.ID)).Str("text", text).Msg("Queued Jingle call notice")
+	x.logFor(ctx).Info().Str("sid", sid).Str("action", action).Str("portal", string(portalKey.ID)).Str("text", text).Msg("Queued Jingle call notice")
 }

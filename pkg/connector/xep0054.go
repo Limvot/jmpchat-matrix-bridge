@@ -169,13 +169,14 @@ func (x *xmppClient) queueAvatarRefresh(bareJID string) {
 func (x *xmppClient) doAvatarRefresh(bareJID string) {
 	ctx, span := telemetry.Start(context.Background(), "xmpp.avatar.refresh")
 	defer span.End()
+	log := x.logFor(ctx)
 	if span.IsRecording() {
 		span.SetAttributes(attribute.String("xmpp.peer.jid", bareJID))
 	}
 	data, _, hash, err := x.fetchContactAvatar(ctx, bareJID)
 	if err != nil {
 		telemetry.Fail(span, err)
-		x.log.Debug().Err(err).Str("jid", bareJID).Msg("Failed to fetch contact avatar (vCard)")
+		log.Debug().Err(err).Str("jid", bareJID).Msg("Failed to fetch contact avatar (vCard)")
 		return // transient: don't stamp, so the next trigger retries
 	}
 	ghost, gerr := x.conn.br.GetExistingGhostByID(ctx, networkid.UserID(bareJID))
@@ -190,7 +191,7 @@ func (x *xmppClient) doAvatarRefresh(bareJID string) {
 	var avatar *bridgev2.Avatar
 	switch {
 	case hash == "":
-		x.log.Debug().Str("jid", bareJID).Msg("Contact has no vCard avatar")
+		log.Debug().Str("jid", bareJID).Msg("Contact has no vCard avatar")
 		if curHash != "" {
 			avatar = &bridgev2.Avatar{Remove: true} // had one before, now removed
 		}
@@ -200,7 +201,7 @@ func (x *xmppClient) doAvatarRefresh(bareJID string) {
 			ID:  avatarIDFromHash(hash),
 			Get: func(ctx context.Context) ([]byte, error) { return avatarData, nil },
 		}
-		x.log.Debug().Str("jid", bareJID).Str("photo_hash", hash).Int("bytes", len(data)).Msg("Fetched contact avatar (vCard)")
+		log.Debug().Str("jid", bareJID).Str("photo_hash", hash).Int("bytes", len(data)).Msg("Fetched contact avatar (vCard)")
 	default:
 		// unchanged; only stamp AvatarFetchedAt below
 	}

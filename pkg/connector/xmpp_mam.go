@@ -289,6 +289,7 @@ func (x *xmppClient) FetchMessages(ctx context.Context, params bridgev2.FetchMes
 	}
 	ctx, span := telemetry.Start(ctx, "matrix.fetch_messages")
 	defer span.End()
+	log := x.logFor(ctx)
 	if span.IsRecording() {
 		span.SetAttributes(
 			attribute.String("xmpp.peer.jid", portalID),
@@ -296,7 +297,7 @@ func (x *xmppClient) FetchMessages(ctx context.Context, params bridgev2.FetchMes
 			attribute.Int("count", params.Count),
 		)
 	}
-	x.log.Info().
+	log.Info().
 		Str("portal_id", portalID).
 		Bool("forward", params.Forward).
 		Int("count", params.Count).
@@ -327,12 +328,12 @@ func (x *xmppClient) FetchMessages(ctx context.Context, params bridgev2.FetchMes
 
 	items, err := x.fetchMAMItems(ctx, params.Portal.PortalKey, withJID, start, end, count+1)
 	if err != nil {
-		x.log.Warn().Err(err).Str("portal_id", portalID).Msg("MAM query failed")
+		log.Warn().Err(err).Str("portal_id", portalID).Msg("MAM query failed")
 		telemetry.Fail(span, err)
 		return nil, err
 	}
 	span.SetAttributes(attribute.Int("items", len(items)))
-	x.log.Info().Str("portal_id", portalID).Int("mam_items", len(items)).Msg("MAM backfill query returned")
+	log.Info().Str("portal_id", portalID).Int("mam_items", len(items)).Msg("MAM backfill query returned")
 
 	// Convert to BackfillMessage; respect count (we may have requested count+1 to detect hasMore).
 	hasMore := len(items) > count
@@ -490,8 +491,9 @@ func (x *xmppClient) runFullBackfill(ctx context.Context) {
 	}
 	ctx, span := telemetry.Start(ctx, "mam.backfill_full")
 	defer span.End()
+	log := x.logFor(ctx)
 	span.SetAttributes(attribute.Int("roster.count", len(jids)))
-	x.log.Info().Int("roster_count", len(jids)).Msg("Full backfill: starting MAM backfill for roster DMs")
+	log.Info().Int("roster_count", len(jids)).Msg("Full backfill: starting MAM backfill for roster DMs")
 	done := 0
 	defer func() { span.SetAttributes(attribute.Int("backfilled", done)) }()
 	for _, bareJID := range jids {
@@ -509,7 +511,7 @@ func (x *xmppClient) runFullBackfill(ctx context.Context) {
 		case <-time.After(200 * time.Millisecond):
 		}
 	}
-	x.log.Info().Int("backfilled_count", done).Msg("Full backfill: finished")
+	log.Info().Int("backfilled_count", done).Msg("Full backfill: finished")
 }
 
 // mamCatchUpResult reports what a single portal catch-up did, for the cycle span.
@@ -536,7 +538,7 @@ func (x *xmppClient) mamCatchUpForPortal(ctx, cycleCtx context.Context, bareJID 
 	end := time.Now()
 	items, err := x.fetchMAMItems(ctx, portalKey, bareJID, lastSync, end, 50)
 	if err != nil {
-		x.log.Debug().Err(err).Str("portal_id", bareJID).Msg("MAM catch-up query failed")
+		x.logFor(cycleCtx).Debug().Err(err).Str("portal_id", bareJID).Msg("MAM catch-up query failed")
 		_, pspan := telemetry.Start(cycleCtx, "mam.catchup.portal", trace.WithTimestamp(start))
 		pspan.SetAttributes(attribute.String("xmpp.peer.jid", bareJID))
 		telemetry.Fail(pspan, err)
@@ -623,7 +625,7 @@ func (x *xmppClient) mamCatchUpForPortal(ctx, cycleCtx context.Context, bareJID 
 		queued++
 	}
 	if queued > 0 {
-		x.log.Debug().Str("portal_id", bareJID).Int("queued", queued).Msg("MAM catch-up: queued new messages")
+		x.logFor(pctx).Debug().Str("portal_id", bareJID).Int("queued", queued).Msg("MAM catch-up: queued new messages")
 	}
 	x.lastMAMSyncMu.Lock()
 	if x.lastMAMSync == nil {
@@ -693,6 +695,7 @@ func (x *xmppClient) mamBackfillMaxMessages() int {
 // doMAMBackfillOnView is the body of mamBackfillOnView; span is the already-started
 // mam.backfill_on_view span (a normal span, or a linked root from the new-portal trigger).
 func (x *xmppClient) doMAMBackfillOnView(ctx context.Context, span trace.Span, portalID string, maxMsgs int) {
+	log := x.logFor(ctx)
 	if span.IsRecording() {
 		span.SetAttributes(attribute.String("xmpp.peer.jid", portalID))
 	}
@@ -704,7 +707,7 @@ func (x *xmppClient) doMAMBackfillOnView(ctx context.Context, span trace.Span, p
 	end := time.Now()
 	items, err := x.fetchMAMItems(ctx, portalKey, portalID, start, end, maxMsgs+1)
 	if err != nil {
-		x.log.Debug().Err(err).Str("portal_id", portalID).Msg("MAM backfill on view: query failed")
+		log.Debug().Err(err).Str("portal_id", portalID).Msg("MAM backfill on view: query failed")
 		telemetry.Fail(span, err)
 		return
 	}
@@ -775,6 +778,6 @@ func (x *xmppClient) doMAMBackfillOnView(ctx context.Context, span trace.Span, p
 		queued++
 	}
 	if queued > 0 {
-		x.log.Info().Str("portal_id", portalID).Int("queued", queued).Msg("MAM backfill on view: queued historical messages")
+		log.Info().Str("portal_id", portalID).Int("queued", queued).Msg("MAM backfill on view: queued historical messages")
 	}
 }
