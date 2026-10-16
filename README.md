@@ -276,8 +276,9 @@ Tracing is optional and **off by default**. It is enabled purely by environment 
 | `OTEL_TRACES_EXPORTER` | Only `otlp` (or unset) is supported; `none` disables; other values warn and disable. Setting `otlp` alone does not enable tracing. |
 | `OTEL_TRACES_SAMPLER`, `OTEL_TRACES_SAMPLER_ARG` | Standard sampling, e.g. `parentbased_traceidratio` / `0.25`. |
 | `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES` | Standard resource settings; these override the `DD_*` fallbacks below. |
+| `OTEL_BSP_SCHEDULE_DELAY`, other `OTEL_BSP_*` | Batch export tuning, e.g. `1000` (ms) for faster delivery while testing. |
 
-Resource defaults: `service.name` is `mautrix-jabber` and `service.version` is the bridge version. `DD_SERVICE`, `DD_VERSION` and `DD_ENV` (sets `deployment.environment.name`) are used as fallbacks, and the `OTEL_*` variables above take precedence over them.
+Resource defaults: `service.name` is `mautrix-jabber` and `service.version` is the bridge version. `DD_SERVICE`, `DD_VERSION` and `DD_ENV` (sets both `deployment.environment.name` and `deployment.environment`) are used as fallbacks, and the `OTEL_*` variables above take precedence over them.
 
 **Match the protocol to the port.** Port 4317 is gRPC and port 4318 is HTTP. If the configured protocol and port disagree (for example `http/protobuf` against `:4317`), the bridge logs a startup warning and you will see export errors in the log. On success it logs one `OpenTelemetry tracing enabled` line with the protocol, `scheme://host:port` and sampler.
 
@@ -358,7 +359,9 @@ To use a plain collector instead, swap the second service for `otel/opentelemetr
 
 ### What is traced
 
-Spans cover Matrix-to-XMPP handlers (messages, reactions, viewing a chat, identifier resolution, chat/user info, MUC join/leave), inbound XMPP stanzas (messages, carbons, MUC, Jingle notices), delivery to the bridge framework (`bridge.handle_remote_event` and message conversion share one trace with the inbound stanza), XEP-0363 uploads, OOB downloads, MAM backfill and catch-up, roster sync, avatar refresh, connect/dial, login, bot commands, and outbound Matrix HTTP calls.
+Spans cover Matrix-to-XMPP handlers (messages, reactions, viewing a chat, identifier resolution, chat/user info, MUC join/leave), inbound XMPP stanzas (messages, carbons, MUC, Jingle notices), delivery to the bridge framework (`bridge.handle_remote_event` and message conversion share one trace with the inbound stanza), XEP-0363 uploads, OOB downloads, MAM backfill and catch-up, roster sync, avatar refresh, connect/dial, login, bot commands, and outbound Matrix HTTP calls made while handling traced work (shown as `METHOD /_matrix/...` with ids replaced by `*`).
+
+A `bridge.start` span is emitted once at startup (handy as a smoke test). Background work (roster sync and full backfill after connect, MAM catch-up, backfill triggered by a new portal or a sent message, avatar refresh, roster pushes) starts its own trace, linked to the triggering trace where there is one. `xmpp.session` is recorded when a connection ends and covers its lifetime. When roster contacts or known portals exist, MAM catch-up produces one `mam.catchup.cycle` span about every 45 seconds; per-portal `mam.catchup.portal` spans appear only when messages were caught up or a query failed. Framework calls such as chat/user info lookups appear as small standalone traces when they happen outside a traced event.
 
 ### Privacy
 
