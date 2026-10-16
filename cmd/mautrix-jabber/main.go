@@ -6,6 +6,9 @@ import (
 	"strings"
 
 	"github.com/mautrix/jabber/pkg/connector"
+	"github.com/mautrix/jabber/pkg/telemetry"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"maunium.net/go/mautrix/bridgev2/commands"
 	"maunium.net/go/mautrix/bridgev2/matrix/mxmain"
 	"maunium.net/go/mautrix/bridgev2/networkid"
@@ -25,7 +28,27 @@ func cmdPrefix(ce *commands.Event) string {
 	return "!jabber"
 }
 
+// withSpan wraps a command handler in a root span with a static name. cmd.name is the only
+// attribute; command arguments are never recorded. ce.Ctx is replaced for the handler's duration.
+func withSpan(name string, fn func(*commands.Event)) func(*commands.Event) {
+	return func(ce *commands.Event) {
+		orig := ce.Ctx
+		base := orig
+		if base == nil {
+			base = context.Background()
+		}
+		ctx, span := telemetry.Start(base, "cmd."+strings.ReplaceAll(name, "-", "_"),
+			trace.WithSpanKind(trace.SpanKindConsumer),
+			trace.WithAttributes(attribute.String("cmd.name", name)))
+		defer span.End()
+		ce.Ctx = ctx
+		defer func() { ce.Ctx = orig }()
+		fn(ce)
+	}
+}
+
 func main() {
+	var cheogramEnabled bool
 	br := &mxmain.BridgeMain{
 		Name:        "mautrix-jabber",
 		Description: "A Matrix-Jabber (XMPP) puppeting bridge.",
@@ -34,11 +57,17 @@ func main() {
 		Connector:   &connector.JabberConnector{},
 	}
 	br.PostInit = func() {
+		telemetry.Init(context.Background(), telemetry.Options{ServiceVersion: br.Version, Log: *br.Log})
+		if telemetry.Enabled() {
+			hc := br.Matrix.AS.HTTPClient
+			hc.Transport = telemetry.WrapMatrixTransport(hc.Transport)
+		}
 		// Inject decoded network config into connector (bridge only receives BridgeConfig, not Network).
 		var netCfg connector.JabberConfig
 		if err := br.Config.Network.Decode(&netCfg); err == nil {
 			if jc, ok := br.Connector.(*connector.JabberConnector); ok {
 				jc.SetNetworkConfig(&netCfg)
+				cheogramEnabled = netCfg.Cheogram
 				// Respect matrix.delivery_receipts for read receipts when bridging messages.
 				jc.SetDeliveryReceipts(br.Config.Matrix.DeliveryReceipts)
 				// Backfill config for MAM backfill-on-view and full backfill on login/sync-roster (config.backfill).
@@ -54,47 +83,55 @@ func main() {
 			prefix = "!jabber"
 		}
 		br.Bridge.Commands.(*commands.Processor).AddHandler(&commands.FullHandler{
-			Func:          cmdSyncRoster,
+			Func:          withSpan("sync-roster", cmdSyncRoster),
 			Name:          "sync-roster",
 			RequiresLogin: true,
 			Help:          commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Re-fetch roster from server and update Matrix display/room names; when backfill is enabled, also runs full MAM backfill for roster DMs. Usage: `%s sync-roster`", prefix)},
 		})
 		br.Bridge.Commands.(*commands.Processor).AddHandler(&commands.FullHandler{
-			Func:          cmdAddToRoster,
+			Func:          withSpan("add-to-roster", cmdAddToRoster),
 			Name:          "add-to-roster",
 			RequiresLogin: true,
 			Help:          commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Add or rename a contact in your Jabber roster. Usage: `%s add-to-roster <jid> <name>`", prefix)},
 		})
 		br.Bridge.Commands.(*commands.Processor).AddHandler(&commands.FullHandler{
-			Func:          cmdSearchRoster,
+			Func:          withSpan("search-roster", cmdSearchRoster),
 			Name:          "search-roster",
 			RequiresLogin: true,
 			Help:          commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Search your Jabber roster for contacts matching a JID or name. Usage: `%s search-roster <query>`", prefix)},
 		})
 		br.Bridge.Commands.(*commands.Processor).AddHandler(&commands.FullHandler{
-			Func:          cmdMUCJoin,
+			Func:          withSpan("join", cmdMUCJoin),
 			Name:          "join",
 			RequiresLogin: true,
 			Help:          commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Join a multi-user chat (MUC) room. Usage: `%s join <room-jid>` (e.g. room@conference.example.com)", prefix)},
 		})
 		br.Bridge.Commands.(*commands.Processor).AddHandler(&commands.FullHandler{
-			Func:          cmdMUCLeave,
+			Func:          withSpan("leave", cmdMUCLeave),
 			Name:          "leave",
 			RequiresLogin: true,
 			Help:          commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Leave a multi-user chat (MUC) room. Usage: `%s leave <room-jid>`", prefix)},
 		})
 		br.Bridge.Commands.(*commands.Processor).AddHandler(&commands.FullHandler{
-			Func:          cmdMUCNick,
+			Func:          withSpan("muc-nick", cmdMUCNick),
 			Name:          "muc-nick",
 			RequiresLogin: true,
 			Help:          commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Set preferred MUC nickname for a room. Usage: `%s muc-nick <room-jid> <nick>`", prefix)},
 		})
 		br.Bridge.Commands.(*commands.Processor).AddHandler(&commands.FullHandler{
-			Func:          cmdMUCNickDefault,
+			Func:          withSpan("muc-nick-default", cmdMUCNickDefault),
 			Name:          "muc-nick-default",
 			RequiresLogin: true,
 			Help:          commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Set default MUC nickname for all rooms. Usage: `%s muc-nick-default <nick>`", prefix)},
 		})
+	}
+	br.PostStart = func() {
+		_, span := telemetry.Start(context.Background(), "bridge.start", trace.WithAttributes(
+			attribute.String("bridge.version", br.Version),
+			attribute.Bool("backfill.enabled", br.Config.Backfill.Enabled),
+			attribute.Bool("cheogram.enabled", cheogramEnabled),
+		))
+		span.End()
 	}
 	br.InitVersion(Tag, Commit, BuildTime)
 	br.Run()
@@ -122,7 +159,11 @@ func cmdSyncRoster(ce *commands.Event) {
 		ce.Reply("Roster sync started. Display names and room names will update shortly.")
 	}
 	ctx := context.WithoutCancel(ce.Ctx)
+	// Carry only the span context so the goroutine never touches the handler's live span.
+	from := telemetry.CarrySpan(context.Background(), ce.Ctx)
 	go func() {
+		ctx, span := telemetry.StartLinkedRoot(ctx, "cmd.sync_roster.background", from)
+		defer span.End()
 		rs.SyncRoster(ctx)
 		if hasBackfill {
 			// Full MAM backfill for all roster DMs so portals get history without needing to log
