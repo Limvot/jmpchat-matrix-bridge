@@ -369,7 +369,29 @@ Trace attributes include **full JIDs** (including Cheogram phone-number JIDs), X
 
 ### Log correlation
 
-Log lines for traced work carry `trace_id` (32 hex characters) and `dd.trace_id` (decimal, low 64 bits, the Datadog log-correlation format). Correlation covers the bridge framework's per-event logs and logs from traced contexts; not every bridge log line carries the fields.
+Log lines emitted inside a sampled, traced operation carry four fields, each once:
+
+- `trace_id` (32 lowercase hex characters) and `span_id` (16 lowercase hex characters): the OpenTelemetry convention.
+- `dd.trace_id` and `dd.span_id`: decimal strings. The trace id is the low 64 bits. This is the Datadog convention.
+
+The fields appear only on lines logged inside traced work. Other lines, and all lines when tracing is off, have no trace fields and are otherwise unchanged.
+
+Correlation needs JSON logs on stdout:
+
+```yaml
+logging:
+  writers:
+    - type: stdout
+      format: json
+```
+
+Datadog recognises both pairs by default (Logs > Pipelines > Preprocessing for JSON logs), so no pipeline changes should be needed. For the Logs tab service filter to match the traces, set the container label `com.datadoghq.tags.service` to the same value as `DD_SERVICE` or `OTEL_SERVICE_NAME`.
+
+Expected in a correlated trace: XMPP message handling (text only, OOB URL, MUC, carbons, reactions), the framework's per-event lines, Matrix message handler debug lines, upload lines, and Matrix HTTP client lines made inside a handler.
+
+Not expected: XMPP stanza receipt before mux dispatch, Serve start and stop, presence, reconnect loop, roster push, lines logged before a span starts, and queue-level framework errors.
+
+**Fallback.** If the Logs side panel shows the fields but no link to the trace, go to Logs > Pipelines > Preprocessing for JSON logs and set the Trace Id attributes to only `trace_id` and the Span Id attributes to only `span_id`. Wait a few minutes, send a new message, and check again. If it still fails, try only `dd.trace_id` and `dd.span_id`.
 
 ## Verifying
 
@@ -385,7 +407,7 @@ Log lines for traced work carry `trace_id` (32 hex characters) and `dd.trace_id`
 
 ### Inbound messages not appearing in Matrix
 
-- The bridge handles both **normal** and **chat** message types; many servers (e.g. Snikket) use `chat` for 1:1. If you still see no messages, check logs for `"Incoming XMPP message, queuing for bridge"` and `"XMPP message receiver (Serve) started"`.
+- The bridge handles both **normal** and **chat** message types; many servers (e.g. Snikket) use `chat` for 1:1. If you still see no messages, check logs for `"XMPP message received (text only), queued for bridge"` and `"XMPP message receiver (Serve) started"`.
 
 ### Same JID logged in from bridge and another client
 
