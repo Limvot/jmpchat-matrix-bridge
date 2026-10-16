@@ -3,6 +3,7 @@ package connector
 import (
 	"context"
 
+	"github.com/rs/zerolog"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 	"maunium.net/go/mautrix/bridgev2"
@@ -57,4 +58,9 @@ func attachTraceHooks(m *simplevent.EventMeta, sc trace.SpanContext) {
 			telemetry.EndRemoteEvent(ctx)
 		}
 	}
+}
+
+// logFor returns x.log enriched with the trace fields of ctx's span (x.log itself when none).
+func (x *xmppClient) logFor(ctx context.Context) *zerolog.Logger {
+	return telemetry.Logger(ctx, &x.log)
 }

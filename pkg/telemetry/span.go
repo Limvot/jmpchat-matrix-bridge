@@ -23,14 +23,10 @@ func Start(ctx context.Context, name string, opts ...trace.SpanStartOption) (con
 	if !enabled.Load() {
 		return ctx, noopSpan
 	}
-	hadParent := trace.SpanContextFromContext(ctx).IsValid()
+	parent := trace.SpanContextFromContext(ctx)
 	nctx, span := tracer.Start(ctx, name, opts...)
-	if !hadParent && span.IsRecording() {
-		sc := span.SpanContext()
-		nctx = zerolog.Ctx(nctx).With().
-			Str("trace_id", sc.TraceID().String()).
-			Str("dd.trace_id", ddTraceID(sc.TraceID())).
-			Logger().WithContext(nctx)
+	if sc := span.SpanContext(); !parent.IsValid() || sc.TraceID() != parent.TraceID() {
+		nctx = withLogFields(nctx, sc)
 	}
 	return nctx, span
 }
@@ -82,6 +78,7 @@ func StartRemoteEvent(ctx context.Context, parent trace.SpanContext) context.Con
 	}
 	pctx := trace.ContextWithSpanContext(ctx, parent)
 	nctx, span := tracer.Start(pctx, "bridge.handle_remote_event", trace.WithSpanKind(trace.SpanKindConsumer))
+	nctx = withLogFields(nctx, span.SpanContext())
 	return context.WithValue(nctx, remoteSpanKey{}, span)
 }
 
@@ -125,10 +122,82 @@ func ddTraceID(id trace.TraceID) string {
 	return strconv.FormatUint(binary.BigEndian.Uint64(id[8:16]), 10)
 }
 
-// AddLogFields adds trace_id and dd.trace_id when sc is valid and sampled.
+type logAnnotKey struct{}
+
+// logAnnot records a ctx-logger annotation so it can be rebuilt (new root) or recognised
+// (already enriched) without ever writing a key twice.
+type logAnnot struct {
+	clean     *zerolog.Logger // logger the annotation was built from (no trace fields)
+	annotated *zerolog.Logger // logger installed in ctx
+}
+
+// withLogFields installs in ctx a logger carrying sc's four fields. It builds from the
+// clean logger of a previous annotation when ctx's logger is that annotation (new root over
+// an annotated ctx), and does nothing when ctx's logger is disabled, the zerolog default
+// context logger, or a logger derived from an annotated one (it may already hold the keys).
+func withLogFields(ctx context.Context, sc trace.SpanContext) context.Context {
+	if !sc.IsValid() || !sc.IsSampled() {
+		return ctx
+	}
+	cur := zerolog.Ctx(ctx)
+	base := cur
+	if a, ok := ctx.Value(logAnnotKey{}).(logAnnot); ok {
+		if cur != a.annotated {
+			return ctx
+		}
+		base = a.clean
+	}
+	if base.GetLevel() == zerolog.Disabled || base == zerolog.DefaultContextLogger {
+		return ctx
+	}
+	l := addLogFields(base.With(), sc).Logger()
+	// Logger.WithContext has a value receiver and stores a pointer to its own copy, so the
+	// annotated pointer must be read back from the new ctx (not &l) for the identity checks.
+	nctx := l.WithContext(ctx)
+	return context.WithValue(nctx, logAnnotKey{}, logAnnot{clean: base, annotated: zerolog.Ctx(nctx)})
+}
+
+// Logger returns base enriched with the trace fields of the span in ctx. It returns base
+// itself (same pointer, no allocation) when tracing is disabled, ctx has no valid sampled
+// span, or base is ctx's already-annotated logger. base must be a clean logger (x.log, the
+// bridge logger, ce.Log); never pass a logger derived from zerolog.Ctx(ctx).With(): that may
+// already hold the keys and would duplicate them.
+func Logger(ctx context.Context, base *zerolog.Logger) *zerolog.Logger {
+	if !enabled.Load() {
+		return base
+	}
+	if a, ok := ctx.Value(logAnnotKey{}).(logAnnot); ok && a.annotated == base {
+		return base
+	}
+	return LoggerSC(trace.SpanContextFromContext(ctx), base)
+}
+
+// LoggerSC is Logger for callers that hold a SpanContext but no ctx.
+func LoggerSC(sc trace.SpanContext, base *zerolog.Logger) *zerolog.Logger {
+	if !enabled.Load() || !sc.IsValid() || !sc.IsSampled() {
+		return base
+	}
+	l := addLogFields(base.With(), sc).Logger()
+	return &l
+}
+
+func ddSpanID(id trace.SpanID) string {
+	return strconv.FormatUint(binary.BigEndian.Uint64(id[:]), 10)
+}
+
+// addLogFields adds trace_id, span_id, dd.trace_id and dd.span_id (caller checked sc).
+func addLogFields(c zerolog.Context, sc trace.SpanContext) zerolog.Context {
+	return c.Str("trace_id", sc.TraceID().String()).
+		Str("span_id", sc.SpanID().String()).
+		Str("dd.trace_id", ddTraceID(sc.TraceID())).
+		Str("dd.span_id", ddSpanID(sc.SpanID()))
+}
+
+// AddLogFields is a temporary shim for jabberRemoteMessage.AddLogContext; removed once
+// that caller is gone.
 func AddLogFields(c zerolog.Context, sc trace.SpanContext) zerolog.Context {
 	if !sc.IsValid() || !sc.IsSampled() {
 		return c
 	}
-	return c.Str("trace_id", sc.TraceID().String()).Str("dd.trace_id", ddTraceID(sc.TraceID()))
+	return addLogFields(c, sc)
 }

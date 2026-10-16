@@ -3,6 +3,7 @@ package telemetry
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -238,35 +239,211 @@ func TestRemoteEvent(t *testing.T) {
 	u.End()
 }
 
-func TestLogFields(t *testing.T) {
+var (
+	testTraceID = trace.TraceID{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2}
+	testSpanID  = trace.SpanID{0, 0, 0, 0, 0, 0, 1, 0}
+)
+
+func sampledSC(tid trace.TraceID, sid trace.SpanID) trace.SpanContext {
+	return trace.NewSpanContext(trace.SpanContextConfig{TraceID: tid, SpanID: sid, TraceFlags: trace.FlagsSampled})
+}
+
+func logKV(t *testing.T, buf *bytes.Buffer) map[string]any {
+	t.Helper()
+	m := map[string]any{}
+	if err := json.Unmarshal(buf.Bytes(), &m); err != nil {
+		t.Fatalf("bad json %q: %v", buf.String(), err)
+	}
+	return m
+}
+
+func keysOnce(t *testing.T, out string) {
+	t.Helper()
+	for _, k := range []string{"trace_id", "span_id", "dd.trace_id", "dd.span_id"} {
+		if n := strings.Count(out, `"`+k+`"`); n != 1 {
+			t.Errorf("key %s appears %d times: %s", k, n, out)
+		}
+	}
+}
+
+func TestLoggerDisabled(t *testing.T) {
+	resetForTest()
+	sc := sampledSC(testTraceID, testSpanID)
+	ctx := trace.ContextWithSpanContext(context.Background(), sc)
+	var buf bytes.Buffer
+	base := zerolog.New(&buf)
+	if Logger(ctx, &base) != &base || LoggerSC(sc, &base) != &base {
+		t.Fatal("disabled must return base")
+	}
+	if n := testing.AllocsPerRun(100, func() {
+		_ = Logger(ctx, &base)
+		_ = LoggerSC(sc, &base)
+	}); n != 0 {
+		t.Fatalf("allocs = %v", n)
+	}
+	lctx := base.WithContext(context.Background())
+	nctx, _ := Start(lctx, "x")
+	if zerolog.Ctx(nctx) != zerolog.Ctx(lctx) {
+		t.Fatal("Start must not touch ctx logger when disabled")
+	}
+	nctx = StartRemoteEvent(lctx, sc)
+	if zerolog.Ctx(nctx) != zerolog.Ctx(lctx) {
+		t.Fatal("StartRemoteEvent must not touch ctx logger when disabled")
+	}
+}
+
+func TestLoggerFields(t *testing.T) {
 	useRecorder(t)
 	var buf bytes.Buffer
-	lg := zerolog.New(&buf)
-	ctx := lg.WithContext(context.Background())
-	ctx, root := Start(ctx, "root")
-	ctx2, child := Start(ctx, "child")
-	zerolog.Ctx(ctx2).Info().Msg("hi")
+	base := zerolog.New(&buf)
+	sc := sampledSC(testTraceID, testSpanID)
+	LoggerSC(sc, &base).Info().Msg("x")
+	keysOnce(t, buf.String())
+	m := logKV(t, &buf)
+	if m["trace_id"] != sc.TraceID().String() || m["span_id"] != sc.SpanID().String() ||
+		m["dd.trace_id"] != "258" || m["dd.span_id"] != "256" {
+		t.Fatalf("bad fields: %v", m)
+	}
+	buf.Reset()
+	var ff trace.TraceID
+	var fs trace.SpanID
+	for i := range ff {
+		ff[i] = 0xff
+	}
+	for i := range fs {
+		fs[i] = 0xff
+	}
+	Logger(trace.ContextWithSpanContext(context.Background(), sampledSC(ff, fs)), &base).Info().Msg("x")
+	m = logKV(t, &buf)
+	if m["dd.trace_id"] != "18446744073709551615" || m["dd.span_id"] != "18446744073709551615" {
+		t.Fatalf("high-bit: %v", m)
+	}
+	if base.GetLevel() == zerolog.Disabled {
+		t.Fatal("base mutated")
+	}
+}
+
+func TestLoggerUnsampledOrInvalid(t *testing.T) {
+	useRecorder(t)
+	var buf bytes.Buffer
+	base := zerolog.New(&buf)
+	unsampled := trace.NewSpanContext(trace.SpanContextConfig{TraceID: testTraceID, SpanID: testSpanID})
+	if Logger(context.Background(), &base) != &base ||
+		LoggerSC(trace.SpanContext{}, &base) != &base ||
+		LoggerSC(unsampled, &base) != &base ||
+		Logger(trace.ContextWithSpanContext(context.Background(), unsampled), &base) != &base {
+		t.Fatal("expected base pointer")
+	}
+}
+
+func TestStartAnnotatesRootsOnly(t *testing.T) {
+	useRecorder(t)
+	var buf bytes.Buffer
+	ctx := zerolog.New(&buf).WithContext(context.Background())
+	rctx, root := Start(ctx, "root")
+	zerolog.Ctx(rctx).Info().Msg("hi")
+	keysOnce(t, buf.String())
+	m := logKV(t, &buf)
+	if m["span_id"] != root.SpanContext().SpanID().String() || m["trace_id"] != root.SpanContext().TraceID().String() {
+		t.Fatalf("bad ids: %v", m)
+	}
+	cctx, child := Start(rctx, "child")
+	if zerolog.Ctx(cctx) != zerolog.Ctx(rctx) {
+		t.Fatal("child must not re-annotate")
+	}
 	child.End()
 	root.End()
-	out := buf.String()
-	if strings.Count(out, `"trace_id"`) != 1 || strings.Count(out, `"dd.trace_id"`) != 1 {
-		t.Fatalf("expected exactly one of each: %s", out)
-	}
-	id := trace.TraceID{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2}
-	sc := trace.NewSpanContext(trace.SpanContextConfig{TraceID: id, SpanID: trace.SpanID{1}, TraceFlags: trace.FlagsSampled})
+}
+
+func TestLinkedRootReannotates(t *testing.T) {
+	useRecorder(t)
+	var buf bytes.Buffer
+	ctx := zerolog.New(&buf).WithContext(context.Background())
+	rctx, root := Start(ctx, "root")
+	lctx, l := StartLinkedRoot(rctx, "l", rctx)
 	buf.Reset()
+	zerolog.Ctx(lctx).Info().Msg("hi")
+	keysOnce(t, buf.String())
+	m := logKV(t, &buf)
+	if m["trace_id"] != l.SpanContext().TraceID().String() || m["trace_id"] == root.SpanContext().TraceID().String() ||
+		m["span_id"] != l.SpanContext().SpanID().String() {
+		t.Fatalf("bad ids: %v", m)
+	}
+	l.End()
+	root.End()
+}
+
+func TestStartSkipsDefaultAndDisabled(t *testing.T) {
+	useRecorder(t)
+	bg := context.Background()
+	nctx, s := Start(bg, "r")
+	if zerolog.Ctx(nctx) != zerolog.Ctx(bg) {
+		t.Fatal("background root must not annotate")
+	}
+	s.End()
+	var buf bytes.Buffer
 	l := zerolog.New(&buf)
-	l1 := AddLogFields(l.With(), sc).Logger()
-	l1.Info().Msg("x")
-	if !strings.Contains(buf.String(), `"dd.trace_id":"258"`) || !strings.Contains(buf.String(), id.String()) {
-		t.Fatalf("bad fields: %s", buf.String())
+	old := zerolog.DefaultContextLogger
+	zerolog.DefaultContextLogger = &l
+	t.Cleanup(func() { zerolog.DefaultContextLogger = old })
+	nctx, s = Start(bg, "r")
+	if zerolog.Ctx(nctx) != &l {
+		t.Fatal("default context logger must not be annotated")
 	}
-	buf.Reset()
-	l2 := AddLogFields(l.With(), trace.SpanContext{}).Logger()
-	l2.Info().Msg("x")
+	s.End()
+	zerolog.Ctx(nctx).Info().Msg("x")
 	if strings.Contains(buf.String(), "trace_id") {
-		t.Error("invalid sc must add nothing")
+		t.Fatal("default logger polluted")
 	}
+}
+
+func TestDerivedLoggerNotReannotated(t *testing.T) {
+	useRecorder(t)
+	var buf bytes.Buffer
+	ctx := zerolog.New(&buf).WithContext(context.Background())
+	rctx, root := Start(ctx, "root")
+	dctx := zerolog.Ctx(rctx).With().Str("k", "v").Logger().WithContext(rctx)
+	lctx, l := StartLinkedRoot(dctx, "l", dctx)
+	buf.Reset()
+	zerolog.Ctx(lctx).Info().Msg("hi")
+	keysOnce(t, buf.String())
+	l.End()
+	root.End()
+}
+
+func TestLoggerOnAnnotatedCtxLogger(t *testing.T) {
+	useRecorder(t)
+	var buf bytes.Buffer
+	ctx := zerolog.New(&buf).WithContext(context.Background())
+	rctx, root := Start(ctx, "root")
+	lg := Logger(rctx, zerolog.Ctx(rctx))
+	if lg != zerolog.Ctx(rctx) {
+		t.Fatal("expected same pointer")
+	}
+	lg.Info().Msg("x")
+	keysOnce(t, buf.String())
+	// a clean base gets enriched exactly once
+	var b2 bytes.Buffer
+	clean := zerolog.New(&b2)
+	Logger(rctx, &clean).Info().Msg("x")
+	keysOnce(t, b2.String())
+	root.End()
+}
+
+func TestStartRemoteEventAnnotates(t *testing.T) {
+	useRecorder(t)
+	var buf bytes.Buffer
+	ctx := zerolog.New(&buf).WithContext(context.Background())
+	parent := sampledSC(testTraceID, testSpanID)
+	nctx := StartRemoteEvent(ctx, parent)
+	zerolog.Ctx(nctx).Info().Msg("x")
+	keysOnce(t, buf.String())
+	m := logKV(t, &buf)
+	if m["trace_id"] != parent.TraceID().String() || m["span_id"] == parent.SpanID().String() ||
+		m["span_id"] != trace.SpanContextFromContext(nctx).SpanID().String() {
+		t.Fatalf("bad ids: %v", m)
+	}
+	EndRemoteEvent(nctx)
 }
 
 func TestFail(t *testing.T) {
