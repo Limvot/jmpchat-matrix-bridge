@@ -48,7 +48,6 @@ func withSpan(name string, fn func(*commands.Event)) func(*commands.Event) {
 }
 
 func main() {
-	var cheogramEnabled bool
 	br := &mxmain.BridgeMain{
 		Name:        "mautrix-jabber",
 		Description: "A Matrix-Jabber (XMPP) puppeting bridge.",
@@ -67,7 +66,6 @@ func main() {
 		if err := br.Config.Network.Decode(&netCfg); err == nil {
 			if jc, ok := br.Connector.(*connector.JabberConnector); ok {
 				jc.SetNetworkConfig(&netCfg)
-				cheogramEnabled = netCfg.Cheogram
 				// Respect matrix.delivery_receipts for read receipts when bridging messages.
 				jc.SetDeliveryReceipts(br.Config.Matrix.DeliveryReceipts)
 				// Backfill config for MAM backfill-on-view and full backfill on login/sync-roster (config.backfill).
@@ -129,7 +127,7 @@ func main() {
 		_, span := telemetry.Start(context.Background(), "bridge.start", trace.WithAttributes(
 			attribute.String("bridge.version", br.Version),
 			attribute.Bool("backfill.enabled", br.Config.Backfill.Enabled),
-			attribute.Bool("cheogram.enabled", cheogramEnabled),
+			attribute.Bool("cheogram.enabled", connector.CheogramEnabled(br.Bridge)),
 		))
 		span.End()
 	}

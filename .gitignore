@@ -18,3 +18,4 @@ logs/
 # Go
 vendor
 .plans/
+.claude/worktrees/
