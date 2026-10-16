@@ -300,6 +300,7 @@ func (j *jabberLoginProcess) SubmitUserInput(ctx context.Context, input map[stri
 	defer span.End()
 
 	log := j.conn.br.Log.With().Logger()
+	log = *telemetry.Logger(ctx, &log)
 	warnIfDebugIdentifiers(&log)
 	log.Debug().Str("jid", jidStr).Msg("XMPP login: attempting connection (this may take 1–2 minutes)")
 

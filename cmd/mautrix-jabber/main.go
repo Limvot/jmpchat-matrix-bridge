@@ -43,6 +43,11 @@ func withSpan(name string, fn func(*commands.Event)) func(*commands.Event) {
 		defer span.End()
 		ce.Ctx = ctx
 		defer func() { ce.Ctx = orig }()
+		if ce.Log != nil {
+			origLog := ce.Log
+			ce.Log = telemetry.Logger(ctx, ce.Log)
+			defer func() { ce.Log = origLog }()
+		}
 		fn(ce)
 	}
 }
