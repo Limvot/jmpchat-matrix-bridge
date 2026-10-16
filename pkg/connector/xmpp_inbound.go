@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 	"mellium.im/xmpp"
 	"mellium.im/xmpp/jid"
@@ -197,6 +198,46 @@ func (p *tokenReaderWithPrefix) Token() (xml.Token, error) {
 	return p.r.Token()
 }
 
+// startReceiveSpan starts the root span for an inbound message stanza. The handlers run on the XMPP
+// Serve goroutine and have no ctx parameter, so the span is rooted on context.Background(). Only
+// JIDs, ids and flags are recorded, never bodies, emoji or URLs. peer is the bare peer JID (the
+// room JID for groupchat); msgType and peer may be empty.
+func startReceiveSpan(kind, msgType, from, peer, stanzaID string, hasOOB, hasReply, reaction bool) (context.Context, trace.Span) {
+	ctx, span := telemetry.Start(context.Background(), "xmpp.message.receive", trace.WithSpanKind(trace.SpanKindConsumer))
+	if span.IsRecording() {
+		attrs := []attribute.KeyValue{
+			attribute.String("xmpp.message.kind", kind),
+			attribute.String("xmpp.from", from),
+			attribute.String("xmpp.stanza.id", stanzaID),
+			attribute.Bool("xmpp.has_oob", hasOOB),
+			attribute.Bool("xmpp.has_reply", hasReply),
+			attribute.Bool("xmpp.reaction", reaction),
+		}
+		if msgType != "" {
+			attrs = append(attrs, attribute.String("xmpp.message.type", msgType))
+		}
+		if peer != "" {
+			key := "xmpp.peer.jid"
+			if msgType == "groupchat" {
+				key = "xmpp.room.jid"
+			}
+			attrs = append(attrs, attribute.String(key, peer))
+		}
+		span.SetAttributes(attrs...)
+	}
+	return ctx, span
+}
+
+// ensureMUCGhostTraced runs ensureMUCGhostDisplayName under a 5s timeout derived from ctx, in a
+// bridge.ensure_muc_ghost span when ctx carries a trace.
+func (x *xmppClient) ensureMUCGhostTraced(ctx context.Context, occupantFull string) {
+	ctx, span := telemetry.StartChild(ctx, "bridge.ensure_muc_ghost")
+	defer span.End()
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	x.ensureMUCGhostDisplayName(ctx, occupantFull)
+}
+
 // handleMessageWithOOB parses a full message stanza (body + XEP-0066 OOB + XEP-0461 reply + XEP-0444 reactions) and queues it for the bridge.
 // If the first child is a MAM result (urn:xmpp:mam:2), it is handed to handleMAMResult for backfill/catch-up.
 func (x *xmppClient) handleMessageWithOOB(t xmlstream.TokenReadEncoder, start *xml.StartElement) error {
@@ -238,7 +279,12 @@ func (x *xmppClient) handleMessageWithOOB(t xmlstream.TokenReadEncoder, start *x
 	}
 	// XEP-0353 Jingle Message Initiation (call signalling): surface as a Matrix notice.
 	if jmi != nil {
-		x.handleJingleMessageInitiation(*jmi, fromBare, bareJID(from) == bareJID(string(x.loginID)))
+		ctx, span := startReceiveSpan("jingle", attrValue(start.Attr, "type"), from, fromBare, attrValue(start.Attr, "id"), false, false, false)
+		defer span.End()
+		if span.IsRecording() {
+			span.SetAttributes(attribute.String("xmpp.jingle.action", jmi.action))
+		}
+		x.handleJingleMessageInitiation(ctx, *jmi, fromBare, bareJID(from) == bareJID(string(x.loginID)))
 		return nil
 	}
 	// Skip XEP-0085 chat state notifications (composing, paused, etc.) - messages with no body, no OOB, and no reactions.
@@ -250,6 +296,12 @@ func (x *xmppClient) handleMessageWithOOB(t xmlstream.TokenReadEncoder, start *x
 	if msgID == "" {
 		msgID = "xmp:" + time.Now().Format("20060102150405.000")
 	}
+	kind := "message"
+	if reactionTarget != "" {
+		kind = "reaction"
+	}
+	ctx, span := startReceiveSpan(kind, attrValue(start.Attr, "type"), from, fromBare, msgID, oobURL != "", replyID != "", reactionTarget != "")
+	defer span.End()
 	portalKey := networkid.PortalKey{
 		ID:       networkid.PortalID(fromBare),
 		Receiver: x.loginID,
@@ -279,7 +331,7 @@ func (x *xmppClient) handleMessageWithOOB(t xmlstream.TokenReadEncoder, start *x
 		}
 	}
 	sender := x.makeEventSender(senderJID)
-	x.maybeTriggerBackfillOnNewPortal(context.Background(), portalKey)
+	x.maybeTriggerBackfillOnNewPortal(ctx, portalKey)
 
 	// For XEP-0444 reactions with multiple emojis, queue a separate event for each emoji
 	// This allows Matrix to display each reaction separately
@@ -290,7 +342,7 @@ func (x *xmppClient) handleMessageWithOOB(t xmlstream.TokenReadEncoder, start *x
 			if len(reactionEmojis) > 1 {
 				reactionMsgID = fmt.Sprintf("%s-reaction-%d", msgID, i)
 			}
-			x.login.QueueRemoteEvent(&jabberRemoteMessage{
+			x.queueRemoteEvent(ctx, &jabberRemoteMessage{
 				portalKey:      portalKey,
 				sender:         sender,
 				id:             networkid.MessageID(reactionMsgID),
@@ -305,7 +357,7 @@ func (x *xmppClient) handleMessageWithOOB(t xmlstream.TokenReadEncoder, start *x
 		}
 	} else {
 		// Regular message (not a reaction, or empty reaction list)
-		x.login.QueueRemoteEvent(&jabberRemoteMessage{
+		x.queueRemoteEvent(ctx, &jabberRemoteMessage{
 			portalKey:      portalKey,
 			sender:         sender,
 			id:             networkid.MessageID(msgID),
@@ -391,15 +443,19 @@ func (x *xmppClient) handleGroupchatWithOOB(t xmlstream.TokenReadEncoder, start 
 	if msgID == "" {
 		msgID = "xmp:" + time.Now().Format("20060102150405.000")
 	}
+	kind := "message"
+	if reactionTarget != "" {
+		kind = "reaction"
+	}
+	ctx, span := startReceiveSpan(kind, "groupchat", occupantFull, roomJID, msgID, oobURL != "", replyID != "", reactionTarget != "")
+	defer span.End()
 	portalKey := networkid.PortalKey{
 		ID:       networkid.PortalID(roomJID),
 		Receiver: x.loginID,
 	}
 	x.addPortalIDForMAMCatchUp(string(portalKey.ID))
 	// Ensure MUC ghost has display name set to nick (not full JID) before queueing.
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	x.ensureMUCGhostDisplayName(ctx, occupantFull)
-	cancel()
+	x.ensureMUCGhostTraced(ctx, occupantFull)
 	sender := x.makeEventSender(occupantFull)
 
 	// Body-style reaction (parseBodyReaction) is not used here; we only have XEP-0444 from parseMessageBodyAndOOB.
@@ -409,6 +465,7 @@ func (x *xmppClient) handleGroupchatWithOOB(t xmlstream.TokenReadEncoder, start 
 			reactionTarget = targetID
 			reactionEmojis = []string{emoji}
 			body = ""
+			span.SetAttributes(attribute.String("xmpp.message.kind", "reaction"), attribute.Bool("xmpp.reaction", true))
 			x.log.Debug().
 				Str("room", roomJID).
 				Str("occupant", occupantFull).
@@ -436,14 +493,14 @@ func (x *xmppClient) handleGroupchatWithOOB(t xmlstream.TokenReadEncoder, start 
 			Msg("Inbound MUC reaction: will look up target and bridge to Matrix")
 	}
 
-	x.maybeTriggerBackfillOnNewPortal(context.Background(), portalKey)
+	x.maybeTriggerBackfillOnNewPortal(ctx, portalKey)
 	if reactionTarget != "" && len(reactionEmojis) > 0 {
 		for i, emoji := range reactionEmojis {
 			reactionMsgID := msgID
 			if len(reactionEmojis) > 1 {
 				reactionMsgID = fmt.Sprintf("%s-reaction-%d", msgID, i)
 			}
-			x.login.QueueRemoteEvent(&jabberRemoteMessage{
+			x.queueRemoteEvent(ctx, &jabberRemoteMessage{
 				portalKey:      portalKey,
 				sender:         sender,
 				id:             networkid.MessageID(reactionMsgID),
@@ -457,7 +514,7 @@ func (x *xmppClient) handleGroupchatWithOOB(t xmlstream.TokenReadEncoder, start 
 			})
 		}
 	} else {
-		x.login.QueueRemoteEvent(&jabberRemoteMessage{
+		x.queueRemoteEvent(ctx, &jabberRemoteMessage{
 			portalKey:      portalKey,
 			sender:         sender,
 			id:             networkid.MessageID(msgID),
@@ -581,7 +638,7 @@ func (x *xmppClient) handleIncomingMessage(msg stanza.Message, rw xmlstream.Toke
 	}
 	sender := x.makeEventSender(senderJID)
 	x.maybeTriggerBackfillOnNewPortal(context.Background(), portalKey)
-	x.login.QueueRemoteEvent(&jabberRemoteMessage{
+	x.queueRemoteEvent(context.Background(), &jabberRemoteMessage{
 		portalKey: portalKey,
 		sender:    sender,
 		id:        msgID,
@@ -641,16 +698,14 @@ func (x *xmppClient) handleIncomingGroupchat(msg stanza.Message, rw xmlstream.To
 	}
 	x.addPortalIDForMAMCatchUp(string(portalKey.ID))
 	// Ensure MUC ghost has display name set to nick (not full JID) before queueing.
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	x.ensureMUCGhostDisplayName(ctx, occupantFull)
-	cancel()
+	x.ensureMUCGhostTraced(context.Background(), occupantFull)
 	x.maybeTriggerBackfillOnNewPortal(context.Background(), portalKey)
 	msgID := networkid.MessageID(msg.ID)
 	if msgID == "" {
 		msgID = networkid.MessageID("xmp:" + time.Now().Format("20060102150405.000"))
 	}
 	sender := x.makeEventSender(occupantFull)
-	x.login.QueueRemoteEvent(&jabberRemoteMessage{
+	x.queueRemoteEvent(context.Background(), &jabberRemoteMessage{
 		portalKey:      portalKey,
 		sender:         sender,
 		id:             msgID,
@@ -765,7 +820,7 @@ func (x *xmppClient) handlePresence(t xmlstream.TokenReadEncoder, start *xml.Sta
 		x.log.Debug().Str("room", roomBare).Str("occupant_jid", fromJID.String()).Msg("MUC join confirmed, stored our occupant JID")
 		// Queue ChatResync so the bridge re-fetches GetChatInfo (and can refresh room/ghost info after rejoin).
 		if x.login != nil {
-			x.login.QueueRemoteEvent(&simplevent.ChatResync{
+			x.queueRemoteEvent(context.Background(), &simplevent.ChatResync{
 				EventMeta: simplevent.EventMeta{
 					Type:      bridgev2.RemoteEventChatResync,
 					PortalKey: networkid.PortalKey{ID: networkid.PortalID(roomBare), Receiver: x.loginID},
@@ -949,7 +1004,7 @@ func (m *jabberRemoteMessage) GetMessageMetadata() any {
 func (m *jabberRemoteMessage) ShouldCreatePortal() bool { return true }
 
 // GetTargetMessage returns the message ID being reacted to (for reactions).
-func (m *jabberRemoteMessage) GetTargetMessage() networkid.MessageID {
+func (m *jabberRemoteMessage) GetTargetMessage() (target networkid.MessageID) {
 	// XEP-0444 reactions use reactionTarget
 	if m.reactionTarget != "" {
 		// Look up the database message ID from the XMPP reaction target ID
@@ -959,7 +1014,14 @@ func (m *jabberRemoteMessage) GetTargetMessage() networkid.MessageID {
 				Str("portal_id", string(m.portalKey.ID)).
 				Str("reaction_message_id", string(m.id)).
 				Msg("Looking up reaction target (XMPP message ID -> Matrix event) for inbound reaction")
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			// No ctx parameter here: parent the lookup span on the span context queueRemoteEvent stored.
+			ctx, span := telemetry.StartChild(telemetry.WithParent(context.Background(), m.spanCtx), "bridge.lookup_reaction_target")
+			retried := false
+			defer func() {
+				span.SetAttributes(attribute.Bool("bridge.found", target != ""), attribute.Bool("bridge.retried", retried))
+				span.End()
+			}()
+			ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			defer cancel()
 
 			xmppMsgID := networkid.MessageID(m.reactionTarget)
@@ -1021,6 +1083,7 @@ func (m *jabberRemoteMessage) GetTargetMessage() networkid.MessageID {
 				return found
 			}
 			// Retry once after short delay: reaction may have been processed before the sent message was committed (race).
+			retried = true
 			time.Sleep(400 * time.Millisecond)
 			if found := tryFind(); found != "" {
 				return found
@@ -1039,7 +1102,12 @@ func (m *jabberRemoteMessage) GetTargetMessage() networkid.MessageID {
 	// Look up the database message ID from the XMPP reply ID
 	// This is similar to what we do in ConvertMessage for replies
 	if m.x != nil && m.x.conn != nil && m.x.conn.br != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, span := telemetry.StartChild(telemetry.WithParent(context.Background(), m.spanCtx), "bridge.lookup_reaction_target")
+		defer func() {
+			span.SetAttributes(attribute.Bool("bridge.found", target != ""), attribute.Bool("bridge.retried", false))
+			span.End()
+		}()
+		ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()
 		
 		xmppMsgID := networkid.MessageID(m.replyID)
@@ -1118,7 +1186,7 @@ const (
 // (stanza_id ↔ matrix event id mapping). The bridge may not call GetMessageMetadata() when persisting
 // remote messages, so we run a deferred update: after the framework has inserted the message we find it
 // and set Metadata.XMPPMessageID.
-func (m *jabberRemoteMessage) scheduleStanzaIDMetadataUpdate() {
+func (m *jabberRemoteMessage) scheduleStanzaIDMetadataUpdate(ctx context.Context) {
 	if string(m.id) == "" || m.x == nil || m.x.conn == nil || m.x.conn.br == nil {
 		return
 	}
@@ -1127,9 +1195,18 @@ func (m *jabberRemoteMessage) scheduleStanzaIDMetadataUpdate() {
 	stanzaID := string(m.id)
 	br := m.x.conn.br
 	log := m.x.log
+	// Carry only the span context into the goroutine (not ctx itself: it is the framework's event
+	// context and may hold a DB transaction or portal cancellation).
+	gctx := telemetry.CarrySpan(context.Background(), ctx)
 	go func() {
 		time.Sleep(stanzaIDMetadataUpdateDelay)
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ctx, span := telemetry.StartChild(gctx, "bridge.stanza_id_update")
+		found := false
+		defer func() {
+			span.SetAttributes(attribute.Bool("bridge.found", found))
+			span.End()
+		}()
+		ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
 		searchStart := time.Now().Add(-15 * time.Second)
 		messages, err := br.DB.Message.GetMessagesBetweenTimeQuery(ctx, portalKey, searchStart, time.Now())
@@ -1164,13 +1241,19 @@ func (m *jabberRemoteMessage) scheduleStanzaIDMetadataUpdate() {
 			log.Warn().Err(err).Str("stanza_id", stanzaID).Str("message_id", string(candidate.ID)).Msg("Stanza ID metadata update: Update failed")
 			return
 		}
+		found = true
 		log.Debug().Str("stanza_id", stanzaID).Str("message_id", string(candidate.ID)).Msg("Stanza ID metadata update: set XMPPMessageID on message")
 	}()
 }
 
 func (m *jabberRemoteMessage) ConvertMessage(ctx context.Context, portal *bridgev2.Portal, intent bridgev2.MatrixAPI) (*bridgev2.ConvertedMessage, error) {
+	ctx, span := telemetry.Start(ctx, "bridge.convert_message")
+	defer span.End()
+	if span.IsRecording() {
+		span.SetAttributes(attribute.Bool("xmpp.has_oob", m.oobURL != ""))
+	}
 	// Ensure stanza_id → matrix event id is stored in DB (in case the framework doesn't use GetMessageMetadata).
-	m.scheduleStanzaIDMetadataUpdate()
+	m.scheduleStanzaIDMetadataUpdate(ctx)
 	body := strings.TrimSpace(m.body)
 	// Prefer XEP-0066 OOB URL when present (Jabber client sent media with OOB).
 	if m.oobURL != "" {
@@ -1196,6 +1279,9 @@ func (m *jabberRemoteMessage) ConvertMessage(ctx context.Context, portal *bridge
 					Str("mime_type", mimeType).
 					Int("size", len(content)).
 					Msg("Successfully converted OOB media to Matrix")
+				if span.IsRecording() {
+					span.SetAttributes(attribute.Int("file.size", len(content)), attribute.String("file.mime", mimeType))
+				}
 				caption := captionFromBodyWithOOB(m.body, m.oobURL)
 				result := makeMediaPart(fileName, msgType, mxcURL, file, mimeType, len(content), string(m.id), caption)
 				log.Debug().
@@ -1414,22 +1500,33 @@ func makeMediaPart(fileName string, msgType event.MessageType, mxcURL id.Content
 
 // downloadHTTPSMedia fetches a URL and returns body, content-type, suggested filename, and Matrix msg type.
 func downloadHTTPSMedia(ctx context.Context, url string) ([]byte, string, string, event.MessageType, error) {
+	ctx, span := telemetry.StartChild(ctx, "http.oob_download", trace.WithSpanKind(trace.SpanKindClient))
+	defer span.End()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
+		telemetry.Fail(span, err)
 		return nil, "", "", event.MsgFile, err
+	}
+	if span.IsRecording() {
+		span.SetAttributes(telemetry.HTTPAttrs(req)...)
 	}
 	client := &http.Client{Timeout: jabberMediaDownloadTimeout}
 	resp, err := client.Do(req)
 	if err != nil {
+		telemetry.Fail(span, err)
 		return nil, "", "", event.MsgFile, err
 	}
 	defer resp.Body.Close()
+	if span.IsRecording() {
+		span.SetAttributes(attribute.Int("http.response.status_code", resp.StatusCode), attribute.Int64("http.response.body.size", resp.ContentLength))
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, "", "", event.MsgFile, nil
 	}
 	body := io.LimitReader(resp.Body, maxJabberMediaDownloadBytes)
 	data, err := io.ReadAll(body)
 	if err != nil {
+		telemetry.Fail(span, err)
 		return nil, "", "", event.MsgFile, err
 	}
 	mimeType := resp.Header.Get("Content-Type")

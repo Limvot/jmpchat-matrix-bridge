@@ -140,7 +140,7 @@ func (x *xmppClient) markCallAnswered(sid string) {
 // handleJingleMessageInitiation turns a parsed JMI action into a Matrix notice.
 // fromBare is the bare JID the stanza came from; fromSelf is true when it originated
 // from one of our own resources (e.g. an <accept> we sent from another client).
-func (x *xmppClient) handleJingleMessageInitiation(jmi jingleMessageInfo, fromBare string, fromSelf bool) {
+func (x *xmppClient) handleJingleMessageInitiation(ctx context.Context, jmi jingleMessageInfo, fromBare string, fromSelf bool) {
 	if x.login == nil || jmi.sid == "" {
 		return
 	}
@@ -153,12 +153,12 @@ func (x *xmppClient) handleJingleMessageInitiation(jmi jingleMessageInfo, fromBa
 		portalKey := networkid.PortalKey{ID: networkid.PortalID(fromBare), Receiver: x.loginID}
 		sender := x.makeEventSender(fromBare)
 		x.storeCallSession(jmi.sid, &callSession{portalKey: portalKey, sender: sender, media: jmi.media})
-		x.maybeTriggerBackfillOnNewPortal(context.Background(), portalKey)
+		x.maybeTriggerBackfillOnNewPortal(ctx, portalKey)
 		emoji := "📞"
 		if jmi.media == "video" {
 			emoji = "📹"
 		}
-		x.emitCallNotice(portalKey, sender, jmi.sid, "propose", emoji+" Incoming "+callKind(jmi.media)+"call")
+		x.emitCallNotice(ctx, portalKey, sender, jmi.sid, "propose", emoji+" Incoming "+callKind(jmi.media)+"call")
 	case "retract":
 		cs := x.takeCallSession(jmi.sid)
 		portalKey, sender, ok := x.resolveCallTarget(cs, fromBare)
@@ -166,9 +166,9 @@ func (x *xmppClient) handleJingleMessageInitiation(jmi jingleMessageInfo, fromBa
 			return
 		}
 		if cs != nil && cs.answered {
-			x.emitCallNotice(portalKey, sender, jmi.sid, "finish", "📴 Call ended")
+			x.emitCallNotice(ctx, portalKey, sender, jmi.sid, "finish", "📴 Call ended")
 		} else {
-			x.emitCallNotice(portalKey, sender, jmi.sid, "retract", "📞 Missed call")
+			x.emitCallNotice(ctx, portalKey, sender, jmi.sid, "retract", "📞 Missed call")
 		}
 	case "accept", "proceed":
 		cs := x.getCallSession(jmi.sid)
@@ -176,20 +176,20 @@ func (x *xmppClient) handleJingleMessageInitiation(jmi jingleMessageInfo, fromBa
 			return // unknown session (never saw the propose) — can't target a portal
 		}
 		x.markCallAnswered(jmi.sid)
-		x.emitCallNotice(cs.portalKey, x.makeEventSender(string(x.loginID)), jmi.sid, "accept", "✅ Call answered on another device")
+		x.emitCallNotice(ctx, cs.portalKey, x.makeEventSender(string(x.loginID)), jmi.sid, "accept", "✅ Call answered on another device")
 	case "reject":
 		cs := x.takeCallSession(jmi.sid)
 		if cs == nil {
 			return
 		}
-		x.emitCallNotice(cs.portalKey, x.makeEventSender(string(x.loginID)), jmi.sid, "reject", "🚫 Call declined on another device")
+		x.emitCallNotice(ctx, cs.portalKey, x.makeEventSender(string(x.loginID)), jmi.sid, "reject", "🚫 Call declined on another device")
 	case "finish":
 		cs := x.takeCallSession(jmi.sid)
 		portalKey, sender, ok := x.resolveCallTarget(cs, fromBare)
 		if !ok {
 			return
 		}
-		x.emitCallNotice(portalKey, sender, jmi.sid, "finish", "📴 Call ended")
+		x.emitCallNotice(ctx, portalKey, sender, jmi.sid, "finish", "📴 Call ended")
 	}
 }
 
@@ -210,12 +210,12 @@ func (x *xmppClient) resolveCallTarget(cs *callSession, fromBare string) (networ
 // emitCallNotice queues an m.notice into the portal. The deterministic ID
 // ("jmi:<sid>:<action>") deduplicates the same action arriving twice (e.g. once
 // directly and once as a carbon copy).
-func (x *xmppClient) emitCallNotice(portalKey networkid.PortalKey, sender bridgev2.EventSender, sid, action, text string) {
+func (x *xmppClient) emitCallNotice(ctx context.Context, portalKey networkid.PortalKey, sender bridgev2.EventSender, sid, action, text string) {
 	cm := &bridgev2.ConvertedMessage{Parts: []*bridgev2.ConvertedMessagePart{{
 		Type:    event.EventMessage,
 		Content: &event.MessageEventContent{MsgType: event.MsgNotice, Body: text},
 	}}}
-	x.login.QueueRemoteEvent(&simplevent.PreConvertedMessage{
+	x.queueRemoteEvent(ctx, &simplevent.PreConvertedMessage{
 		EventMeta: simplevent.EventMeta{
 			Type:         bridgev2.RemoteEventMessage,
 			PortalKey:    portalKey,

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	"go.opentelemetry.io/otel/attribute"
 	"mellium.im/xmlstream"
 	"maunium.net/go/mautrix/bridgev2/networkid"
 )
@@ -82,7 +83,12 @@ func (x *xmppClient) handleCarbonSent(t xmlstream.TokenReadEncoder) error {
 	}
 	// XEP-0353 action we performed from another of our devices (accept/reject/proceed).
 	if jmi != nil {
-		x.handleJingleMessageInitiation(*jmi, bareJID(from), true)
+		ctx, span := startReceiveSpan("carbon_sent", "", from, "", id, false, false, false)
+		defer span.End()
+		if span.IsRecording() {
+			span.SetAttributes(attribute.String("xmpp.jingle.action", jmi.action))
+		}
+		x.handleJingleMessageInitiation(ctx, *jmi, bareJID(from), true)
 		return nil
 	}
 	_ = from
@@ -97,6 +103,8 @@ func (x *xmppClient) handleCarbonSent(t xmlstream.TokenReadEncoder) error {
 	if body == "" {
 		return nil
 	}
+	ctx, span := startReceiveSpan("carbon_sent", "", from, toBare, id, false, false, false)
+	defer span.End()
 	portalKey := networkid.PortalKey{
 		ID:       networkid.PortalID(strings.ToLower(toBare)),
 		Receiver: x.loginID,
@@ -107,12 +115,12 @@ func (x *xmppClient) handleCarbonSent(t xmlstream.TokenReadEncoder) error {
 		msgID = networkid.MessageID("xmp:" + time.Now().Format("20060102150405.000"))
 	}
 	sender := x.makeEventSender(string(x.loginID)) // "from me" for puppeting
-	x.maybeTriggerBackfillOnNewPortal(context.Background(), portalKey)
+	x.maybeTriggerBackfillOnNewPortal(ctx, portalKey)
 	x.log.Debug().
 		Str("to", toBare).
 		Str("body_preview", truncate(body, 60)).
 		Msg("Carbon <sent>: queuing message sent from another client")
-	x.login.QueueRemoteEvent(&jabberRemoteMessage{
+	x.queueRemoteEvent(ctx, &jabberRemoteMessage{
 		portalKey: portalKey,
 		sender:    sender,
 		id:        msgID,
@@ -138,7 +146,12 @@ func (x *xmppClient) handleCarbonReceived(t xmlstream.TokenReadEncoder) error {
 	}
 	// XEP-0353 call signalling received on another device (e.g. propose/retract from the caller).
 	if jmi != nil {
-		x.handleJingleMessageInitiation(*jmi, bareJID(from), bareJID(from) == bareJID(string(x.loginID)))
+		ctx, span := startReceiveSpan("carbon_received", "", from, "", id, false, false, false)
+		defer span.End()
+		if span.IsRecording() {
+			span.SetAttributes(attribute.String("xmpp.jingle.action", jmi.action))
+		}
+		x.handleJingleMessageInitiation(ctx, *jmi, bareJID(from), bareJID(from) == bareJID(string(x.loginID)))
 		return nil
 	}
 	fromBare := from
@@ -152,6 +165,8 @@ func (x *xmppClient) handleCarbonReceived(t xmlstream.TokenReadEncoder) error {
 	if body == "" {
 		return nil
 	}
+	ctx, span := startReceiveSpan("carbon_received", "", from, fromBare, id, false, false, false)
+	defer span.End()
 	portalKey := networkid.PortalKey{
 		ID:       networkid.PortalID(strings.ToLower(fromBare)),
 		Receiver: x.loginID,
@@ -162,12 +177,12 @@ func (x *xmppClient) handleCarbonReceived(t xmlstream.TokenReadEncoder) error {
 		msgID = networkid.MessageID("xmp:" + time.Now().Format("20060102150405.000"))
 	}
 	sender := x.makeEventSender(fromBare)
-	x.maybeTriggerBackfillOnNewPortal(context.Background(), portalKey)
+	x.maybeTriggerBackfillOnNewPortal(ctx, portalKey)
 	zerolog.Ctx(context.Background()).Debug().
 		Str("from", fromBare).
 		Str("body_preview", truncate(body, 60)).
 		Msg("Carbon <received>: queuing message received on another client")
-	x.login.QueueRemoteEvent(&jabberRemoteMessage{
+	x.queueRemoteEvent(ctx, &jabberRemoteMessage{
 		portalKey: portalKey,
 		sender:    sender,
 		id:        msgID,
