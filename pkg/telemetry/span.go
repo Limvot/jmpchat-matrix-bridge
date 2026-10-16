@@ -192,12 +192,3 @@ func addLogFields(c zerolog.Context, sc trace.SpanContext) zerolog.Context {
 		Str("dd.trace_id", ddTraceID(sc.TraceID())).
 		Str("dd.span_id", ddSpanID(sc.SpanID()))
 }
-
-// AddLogFields is a temporary shim for jabberRemoteMessage.AddLogContext; removed once
-// that caller is gone.
-func AddLogFields(c zerolog.Context, sc trace.SpanContext) zerolog.Context {
-	if !sc.IsValid() || !sc.IsSampled() {
-		return c
-	}
-	return addLogFields(c, sc)
-}
