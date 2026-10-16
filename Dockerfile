@@ -9,10 +9,23 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=1 go build -ldflags "-s -w" -o mautrix-jabber ./cmd/mautrix-jabber
+# Build metadata (.git is excluded from the build context, so pass it in; see build.sh).
+ARG GIT_COMMIT=unknown
+ARG GIT_TAG=unknown
+ARG GIT_REPOSITORY_URL=unknown
+ARG BUILD_TIME=unknown
+RUN CGO_ENABLED=1 go build -ldflags "-s -w \
+	-X main.Commit=${GIT_COMMIT} -X main.Tag=${GIT_TAG} \
+	-X main.RepositoryURL=${GIT_REPOSITORY_URL} -X main.BuildTime=${BUILD_TIME}" \
+	-o mautrix-jabber ./cmd/mautrix-jabber
 
 # Runtime stage
 FROM alpine:3.19
+
+ARG GIT_COMMIT=unknown
+ARG GIT_REPOSITORY_URL=unknown
+LABEL org.opencontainers.image.revision=${GIT_COMMIT} \
+	org.opencontainers.image.source=${GIT_REPOSITORY_URL}
 
 RUN apk add --no-cache ca-certificates tzdata sqlite-libs olm
 

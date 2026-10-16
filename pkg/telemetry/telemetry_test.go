@@ -126,7 +126,7 @@ func TestResourcePrecedence(t *testing.T) {
 	get := func(m map[string]string) map[string]string {
 		t.Setenv("OTEL_SERVICE_NAME", m["OTEL_SERVICE_NAME"])
 		t.Setenv("OTEL_RESOURCE_ATTRIBUTES", m["OTEL_RESOURCE_ATTRIBUTES"])
-		res, err := buildResource(context.Background(), "1.0", env(m))
+		res, err := buildResource(context.Background(), Options{ServiceVersion: "1.0", CommitSHA: "abc123", RepositoryURL: "https://example.com/repo"}, env(m))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -137,8 +137,13 @@ func TestResourcePrecedence(t *testing.T) {
 		return out
 	}
 	a := get(map[string]string{})
-	if a["service.name"] != "mautrix-jabber" || a["service.version"] != "1.0" {
+	if a["service.name"] != "mautrix-jabber" || a["service.version"] != "1.0" ||
+		a["git.commit.sha"] != "abc123" || a["git.repository_url"] != "https://example.com/repo" {
 		t.Errorf("defaults: %v", a)
+	}
+	a = get(map[string]string{"DD_GIT_COMMIT_SHA": "def456", "DD_GIT_REPOSITORY_URL": "https://example.com/fork"})
+	if a["git.commit.sha"] != "def456" || a["git.repository_url"] != "https://example.com/fork" {
+		t.Errorf("dd git: %v", a)
 	}
 	a = get(map[string]string{"DD_SERVICE": "dd", "DD_VERSION": "2", "DD_ENV": "prod"})
 	if a["service.name"] != "dd" || a["service.version"] != "2" ||

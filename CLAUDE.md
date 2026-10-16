@@ -108,7 +108,7 @@ Default appservice port is **29318**.
 A `Dockerfile` and `entrypoint.sh` are provided. The entrypoint prints an example config to stdout when no config is mounted, making first-run setup easy:
 
 ```bash
-docker build -t mautrix-jabber .
+docker build $(./build-args.sh) -t mautrix-jabber .   # build-args.sh passes git commit/tag/repo/build time
 docker run --rm mautrix-jabber > config.yaml   # get example config
 ```
 

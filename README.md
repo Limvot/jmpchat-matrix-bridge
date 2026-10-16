@@ -229,8 +229,10 @@ For more details, see [End-to-bridge encryption](https://docs.mau.fi/bridges/gen
 Build the image:
 
 ```bash
-docker build -t mautrix-jabber .
+docker build $(./build-args.sh) -t mautrix-jabber .
 ```
+
+`./build-args.sh` passes the git commit, tag, repository URL and build time into the build (the `.git` directory isn't part of the build context). They stamp the bridge version string, set the `org.opencontainers.image.revision` / `org.opencontainers.image.source` image labels, and are sent as `git.commit.sha` / `git.repository_url` on traces (used by Datadog's source code integration). A plain `docker build -t mautrix-jabber .` still works; the version then shows `+dev.unknown` and the git metadata is omitted.
 
 **First run (no config):** To create your initial config, run the container with `-e -c -` so it prints the example config to stdout (the default CMD passes config paths, so you must override with these flags):
 
@@ -278,7 +280,7 @@ Tracing is optional and **off by default**. It is enabled purely by environment 
 | `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES` | Standard resource settings; these override the `DD_*` fallbacks below. |
 | `OTEL_BSP_SCHEDULE_DELAY`, other `OTEL_BSP_*` | Batch export tuning, e.g. `1000` (ms) for faster delivery while testing. |
 
-Resource defaults: `service.name` is `mautrix-jabber` and `service.version` is the bridge version. `DD_SERVICE`, `DD_VERSION` and `DD_ENV` (sets both `deployment.environment.name` and `deployment.environment`) are used as fallbacks, and the `OTEL_*` variables above take precedence over them.
+Resource defaults: `service.name` is `mautrix-jabber` and `service.version` is the bridge version. `DD_SERVICE`, `DD_VERSION` and `DD_ENV` (sets both `deployment.environment.name` and `deployment.environment`) are used as fallbacks, and the `OTEL_*` variables above take precedence over them. `git.commit.sha` and `git.repository_url` come from the build metadata (see [Docker](#docker)); `DD_GIT_COMMIT_SHA` / `DD_GIT_REPOSITORY_URL` override them.
 
 **Match the protocol to the port.** Port 4317 is gRPC and port 4318 is HTTP. If the configured protocol and port disagree (for example `http/protobuf` against `:4317`), the bridge logs a startup warning and you will see export errors in the log. On success it logs one `OpenTelemetry tracing enabled` line with the protocol, `scheme://host:port` and sampler.
 

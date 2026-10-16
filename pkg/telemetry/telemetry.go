@@ -35,6 +35,8 @@ const TracerName = "github.com/mautrix/jabber"
 // Options configures Init.
 type Options struct {
 	ServiceVersion string         // br.Version
+	CommitSHA      string         // git commit the binary was built from (empty if unknown)
+	RepositoryURL  string         // source repository URL (empty if unknown)
 	Log            zerolog.Logger // br.Log, used for the enable/warn lines and the OTel error handler
 }
 
@@ -166,7 +168,7 @@ func initWith(ctx context.Context, o Options, getenv func(string) string) {
 		return
 	}
 
-	res, err := buildResource(ctx, o.ServiceVersion, getenv)
+	res, err := buildResource(ctx, o, getenv)
 	if err != nil {
 		log.Warn().Err(err).Msg("Problem building OpenTelemetry resource")
 	}
@@ -192,9 +194,18 @@ func initWith(ctx context.Context, o Options, getenv func(string) string) {
 		Msg("OpenTelemetry tracing enabled")
 }
 
-// buildResource builds the resource: defaults < DD_* < OTEL_* env.
-func buildResource(ctx context.Context, version string, getenv func(string) string) (*resource.Resource, error) {
+// buildResource builds the resource: defaults < DD_* < OTEL_* env. git.commit.sha and
+// git.repository_url are what Datadog's source code integration reads from OTel resources.
+func buildResource(ctx context.Context, o Options, getenv func(string) string) (*resource.Resource, error) {
 	name := "mautrix-jabber"
+	version := o.ServiceVersion
+	commit, repo := o.CommitSHA, o.RepositoryURL
+	if v := strings.TrimSpace(getenv("DD_GIT_COMMIT_SHA")); v != "" {
+		commit = v
+	}
+	if v := strings.TrimSpace(getenv("DD_GIT_REPOSITORY_URL")); v != "" {
+		repo = v
+	}
 	if v := strings.TrimSpace(getenv("DD_SERVICE")); v != "" {
 		name = v
 	}
@@ -209,6 +220,12 @@ func buildResource(ctx context.Context, version string, getenv func(string) stri
 		attrs = append(attrs,
 			attribute.String("deployment.environment.name", v),
 			attribute.String("deployment.environment", v))
+	}
+	if commit != "" {
+		attrs = append(attrs, attribute.String("git.commit.sha", commit))
+	}
+	if repo != "" {
+		attrs = append(attrs, attribute.String("git.repository_url", repo))
 	}
 	return resource.New(ctx,
 		resource.WithAttributes(attrs...),

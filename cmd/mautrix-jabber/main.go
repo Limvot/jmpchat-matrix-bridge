@@ -16,9 +16,10 @@ import (
 
 // Filled at build time with -X linker flags (e.g. -X main.Tag=... -X main.Commit=... -X main.BuildTime=...)
 var (
-	Tag       = "unknown"
-	Commit    = "unknown"
-	BuildTime = "unknown"
+	Tag           = "unknown"
+	Commit        = "unknown"
+	BuildTime     = "unknown"
+	RepositoryURL = "unknown"
 )
 
 func cmdPrefix(ce *commands.Event) string {
@@ -52,6 +53,14 @@ func withSpan(name string, fn func(*commands.Event)) func(*commands.Event) {
 	}
 }
 
+// knownOrEmpty maps the "unknown" linker-flag default to "".
+func knownOrEmpty(s string) string {
+	if s == "unknown" {
+		return ""
+	}
+	return s
+}
+
 func main() {
 	br := &mxmain.BridgeMain{
 		Name:        "mautrix-jabber",
@@ -61,7 +70,12 @@ func main() {
 		Connector:   &connector.JabberConnector{},
 	}
 	br.PostInit = func() {
-		telemetry.Init(context.Background(), telemetry.Options{ServiceVersion: br.Version, Log: *br.Log})
+		telemetry.Init(context.Background(), telemetry.Options{
+			ServiceVersion: br.Version,
+			CommitSHA:      knownOrEmpty(Commit),
+			RepositoryURL:  knownOrEmpty(RepositoryURL),
+			Log:            *br.Log,
+		})
 		if telemetry.Enabled() {
 			hc := br.Matrix.AS.HTTPClient
 			hc.Transport = telemetry.WrapMatrixTransport(hc.Transport)
