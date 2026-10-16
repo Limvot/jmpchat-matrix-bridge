@@ -14,11 +14,15 @@ import (
 	"time"
 
 	"github.com/rs/xid"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"mellium.im/xmpp/stanza"
 	"mellium.im/xmlstream"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/event"
+
+	"github.com/mautrix/jabber/pkg/telemetry"
 )
 
 const (
@@ -211,7 +215,7 @@ func mamQueryPayload(queryID, withJID string, start, end *time.Time, max int) xm
 }
 
 // fetchMAMItems runs a MAM query and returns the collected items. Used by FetchMessages and by periodic catch-up.
-func (x *xmppClient) fetchMAMItems(ctx context.Context, portalKey networkid.PortalKey, withJID string, start, end time.Time, max int) ([]mamResultItem, error) {
+func (x *xmppClient) fetchMAMItems(ctx context.Context, portalKey networkid.PortalKey, withJID string, start, end time.Time, max int) (items []mamResultItem, err error) {
 	x.mu.Lock()
 	sess := x.session
 	x.mu.Unlock()
@@ -222,6 +226,21 @@ func (x *xmppClient) fetchMAMItems(ctx context.Context, portalKey networkid.Port
 	if local.String() == "" {
 		return nil, fmt.Errorf("no local JID for MAM query")
 	}
+	ctx, span := telemetry.StartChild(ctx, "xmpp.iq.mam_query", trace.WithSpanKind(trace.SpanKindClient))
+	defer func() {
+		if span.IsRecording() {
+			span.SetAttributes(
+				attribute.String("xmpp.peer.jid", withJID),
+				attribute.String("xmpp.iq.namespace", mamNS),
+				attribute.Int("mam.max", max),
+				attribute.Int("mam.items", len(items)),
+			)
+		}
+		if err != nil {
+			telemetry.Fail(span, err)
+		}
+		span.End()
+	}()
 	// XEP-0313: user archive is queried at the account's bare JID.
 	toJID := local.Bare()
 	queryID := xid.New().String()
@@ -235,12 +254,12 @@ func (x *xmppClient) fetchMAMItems(ctx context.Context, portalKey networkid.Port
 	}
 	timeout := time.NewTimer(25 * time.Second)
 	defer timeout.Stop()
-	var items []mamResultItem
 	for {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		case <-timeout.C:
+			span.SetAttributes(attribute.Bool("mam.timed_out", true))
 			return items, nil
 		case item, ok := <-ch:
 			if !ok {
@@ -267,6 +286,15 @@ func (x *xmppClient) FetchMessages(ctx context.Context, params bridgev2.FetchMes
 	portalID := string(params.Portal.ID)
 	if portalID == "" {
 		return nil, nil
+	}
+	ctx, span := telemetry.Start(ctx, "matrix.fetch_messages")
+	defer span.End()
+	if span.IsRecording() {
+		span.SetAttributes(
+			attribute.String("xmpp.peer.jid", portalID),
+			attribute.Bool("forward", params.Forward),
+			attribute.Int("count", params.Count),
+		)
 	}
 	x.log.Info().
 		Str("portal_id", portalID).
@@ -300,8 +328,10 @@ func (x *xmppClient) FetchMessages(ctx context.Context, params bridgev2.FetchMes
 	items, err := x.fetchMAMItems(ctx, params.Portal.PortalKey, withJID, start, end, count+1)
 	if err != nil {
 		x.log.Warn().Err(err).Str("portal_id", portalID).Msg("MAM query failed")
+		telemetry.Fail(span, err)
 		return nil, err
 	}
+	span.SetAttributes(attribute.Int("items", len(items)))
 	x.log.Info().Str("portal_id", portalID).Int("mam_items", len(items)).Msg("MAM backfill query returned")
 
 	// Convert to BackfillMessage; respect count (we may have requested count+1 to detect hasMore).
@@ -406,12 +436,31 @@ func (x *xmppClient) runMAMCatchUpOnce(ctx context.Context) {
 	if len(jidSet) == 0 {
 		return
 	}
+	cycleCtx, span := telemetry.Start(ctx, "mam.catchup.cycle")
+	defer span.End()
+	var checked, withItems, errCount int
+	defer func() {
+		span.SetAttributes(
+			attribute.Int("portals.checked", checked),
+			attribute.Int("portals.with_items", withItems),
+			attribute.Int("errors", errCount),
+		)
+	}()
 	jids := make([]string, 0, len(jidSet))
 	for j := range jidSet {
 		jids = append(jids, j)
 	}
 	for _, bareJID := range jids {
-		x.mamCatchUpForPortal(ctx, bareJID)
+		// ctx (span-less) is used for the work so xmpp.iq.mam_query creates no span; the
+		// per-portal span is recorded post-hoc under cycleCtx only when something happened.
+		res := x.mamCatchUpForPortal(ctx, cycleCtx, bareJID)
+		checked++
+		if res.items > 0 {
+			withItems++
+		}
+		if res.failed {
+			errCount++
+		}
 		// Brief yield so we don't hammer the server
 		select {
 		case <-ctx.Done():
@@ -439,8 +488,12 @@ func (x *xmppClient) runFullBackfill(ctx context.Context) {
 		x.log.Debug().Msg("Full backfill: roster empty, nothing to do")
 		return
 	}
+	ctx, span := telemetry.Start(ctx, "mam.backfill_full")
+	defer span.End()
+	span.SetAttributes(attribute.Int("roster.count", len(jids)))
 	x.log.Info().Int("roster_count", len(jids)).Msg("Full backfill: starting MAM backfill for roster DMs")
 	done := 0
+	defer func() { span.SetAttributes(attribute.Int("backfilled", done)) }()
 	for _, bareJID := range jids {
 		if ctx.Err() != nil {
 			break
@@ -459,8 +512,17 @@ func (x *xmppClient) runFullBackfill(ctx context.Context) {
 	x.log.Info().Int("backfilled_count", done).Msg("Full backfill: finished")
 }
 
+// mamCatchUpResult reports what a single portal catch-up did, for the cycle span.
+type mamCatchUpResult struct {
+	items  int
+	failed bool
+}
+
 // mamCatchUpForPortal queries MAM for messages since last sync and queues new ones as remote events.
-func (x *xmppClient) mamCatchUpForPortal(ctx context.Context, bareJID string) {
+// ctx is span-less and used for the work; cycleCtx is the parent for the post-hoc
+// mam.catchup.portal span, which is only recorded when items came back or the query failed.
+func (x *xmppClient) mamCatchUpForPortal(ctx, cycleCtx context.Context, bareJID string) (res mamCatchUpResult) {
+	start := time.Now()
 	portalKey := networkid.PortalKey{
 		ID:       networkid.PortalID(bareJID),
 		Receiver: x.loginID,
@@ -475,8 +537,14 @@ func (x *xmppClient) mamCatchUpForPortal(ctx context.Context, bareJID string) {
 	items, err := x.fetchMAMItems(ctx, portalKey, bareJID, lastSync, end, 50)
 	if err != nil {
 		x.log.Debug().Err(err).Str("portal_id", bareJID).Msg("MAM catch-up query failed")
-		return
+		_, pspan := telemetry.Start(cycleCtx, "mam.catchup.portal", trace.WithTimestamp(start))
+		pspan.SetAttributes(attribute.String("xmpp.peer.jid", bareJID))
+		telemetry.Fail(pspan, err)
+		pspan.End()
+		res.failed = true
+		return res
 	}
+	res.items = len(items)
 	if len(items) == 0 {
 		x.lastMAMSyncMu.Lock()
 		if x.lastMAMSync == nil {
@@ -484,9 +552,20 @@ func (x *xmppClient) mamCatchUpForPortal(ctx context.Context, bareJID string) {
 		}
 		x.lastMAMSync[bareJID] = end
 		x.lastMAMSyncMu.Unlock()
-		return
+		return res
 	}
+	pctx, pspan := telemetry.Start(cycleCtx, "mam.catchup.portal", trace.WithTimestamp(start))
+	defer pspan.End()
 	queued := 0
+	defer func() {
+		if pspan.IsRecording() {
+			pspan.SetAttributes(
+				attribute.String("xmpp.peer.jid", bareJID),
+				attribute.Int("items", len(items)),
+				attribute.Int("queued", queued),
+			)
+		}
+	}()
 	for _, item := range items {
 		if item.Type == "groupchat" {
 			continue
@@ -533,7 +612,7 @@ func (x *xmppClient) mamCatchUpForPortal(ctx context.Context, bareJID string) {
 		if ts.IsZero() {
 			ts = time.Now()
 		}
-		x.login.QueueRemoteEvent(&jabberRemoteMessage{
+		x.queueRemoteEvent(pctx, &jabberRemoteMessage{
 			portalKey: portalKey,
 			sender:    sender,
 			id:        msgID,
@@ -552,6 +631,7 @@ func (x *xmppClient) mamCatchUpForPortal(ctx context.Context, bareJID string) {
 	}
 	x.lastMAMSync[bareJID] = end
 	x.lastMAMSyncMu.Unlock()
+	return res
 }
 
 const mamBackfillWindow = 365 * 24 * time.Hour
@@ -569,6 +649,8 @@ func (x *xmppClient) maybeTriggerBackfillOnNewPortal(ctx context.Context, portal
 	if x.login == nil || x.conn.backfillConfig == nil || !x.conn.backfillConfig.Enabled {
 		return
 	}
+	// Captured before the goroutine; only its span context is read (link origin).
+	origin := ctx
 	go func() {
 		lctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
@@ -576,7 +658,9 @@ func (x *xmppClient) maybeTriggerBackfillOnNewPortal(ctx context.Context, portal
 		if err != nil || portal == nil || portal.MXID != "" || x.portalIsMUC(lctx, portal) {
 			return
 		}
-		x.mamBackfillOnView(x.log.WithContext(context.Background()), string(portalKey.ID))
+		bctx, span := telemetry.StartLinkedRoot(x.log.WithContext(context.Background()), "mam.backfill_on_view", origin)
+		defer span.End()
+		x.doMAMBackfillOnView(bctx, span, string(portalKey.ID), x.mamBackfillMaxMessages())
 	}()
 }
 
@@ -592,9 +676,24 @@ func (x *xmppClient) mamBackfillOnView(ctx context.Context, portalID string) {
 	if bf == nil || !bf.Enabled {
 		return
 	}
-	maxMsgs := bf.MaxInitialMessages
-	if maxMsgs <= 0 {
-		maxMsgs = mamBackfillMaxMessagesDefault
+	ctx, span := telemetry.Start(ctx, "mam.backfill_on_view")
+	defer span.End()
+	x.doMAMBackfillOnView(ctx, span, portalID, x.mamBackfillMaxMessages())
+}
+
+// mamBackfillMaxMessages returns the configured initial backfill size (backfillConfig must be non-nil).
+func (x *xmppClient) mamBackfillMaxMessages() int {
+	if n := x.conn.backfillConfig.MaxInitialMessages; n > 0 {
+		return n
+	}
+	return mamBackfillMaxMessagesDefault
+}
+
+// doMAMBackfillOnView is the body of mamBackfillOnView; span is the already-started
+// mam.backfill_on_view span (a normal span, or a linked root from the new-portal trigger).
+func (x *xmppClient) doMAMBackfillOnView(ctx context.Context, span trace.Span, portalID string, maxMsgs int) {
+	if span.IsRecording() {
+		span.SetAttributes(attribute.String("xmpp.peer.jid", portalID))
 	}
 	portalKey := networkid.PortalKey{
 		ID:       networkid.PortalID(portalID),
@@ -605,8 +704,10 @@ func (x *xmppClient) mamBackfillOnView(ctx context.Context, portalID string) {
 	items, err := x.fetchMAMItems(ctx, portalKey, portalID, start, end, maxMsgs+1)
 	if err != nil {
 		x.log.Debug().Err(err).Str("portal_id", portalID).Msg("MAM backfill on view: query failed")
+		telemetry.Fail(span, err)
 		return
 	}
+	span.SetAttributes(attribute.Int("items", len(items)))
 	if len(items) == 0 {
 		return
 	}
@@ -618,6 +719,7 @@ func (x *xmppClient) mamBackfillOnView(ctx context.Context, portalID string) {
 		items = items[:maxMsgs]
 	}
 	queued := 0
+	defer func() { span.SetAttributes(attribute.Int("queued", queued)) }()
 	for _, item := range items {
 		if item.Type == "groupchat" {
 			continue
@@ -661,7 +763,7 @@ func (x *xmppClient) mamBackfillOnView(ctx context.Context, portalID string) {
 		if ts.IsZero() {
 			ts = time.Now()
 		}
-		x.login.QueueRemoteEvent(&jabberRemoteMessage{
+		x.queueRemoteEvent(ctx, &jabberRemoteMessage{
 			portalKey: portalKey,
 			sender:    sender,
 			id:        msgID,
