@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Prints docker build --build-arg flags with git metadata for the Dockerfile:
-#   docker build $(./build-args.sh) -t williamkray/mautrix-jabber:v0.2.0 .
+#   docker build $(./build-args.sh) -t williamkray/mautrix-jabber:v0.2.1 .
 # The repository URL is normalized to https (git@github.com:owner/repo.git -> https://github.com/owner/repo).
 set -e
 commit=$(git rev-parse HEAD)
