@@ -53,20 +53,23 @@ func TestLogCorrelation(t *testing.T) {
 		return buf.String()
 	}
 
-	// Disabled: logFor is x.log itself; MutateContext is identity.
+	// Disabled phase: only meaningful while tracing has not been enabled in this process (it is enabled
+	// once per process and stays on, so repeated runs with -count>1 skip it).
+	ctx := context.Background()
 	var dbuf bytes.Buffer
 	x := &xmppClient{log: zerolog.New(&dbuf)}
-	ctx := context.Background()
-	if x.logFor(trace.ContextWithSpanContext(ctx, sc)) != &x.log {
-		t.Error("logFor must return &x.log while tracing is disabled")
-	}
 	m := &jabberRemoteMessage{id: "abc", spanCtx: sc, x: x}
-	if m.MutateContext(ctx) != ctx {
-		t.Error("MutateContext must be identity while tracing is disabled")
-	}
-	m.PostHandle(ctx, nil)
-	if out := logWith(m); !strings.Contains(out, `"message_id":"abc"`) || strings.Contains(out, "trace_id") {
-		t.Errorf("AddLogContext must add only message_id: %s", out)
+	if !telemetry.Enabled() {
+		if x.logFor(trace.ContextWithSpanContext(ctx, sc)) != &x.log {
+			t.Error("logFor must return &x.log while tracing is disabled")
+		}
+		if m.MutateContext(ctx) != ctx {
+			t.Error("MutateContext must be identity while tracing is disabled")
+		}
+		m.PostHandle(ctx, nil)
+		if out := logWith(m); !strings.Contains(out, `"message_id":"abc"`) || strings.Contains(out, "trace_id") {
+			t.Errorf("AddLogContext must add only message_id: %s", out)
+		}
 	}
 
 	// Enabled.

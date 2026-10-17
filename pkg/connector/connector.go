@@ -45,6 +45,9 @@ type JabberConnector struct {
 	backfillConfig      *BackfillConfig // set from main from config.backfill
 	deliveryReceipts bool // whether to send read receipts when messages are bridged (matrix.delivery_receipts)
 	appServiceID     string // appservice.id from config, used in ghost display names (e.g. "user@example.com (cheogram)")
+
+	extnOnce sync.Once
+	extn     connectorExtension // optional build-tagged extension (nil in the default build)
 }
 
 // Ensure we implement the interface at compile time.
@@ -103,6 +106,9 @@ func warnIfDebugIdentifiers(log *zerolog.Logger) {
 // Init stores the bridge reference.
 func (c *JabberConnector) Init(br *bridgev2.Bridge) {
 	c.br = br
+	if e := c.extension(); e != nil {
+		e.init(br)
+	}
 }
 
 // SetNetworkConfig sets the decoded network section config. Called from main after LoadConfig
@@ -161,6 +167,9 @@ func getJabberConfigFromBridge(br *bridgev2.Bridge) *JabberConfig {
 // Start is called when the bridge is starting. In the scaffold it is a no-op;
 // later it will load UserLogins and spawn XMPP reconnect loops.
 func (c *JabberConnector) Start(ctx context.Context) error {
+	if e := c.extension(); e != nil {
+		return e.start(ctx)
+	}
 	return nil
 }
 
@@ -197,9 +206,16 @@ func (c *JabberConnector) GetConfig() (example string, data any, upgrader config
 # Resolve phone numbers and short codes to Cheogram JIDs (SMS/MMS). Set to true to enable.
 cheogram: false
 `
+	e := c.extension()
+	if e != nil {
+		example += e.exampleConfig()
+	}
 	upgrader = configupgrade.SimpleUpgrader(func(helper configupgrade.Helper) {
 		// Copy user's cheogram value into base so config save preserves it (framework adds "network" prefix).
 		helper.Copy(configupgrade.Bool, "cheogram")
+		if e != nil {
+			e.upgradeConfig(helper)
+		}
 	})
 	return example, &JabberConfig{}, upgrader
 }
@@ -214,6 +230,9 @@ func (c *JabberConnector) LoadUserLogin(ctx context.Context, login *bridgev2.Use
 	}
 	client := &xmppClient{loginID: login.ID, meta: meta, log: login.Log, login: login, conn: c}
 	login.Client = client
+	if e := c.extension(); e != nil {
+		e.loginLoaded(login, client)
+	}
 	// Start a background reconnect loop so the XMPP session is kept alive.
 	// Use a cancellable context so LogoutRemote can stop the loop and prevent reconnecting after logout.
 	bgCtx, cancel := context.WithCancel(login.Log.WithContext(context.Background()))

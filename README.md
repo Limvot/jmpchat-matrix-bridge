@@ -22,7 +22,7 @@ Or with Go (libolm dev headers must be installed):
 CGO_ENABLED=1 go build -ldflags "-s -w" -o mautrix-jabber ./cmd/mautrix-jabber
 ```
 
-To build without encryption support (no libolm): `go build -tags nocrypto -ldflags "-s -w" -o mautrix-jabber ./cmd/mautrix-jabber`. The Docker image is built with E2BE support.
+To build without encryption support (no libolm): `go build -tags nocrypto -ldflags "-s -w" -o mautrix-jabber ./cmd/mautrix-jabber`. The Docker image is built with E2BE and SIP call support. To include [calls](#calls-sip-via-jmp) in a Go build, add the tags `sipcalls nolibopusfile` (e.g. `-tags "nocrypto sipcalls nolibopusfile"`; needs libopus dev headers and pkg-config).
 
 ## Setup
 
@@ -394,6 +394,38 @@ Expected in a correlated trace: XMPP message handling (text only, OOB URL, MUC, 
 Not expected: XMPP stanza receipt before mux dispatch, Serve start and stop, presence, reconnect loop, the "Roster push applied" line (the roster refresh it triggers is correlated), lines logged before a span starts, and queue-level framework errors.
 
 **Fallback.** If the Logs side panel shows the fields but no link to the trace, go to Logs > Pipelines > Preprocessing for JSON logs and set the Trace Id attributes to only `trace_id` and the Span Id attributes to only `span_id`. Wait a few minutes, send a new message, and check again. If it still fails, try only `dd.trace_id` and `dd.span_id`.
+
+## Calls (SIP via JMP)
+
+Calls to and from JMP/Cheogram numbers ring in the same Matrix room as the texts, using MatrixRTC (Element Call). The call core is [mrtc-sip-bridge](https://github.com/williamkray/mrtc-sip-bridge), embedded in this bridge (build tag `sipcalls`, included in the default Docker image). Calls are off unless `network.calls.enabled: true`; the full user and host documentation is in [docs/EMBEDDING.md](https://github.com/williamkray/mrtc-sip-bridge/blob/main/docs/EMBEDDING.md).
+
+**Requirements**
+
+- MatrixRTC with LiveKit (Element Call) set up on the homeserver.
+- Double puppeting for the calling user (see above).
+- Unencrypted portals (the call rooms must not use Matrix encryption).
+- `network.cheogram: true` and JMP SIP credentials for the account.
+
+**Enable**: set `network.calls.enabled: true` and review the rest of the `network.calls` section in the example config (`./mautrix-jabber -e`).
+
+**Commands** (prefix `!jabber`):
+
+| Command | Description |
+|---------|-------------|
+| `sip-login` | Store JMP SIP credentials (run in the management room) |
+| `sip-logout` | Remove the stored SIP credentials |
+| `sip-status` | Show SIP registration status |
+| `call` | Start a call in the current portal |
+| `hangup` | End the current call |
+| `dtmf` | Send DTMF digits during a call |
+| `widget` | Add the Dialpad widget to the room |
+| `dialpad-link`, `dialpad-links`, `dialpad-revoke` | Create, list and revoke standalone Dialpad links |
+
+**Ports**: publish the SIP port range (`network.calls.sip_port_min`..`sip_port_max`, default 5060-5069, udp and tcp) and the RTP range (`rtp_port_min`..`rtp_port_max`, default 40000-40100/udp). The Docker image exposes these defaults; publish whatever you configure.
+
+**Dialpad widget/app**: the widget (and the standalone links from `dialpad-link`) lets you send DTMF tones from a keypad during a call. Serve it from a dedicated hostname rather than sharing one with other web apps. See the mrtc-sip-bridge docs for setup.
+
+**Known limits**: Element X cannot pick up outbound calls started from Matrix due to an [Element Call notification bug](https://github.com/element-hq/element-call/blob/8be229a438dc363972bdae5f6198607998a851d8/src/state/CallViewModel/CallNotificationLifecycle.ts#L128); use Element Web/Desktop for those.
 
 ## Verifying
 

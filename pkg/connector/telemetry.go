@@ -15,6 +15,9 @@ import (
 // Stop implements bridgev2.StoppableNetwork. It is called after all network
 // clients have disconnected and is the flush point for tracing.
 func (c *JabberConnector) Stop() {
+	if e := c.extension(); e != nil {
+		e.stop()
+	}
 	telemetry.Shutdown(context.Background())
 }
 

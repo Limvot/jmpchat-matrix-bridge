@@ -396,6 +396,9 @@ func (x *xmppClient) Disconnect() {
 	x.knownPortalIDsForMAMMu.Unlock()
 	login := x.login
 	x.mu.Unlock()
+	if e := x.conn.extension(); e != nil {
+		e.loginStopped(x)
+	}
 	if hadSession && login != nil {
 		login.BridgeState.Send(status.BridgeState{StateEvent: status.StateTransientDisconnect})
 	}
@@ -878,7 +881,7 @@ func (x *xmppClient) getChatInfo(ctx context.Context, portal *bridgev2.Portal) (
 	case database.RoomTypeDM:
 		// Ensure roster is synced before building DM ChatInfo so roster names are available
 		x.ensureRosterSynced(ctx)
-		return x.getDMChatInfo(ctx, portal, portalID)
+		return x.getDecoratedDMChatInfo(ctx, portal, portalID)
 	case database.RoomTypeGroupDM:
 		return x.getMUCChatInfo(ctx, portal, portalID)
 	}
@@ -887,7 +890,7 @@ func (x *xmppClient) getChatInfo(ctx context.Context, portal *bridgev2.Portal) (
 	if IsCheogramDMJID(portalID) {
 		// Ensure roster is synced before building DM ChatInfo so roster names are available
 		x.ensureRosterSynced(ctx)
-		return x.getDMChatInfo(ctx, portal, portalID)
+		return x.getDecoratedDMChatInfo(ctx, portal, portalID)
 	}
 	if isMUCJID(portalID) {
 		return x.getMUCChatInfo(ctx, portal, portalID)
@@ -895,7 +898,16 @@ func (x *xmppClient) getChatInfo(ctx context.Context, portal *bridgev2.Portal) (
 
 	// Default to DM - ensure roster is synced before building ChatInfo
 	x.ensureRosterSynced(ctx)
-	return x.getDMChatInfo(ctx, portal, portalID)
+	return x.getDecoratedDMChatInfo(ctx, portal, portalID)
+}
+
+// getDecoratedDMChatInfo builds DM ChatInfo and lets the connector extension (if any) adjust it.
+func (x *xmppClient) getDecoratedDMChatInfo(ctx context.Context, portal *bridgev2.Portal, portalID string) (*bridgev2.ChatInfo, error) {
+	info, err := x.getDMChatInfo(ctx, portal, portalID)
+	if err == nil {
+		x.conn.decorateChatInfo(portalID, info)
+	}
+	return info, err
 }
 
 // CustomizePersonalFilteringSpace implements bridgev2.PersonalFilteringCustomizingNetworkAPI.
@@ -1292,60 +1304,7 @@ func (x *xmppClient) resolveIdentifier(ctx context.Context, identifier string, c
 		},
 	}
 	if createChat {
-		rt := database.RoomTypeDM
-		meID := networkid.UserID(x.loginID)
-		memberMap := bridgev2.ChatMemberMap{
-			meID: {
-				EventSender: x.makeEventSender(string(x.loginID)),
-				Membership:  event.MembershipJoin,
-			},
-		}
-		var otherID networkid.UserID
-		var totalCount int
-		if individuals, ok := ParseCheogramGroupMMSJID(jidStr); ok {
-			totalCount = 1 + len(individuals)
-			for _, j := range individuals {
-				uid := networkid.UserID(j)
-				memberMap[uid] = bridgev2.ChatMember{
-					EventSender: x.makeEventSender(j),
-					Membership:  event.MembershipJoin,
-				}
-				if otherID == "" {
-					otherID = uid
-				}
-			}
-		} else {
-			totalCount = 2
-			otherID = networkid.UserID(jidStr)
-			memberMap[otherID] = bridgev2.ChatMember{
-				EventSender: x.makeEventSender(jidStr),
-				Membership:  event.MembershipJoin,
-			}
-		}
-		resp.Chat = &bridgev2.CreateChatResponse{
-			PortalKey: networkid.PortalKey{
-				ID:       networkid.PortalID(jidStr),
-				Receiver: x.loginID,
-			},
-			PortalInfo: &bridgev2.ChatInfo{
-				Name: &jidStr,
-				Type: &rt,
-				Members: &bridgev2.ChatMemberList{
-					IsFull:           true,
-					TotalMemberCount: totalCount,
-					OtherUserID:      otherID,
-					MemberMap:        memberMap,
-				},
-				ExtraUpdates: func(ctx context.Context, p *bridgev2.Portal) bool {
-					meta, _ := p.Metadata.(*PortalMetadata)
-					if meta != nil {
-						meta.LastSync.Time = time.Now()
-						return true
-					}
-					return false
-				},
-			},
-		}
+		resp.Chat = x.dmCreateChatResponse(jidStr)
 		// Backfill on PM creation: run before room is created so history appears before first message.
 		if x.conn.backfillConfig != nil && x.conn.backfillConfig.Enabled {
 			backfillCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -1354,6 +1313,67 @@ func (x *xmppClient) resolveIdentifier(ctx context.Context, identifier string, c
 		}
 	}
 	return resp, nil
+}
+
+// dmCreateChatResponse builds the CreateChatResponse for a DM (or group MMS) portal with jidStr.
+// It does no network I/O (in particular no backfill).
+func (x *xmppClient) dmCreateChatResponse(jidStr string) *bridgev2.CreateChatResponse {
+	rt := database.RoomTypeDM
+	meID := networkid.UserID(x.loginID)
+	memberMap := bridgev2.ChatMemberMap{
+		meID: {
+			EventSender: x.makeEventSender(string(x.loginID)),
+			Membership:  event.MembershipJoin,
+		},
+	}
+	var otherID networkid.UserID
+	var totalCount int
+	if individuals, ok := ParseCheogramGroupMMSJID(jidStr); ok {
+		totalCount = 1 + len(individuals)
+		for _, j := range individuals {
+			uid := networkid.UserID(j)
+			memberMap[uid] = bridgev2.ChatMember{
+				EventSender: x.makeEventSender(j),
+				Membership:  event.MembershipJoin,
+			}
+			if otherID == "" {
+				otherID = uid
+			}
+		}
+	} else {
+		totalCount = 2
+		otherID = networkid.UserID(jidStr)
+		memberMap[otherID] = bridgev2.ChatMember{
+			EventSender: x.makeEventSender(jidStr),
+			Membership:  event.MembershipJoin,
+		}
+	}
+	resp := &bridgev2.CreateChatResponse{
+		PortalKey: networkid.PortalKey{
+			ID:       networkid.PortalID(jidStr),
+			Receiver: x.loginID,
+		},
+		PortalInfo: &bridgev2.ChatInfo{
+			Name: &jidStr,
+			Type: &rt,
+			Members: &bridgev2.ChatMemberList{
+				IsFull:           true,
+				TotalMemberCount: totalCount,
+				OtherUserID:      otherID,
+				MemberMap:        memberMap,
+			},
+			ExtraUpdates: func(ctx context.Context, p *bridgev2.Portal) bool {
+				meta, _ := p.Metadata.(*PortalMetadata)
+				if meta != nil {
+					meta.LastSync.Time = time.Now()
+					return true
+				}
+				return false
+			},
+		},
+	}
+	x.conn.decorateChatInfo(jidStr, resp.PortalInfo)
+	return resp
 }
 
 // getPreferredMUCNick returns the nick to use for joining the given MUC: room-specific preferred,

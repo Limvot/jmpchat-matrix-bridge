@@ -22,3 +22,5 @@ logs
 
 # Plans and local dev
 *.plan.md
+docker-run
+docker-registration.yaml

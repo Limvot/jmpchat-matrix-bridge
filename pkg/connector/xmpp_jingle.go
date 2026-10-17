@@ -144,6 +144,11 @@ func (x *xmppClient) handleJingleMessageInitiation(ctx context.Context, jmi jing
 	if x.login == nil || jmi.sid == "" {
 		return
 	}
+	if !fromSelf && x.conn != nil {
+		if e := x.conn.extension(); e != nil && e.suppressCallNotice(x.loginID, fromBare) {
+			return
+		}
+	}
 	switch jmi.action {
 	case "propose":
 		if fromSelf {

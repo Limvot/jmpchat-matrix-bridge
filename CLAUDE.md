@@ -8,17 +8,19 @@ mautrix-jabber is a Matrix-Jabber (XMPP) puppeting bridge written in Go, built o
 
 ## Build
 
-Builds use Docker to ensure a repeatable environment with all C dependencies (CGO, libolm, sqlite-dev):
+Builds use Docker to ensure a repeatable environment with all C dependencies (CGO, libolm, libopus, sqlite-dev):
 
 ```bash
 ./build.sh
 ```
 
-This runs `docker build` and extracts the binary. For a local build without encryption support (requires Go 1.26+, CGO, sqlite-dev):
+This runs `docker build` (tags `sipcalls nolibopusfile`, so SIP calls are included) and extracts the binary. For a local build without encryption support (requires Go 1.26+, CGO, sqlite-dev):
 
 ```bash
 go build -tags nocrypto -ldflags "-s -w" -o mautrix-jabber ./cmd/mautrix-jabber
 ```
+
+To include calls in a local build (also needs libopus dev headers and pkg-config): `go build -tags "nocrypto sipcalls nolibopusfile" ...`.
 
 The production build includes libolm for Matrix E2EE. No test or lint configuration exists yet.
 
@@ -153,3 +155,7 @@ A local verification config also exists: `config.verify.yaml` / `registration.ve
 - **[CODE_OPTIMIZATION.md](CODE_OPTIMIZATION.md)** — Code optimization backlog (duplication, config, structure)
 
 **Encryption is deprioritized** — do not implement OMEMO or add XMPP crypto dependencies until core features are stable.
+
+## SIP calls
+
+Calls for Cheogram/JMP numbers (SIP -> MatrixRTC) are behind build tag `sipcalls`, in files named `pkg/connector/*sipcalls*.go` (plus `pkg/telemetry/backend_sipcalls*.go` and `cmd/mautrix-jabber/variant_sipcalls.go`); untagged files only hold call-free extension seams (`extension.go`). The tag is included in the default Docker build/image (with `nolibopusfile`); calls stay off unless `network.calls.enabled: true`. The call core is the public module `github.com/williamkray/mrtc-sip-bridge`; the host contract and user docs are in its `docs/EMBEDDING.md`. Local dev builds with calls use `-tags "nocrypto sipcalls nolibopusfile"` (needs libopus dev headers and pkg-config).

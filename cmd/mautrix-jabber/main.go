@@ -66,7 +66,7 @@ func main() {
 		Name:        "mautrix-jabber",
 		Description: "A Matrix-Jabber (XMPP) puppeting bridge.",
 		URL:         "https://github.com/williamkray/mautrix-jabber",
-		Version:     "0.1.10",
+		Version:     "0.1.10" + buildVariant,
 		Connector:   &connector.JabberConnector{},
 	}
 	br.PostInit = func() {
@@ -94,6 +94,9 @@ func main() {
 				})
 				jc.SetAppServiceID(br.Config.AppService.ID)
 			}
+		}
+		if jc, ok := br.Connector.(*connector.JabberConnector); ok {
+			jc.PostInitExtensions(br.Bridge.Commands.(*commands.Processor), &br.Config.Network)
 		}
 		prefix := br.Config.Bridge.CommandPrefix
 		if prefix == "" {
@@ -143,11 +146,15 @@ func main() {
 		})
 	}
 	br.PostStart = func() {
-		_, span := telemetry.Start(context.Background(), "bridge.start", trace.WithAttributes(
+		attrs := []attribute.KeyValue{
 			attribute.String("bridge.version", br.Version),
 			attribute.Bool("backfill.enabled", br.Config.Backfill.Enabled),
 			attribute.Bool("cheogram.enabled", connector.CheogramEnabled(br.Bridge)),
-		))
+		}
+		if jc, ok := br.Connector.(*connector.JabberConnector); ok {
+			attrs = append(attrs, jc.ExtensionStartAttrs()...)
+		}
+		_, span := telemetry.Start(context.Background(), "bridge.start", trace.WithAttributes(attrs...))
 		span.End()
 	}
 	br.InitVersion(Tag, Commit, BuildTime)
