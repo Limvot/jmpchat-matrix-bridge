@@ -66,7 +66,7 @@ func main() {
 		Name:        "mautrix-jabber",
 		Description: "A Matrix-Jabber (XMPP) puppeting bridge.",
 		URL:         "https://github.com/williamkray/mautrix-jabber",
-		Version:     "0.2.1" + buildVariant,
+		Version:     "0.3.0" + buildVariant,
 		Connector:   &connector.JabberConnector{},
 	}
 	br.PostInit = func() {
