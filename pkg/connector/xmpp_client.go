@@ -57,8 +57,13 @@ type xmppClient struct {
 	uploadJIDMu sync.Mutex
 	// roster holds the latest fetched XMPP roster for this login, keyed by bare JID.
 	// Used to map Jabber contact names to Matrix ghost display names and DM room names.
-	roster   map[string]string
-	rosterMu sync.RWMutex
+	roster map[string]string
+	// rosterJIDs holds every bare JID of the roster, named or not (roster is names only). rosterLoaded
+	// is set by the first complete roster fetch of this client; before that rosterJIDs may be partial.
+	// All three are guarded by rosterMu and only written by applyRosterItems.
+	rosterJIDs   map[string]struct{}
+	rosterLoaded bool
+	rosterMu     sync.RWMutex
 	// mucCache caches disco-based MUC detection per JID so we don't re-query every time.
 	mucCache   map[string]bool
 	mucCacheMu sync.RWMutex
@@ -478,16 +483,7 @@ func (x *xmppClient) SetRosterItem(ctx context.Context, jidStr, displayName stri
 	}
 
 	// Update local cache and refresh Matrix so the user sees the new name without waiting for a push.
-	x.rosterMu.Lock()
-	if x.roster == nil {
-		x.roster = make(map[string]string)
-	}
-	if item.Name != "" {
-		x.roster[strings.ToLower(key)] = item.Name
-	} else {
-		delete(x.roster, strings.ToLower(key))
-	}
-	x.rosterMu.Unlock()
+	x.applyRosterItems(false, rosterEntry{jid: key, name: item.Name})
 
 	x.logFor(ctx).Info().Str("jid", key).Str("name", item.Name).Msg("Roster item set from Matrix")
 	x.refreshRosterGhostsAndPortals(ctx, map[string]string{strings.ToLower(key): item.Name})
@@ -520,6 +516,7 @@ func (x *xmppClient) syncRoster(ctx context.Context) {
 	}()
 
 	newRoster := make(map[string]string)
+	var entries []rosterEntry
 	itemCount := 0
 	for iter.Next() {
 		item := iter.Item()
@@ -534,6 +531,7 @@ func (x *xmppClient) syncRoster(ctx context.Context) {
 		if item.Name != "" {
 			newRoster[key] = item.Name
 		}
+		entries = append(entries, rosterEntry{jid: key, name: item.Name, remove: item.Subscription == "remove"})
 	}
 	iterErr := iter.Err()
 	telemetry.Fail(fetchSpan, iterErr)
@@ -545,9 +543,9 @@ func (x *xmppClient) syncRoster(ctx context.Context) {
 	}
 	span.SetAttributes(attribute.Int("roster.count", len(newRoster)))
 
-	x.rosterMu.Lock()
-	x.roster = newRoster
-	x.rosterMu.Unlock()
+	// Known race (ROADMAP.md): this replaces the cache with the fetched snapshot, so a roster push or
+	// SetRosterItem applied between the server's answer and this point is overwritten until the next sync.
+	x.applyRosterItems(true, entries...)
 
 	log.Info().Int("item_count", itemCount).Int("entry_count", len(newRoster)).Msg("Synced XMPP roster for login")
 
@@ -650,6 +648,69 @@ func (x *xmppClient) refreshGroupMMSPortals(ctx context.Context, rosterMap map[s
 	}
 }
 
+// rosterEntry is one roster item as applied to the cache.
+type rosterEntry struct {
+	jid    string // lowercase bare JID
+	name   string // "" = the contact has no roster name
+	remove bool   // subscription=remove: the contact is gone
+}
+
+// applyRosterItems is the single write path of the roster cache (sync, push and set). With replace the
+// cache is rebuilt from items (a complete fetch) and marked loaded; otherwise items are merged into it.
+// A removed item leaves both the name map and the JID set; an unnamed item stays in the JID set only.
+func (x *xmppClient) applyRosterItems(replace bool, items ...rosterEntry) {
+	x.rosterMu.Lock()
+	defer x.rosterMu.Unlock()
+	if replace || x.roster == nil {
+		x.roster = make(map[string]string)
+	}
+	if replace || x.rosterJIDs == nil {
+		x.rosterJIDs = make(map[string]struct{})
+	}
+	if replace {
+		x.rosterLoaded = true
+	}
+	for _, it := range items {
+		if it.jid == "" {
+			continue
+		}
+		if it.remove {
+			delete(x.roster, it.jid)
+			delete(x.rosterJIDs, it.jid)
+			continue
+		}
+		x.rosterJIDs[it.jid] = struct{}{}
+		if it.name != "" {
+			x.roster[it.jid] = it.name
+		} else {
+			delete(x.roster, it.jid)
+		}
+	}
+}
+
+// inRoster reports whether the bare JID (any case) is a roster entry, named or not. loaded is false
+// until a complete roster fetch finished; callers deciding something irreversible must not trust a
+// false "in" then.
+func (x *xmppClient) inRoster(bareJID string) (in, loaded bool) {
+	x.rosterMu.RLock()
+	defer x.rosterMu.RUnlock()
+	_, in = x.rosterJIDs[strings.ToLower(bareJID)]
+	return in, x.rosterLoaded
+}
+
+// countRoster counts the roster JIDs for which match returns true (e.g. phone contacts), and reports
+// whether the roster is loaded. match is called under the roster read lock: it must be cheap and pure.
+func (x *xmppClient) countRoster(match func(bareJID string) bool) (n int, loaded bool) {
+	x.rosterMu.RLock()
+	defer x.rosterMu.RUnlock()
+	for j := range x.rosterJIDs {
+		if match == nil || match(j) {
+			n++
+		}
+	}
+	return n, x.rosterLoaded
+}
+
 // lookupRosterName returns the roster name for the given bare JID, if available.
 // Keys are stored in lowercase so we normalize the lookup.
 func (x *xmppClient) lookupRosterName(bareJID string) string {
@@ -699,7 +760,7 @@ func (x *xmppClient) SearchRoster(ctx context.Context, query string) ([]RosterCo
 // This ensures roster names are available when GetChatInfo builds room names (e.g. from sync-portal).
 func (x *xmppClient) ensureRosterSynced(ctx context.Context) {
 	x.rosterMu.RLock()
-	rosterEmpty := x.roster == nil || len(x.roster) == 0
+	rosterEmpty := !x.rosterLoaded && len(x.roster) == 0
 	x.rosterMu.RUnlock()
 	
 	if !rosterEmpty {
@@ -732,16 +793,7 @@ func (x *xmppClient) handleRosterPush(ver string, item roster.Item) error {
 	}
 	key := strings.ToLower(bareJID)
 
-	x.rosterMu.Lock()
-	if x.roster == nil {
-		x.roster = make(map[string]string)
-	}
-	if item.Subscription == "remove" || item.Name == "" {
-		delete(x.roster, key)
-	} else {
-		x.roster[key] = item.Name
-	}
-	x.rosterMu.Unlock()
+	x.applyRosterItems(false, rosterEntry{jid: key, name: item.Name, remove: item.Subscription == "remove"})
 
 	x.log.Info().
 		Str("bare_jid", key).
@@ -1039,10 +1091,34 @@ func (x *xmppClient) getMUCChatInfo(ctx context.Context, portal *bridgev2.Portal
 	}, nil
 }
 
+// dmDisplayName is the Matrix room name of the DM (or Cheogram group MMS) portal with jidStr: the roster
+// name (all participants' roster names or JIDs, comma separated, for a group MMS) else the JID, followed
+// by " (login JID)" to identify the bridged account. Shared by getDMChatInfo and dmCreateChatResponse so
+// a new portal is named as it will be after its first resync.
+func (x *xmppClient) dmDisplayName(jidStr string) string {
+	name := jidStr
+	if individuals, ok := ParseCheogramGroupMMSJID(jidStr); ok {
+		parts := make([]string, 0, len(individuals))
+		for _, j := range individuals {
+			if rosterName := x.lookupRosterName(j); rosterName != "" {
+				parts = append(parts, rosterName)
+			} else {
+				parts = append(parts, j)
+			}
+		}
+		if len(parts) > 0 {
+			name = strings.Join(parts, ", ")
+		}
+	} else if rosterName := x.lookupRosterName(jidStr); rosterName != "" {
+		name = rosterName
+	}
+	return fmt.Sprintf("%s (%s)", name, string(x.loginID))
+}
+
 // getDMChatInfo returns ChatInfo for a DM portal.
 // For Cheogram group MMS JIDs (e.g. +1a,+1b,+1c@cheogram.com), returns one member per number so each gets a ghost with roster display name.
 func (x *xmppClient) getDMChatInfo(ctx context.Context, portal *bridgev2.Portal, bareJID string) (*bridgev2.ChatInfo, error) {
-	name := bareJID
+	name := x.dmDisplayName(bareJID)
 	rt := database.RoomTypeDM
 	meID := networkid.UserID(x.loginID)
 	memberMap := bridgev2.ChatMemberMap{
@@ -1056,8 +1132,6 @@ func (x *xmppClient) getDMChatInfo(ctx context.Context, portal *bridgev2.Portal,
 
 	if individuals, ok := ParseCheogramGroupMMSJID(bareJID); ok {
 		totalCount = 1 + len(individuals)
-		// Build room display name from all participants: use roster name when available, otherwise JID.
-		displayParts := make([]string, 0, len(individuals))
 		for _, j := range individuals {
 			uid := networkid.UserID(j)
 			memberMap[uid] = bridgev2.ChatMember{
@@ -1067,29 +1141,15 @@ func (x *xmppClient) getDMChatInfo(ctx context.Context, portal *bridgev2.Portal,
 			if otherID == "" {
 				otherID = uid
 			}
-			if rosterName := x.lookupRosterName(j); rosterName != "" {
-				displayParts = append(displayParts, rosterName)
-			} else {
-				displayParts = append(displayParts, j)
-			}
-		}
-		if len(displayParts) > 0 {
-			name = strings.Join(displayParts, ", ")
 		}
 	} else {
 		totalCount = 2
 		otherID = networkid.UserID(portal.ID)
-		if rosterName := x.lookupRosterName(bareJID); rosterName != "" {
-			name = rosterName
-		}
 		memberMap[otherID] = bridgev2.ChatMember{
 			EventSender: x.makeEventSender(string(portal.ID)),
 			Membership:  event.MembershipJoin,
 		}
 	}
-
-	// Append login JID to room name to identify which bridged account it's associated with
-	name = fmt.Sprintf("%s (%s)", name, string(x.loginID))
 
 	members := &bridgev2.ChatMemberList{
 		IsFull:           true,
@@ -1348,13 +1408,14 @@ func (x *xmppClient) dmCreateChatResponse(jidStr string) *bridgev2.CreateChatRes
 			Membership:  event.MembershipJoin,
 		}
 	}
+	name := x.dmDisplayName(jidStr)
 	resp := &bridgev2.CreateChatResponse{
 		PortalKey: networkid.PortalKey{
 			ID:       networkid.PortalID(jidStr),
 			Receiver: x.loginID,
 		},
 		PortalInfo: &bridgev2.ChatInfo{
-			Name: &jidStr,
+			Name: &name,
 			Type: &rt,
 			Members: &bridgev2.ChatMemberList{
 				IsFull:           true,

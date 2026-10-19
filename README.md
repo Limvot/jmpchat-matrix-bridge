@@ -414,12 +414,15 @@ Calls to and from JMP/Cheogram numbers ring in the same Matrix room as the texts
 |---------|-------------|
 | `sip-login` | Store JMP SIP credentials (run in the management room) |
 | `sip-logout` | Remove the stored SIP credentials |
-| `sip-status` | Show SIP registration status |
+| `sip-status` | Show SIP registration status (including the roster-only setting) |
+| `roster-only-calls on\|off\|status` | Ring for incoming phone calls only from numbers saved in your Jabber roster; other SIP callers are rejected (480, so JMP sends them to voicemail) and a one-line notice naming the number is posted in your management room. Off by default. Gates SIP calls only: XMPP (XEP-0353) call notifications still appear. If the roster has not loaded yet, calls ring normally |
 | `call` | Start a call in the current portal |
 | `hangup` | End the current call |
 | `dtmf` | Send DTMF digits during a call |
 | `widget` | Add the Dialpad widget to the room |
 | `dialpad-link`, `dialpad-links`, `dialpad-revoke` | Create, list and revoke standalone Dialpad links |
+
+Roster-only calls uses the bridge's Jabber roster as the list of known numbers (Cheogram `+E164@cheogram.com` entries, named or not). Save a number from inside its chat room with `save-contact <name>`, or use `add-to-roster`. Enabling it with no phone contacts in the roster works but warns that every call would go to voicemail.
 
 **Ports**: publish the SIP port range (`network.calls.sip_port_min`..`sip_port_max`, default 5060-5069, udp and tcp) and the RTP range (`rtp_port_min`..`rtp_port_max`, default 40000-40100/udp). The Docker image exposes these defaults; publish whatever you configure.
 
@@ -451,7 +454,7 @@ When the same Jabber account is used by the bridge and another app (e.g. Gajim, 
 
 - **DM bridging** – JID+password login, 1:1 chats, portal creation on first message, identifier resolution (`!jabber pm` / `!jabber start-chat` with optional login JID for multi-account).
 - **E2BE** – Build includes libolm; enable via `encryption.allow` and related config.
-- **Implemented** – Reconnection with backoff, IPv6/dual-stack, media (Matrix↔XMPP), reactions (single per user), quotes/replies, contact roster and display names (`!jabber roster-add`, `!jabber roster-sync`), MUC (minimal: join/leave, message routing), MAM (XEP-0313) backfill and periodic catch-up (~45s), Message Carbons (XEP-0280). When backfill is enabled, **full backfill** runs for roster DMs after each connect and on `!jabber sync-roster` (so portals get history before new messages; sync-roster runs it without re-login). See [ROADMAP.md](ROADMAP.md) for phase summary.
+- **Implemented** – Reconnection with backoff, IPv6/dual-stack, media (Matrix↔XMPP), reactions (single per user), quotes/replies, contact roster and display names (`!jabber add-to-roster`, `!jabber save-contact`, `!jabber sync-roster`), MUC (minimal: join/leave, message routing), MAM (XEP-0313) backfill and periodic catch-up (~45s), Message Carbons (XEP-0280). When backfill is enabled, **full backfill** runs for roster DMs after each connect and on `!jabber sync-roster` (so portals get history before new messages; sync-roster runs it without re-login). See [ROADMAP.md](ROADMAP.md) for phase summary.
 - **Planned** – Unimplemented work is listed in [To-do](#to-do-unimplemented-work) below.
 
 ### Double puppeting
@@ -467,7 +470,7 @@ Canonical list of pending work; completed items have been removed. Order is appr
 3. **MUC room topic/description (3.5)** — Validate that room topic and description are correctly read from disco#info (XEP-0128 muc#roominfo) in all cases; fix parsing or source if wrong. Low priority.
 4. **At-mentions (2.4)** — Map Matrix mentions (`@user:server`) to XMPP (e.g. JID or MUC nick) and XMPP mentions to Matrix. Deprioritized; deferred.
 5. **OMEMO (4.1)** — XEP-0384; decrypt/encrypt on XMPP side in message and inbound paths; key storage. DM first; MUC later if desired.
-6. **Roster isolation (2.1b, multi-user hardening)** — Ensure roster commands (`roster-add`, `roster-sync`) and roster-derived data (ghost display names, DM room names) are strictly isolated per bridged Jabber ID and per Matrix user. When multiple accounts are bridged, roster data from one login must not affect another. Fix mixup behavior where roster or display names from one account leak or override another.
+6. **Roster isolation (2.1b, multi-user hardening)** — Ensure roster commands (`add-to-roster`, `save-contact`, `sync-roster`) and roster-derived data (ghost display names, DM room names) are strictly isolated per bridged Jabber ID and per Matrix user. When multiple accounts are bridged, roster data from one login must not affect another. Fix mixup behavior where roster or display names from one account leak or override another.
 7. **SRV lookup / per-account server override** — `dialXMPP` only does an A/AAAA lookup on the JID's domain and connects on port 5222; it does not resolve `_xmpp-client._tcp.<domain>` SRV records. Accounts on servers where the client-connect host differs from the JID domain (a common setup) can't connect. Add SRV lookup and wire up the reserved `JabberLoginMeta.Server`/`Port` override fields. Revisit if more connection-failure issues are reported (context: closed GitHub issue #1).
 
 ## Contributing

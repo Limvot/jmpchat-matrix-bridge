@@ -57,6 +57,14 @@ func registerSIPCommands(x *callsExt, proc *commands.Processor) {
 			Section:     commands.HelpSectionAuth,
 			Description: "Show the SIP account and call status of this login.",
 		},
+	}, {
+		Func:          hostkit.WithSpan("roster-only-calls", h.cmdRosterOnly),
+		Name:          "roster-only-calls",
+		RequiresLogin: true,
+		Help: commands.HelpMeta{
+			Section:     commands.HelpSectionAuth,
+			Description: "Ring for incoming phone calls only from numbers in your Jabber roster (other SIP callers go to voicemail). Usage: `roster-only-calls on|off|status`",
+		},
 	}} {
 		proc.AddHandler(fh)
 	}
@@ -243,6 +251,7 @@ func (h *sipCommands) submitLogin(ce *commands.Event, ul *bridgev2.UserLogin, in
 		ce.Reply("%s", fmt.Sprintf("Could not start the SIP client: %s.", msg)+prevNote)
 		return
 	}
+	x.prefsMu.Lock() // serializes this Extra read-modify-write and save with the call prefs setters
 	prev, hadCreds := sipCreds(meta)
 	setSIPCreds(meta, creds)
 	if err = saveUserLogin(ctx, ul); err != nil {
@@ -252,10 +261,12 @@ func (h *sipCommands) submitLogin(ce *commands.Event, ul *bridgev2.UserLogin, in
 		} else {
 			setSIPCreds(meta, nil)
 		}
+		x.prefsMu.Unlock()
 		acct.Stop(ctx)
 		ce.Reply("%s", "Registered, but saving failed: "+obs.Scrub(err.Error())+"."+prevNote)
 		return
 	}
+	x.prefsMu.Unlock()
 	if !x.attachAccount(ul, acct) {
 		outcome = "error"
 		acct.Stop(ctx)
@@ -289,8 +300,11 @@ func (h *sipCommands) cmdLogout(ce *commands.Event) {
 	}
 	x.detachAccount(ce.Ctx, ul.ID)
 	if ok {
+		x.prefsMu.Lock() // serializes this Extra write and save with the call prefs setters
 		setSIPCreds(meta, nil)
-		if err := saveUserLogin(ce.Ctx, ul); err != nil {
+		err := saveUserLogin(ce.Ctx, ul)
+		x.prefsMu.Unlock()
+		if err != nil {
 			ce.Reply("%s", "The SIP account was stopped, but removing it failed: "+obs.Scrub(err.Error())+".")
 			return
 		}
@@ -333,7 +347,68 @@ func (h *sipCommands) cmdStatus(ce *commands.Event) {
 			"Number: "+creds.DisplayNumber,
 			"Registration: "+registrationState(acct))
 	}
+	lines = append(lines, "Roster-only calls: "+onOff(x.loginPrefs(ul).RosterOnly))
 	ce.Reply("%s", strings.Join(lines, "\n"))
+}
+
+func onOff(b bool) string {
+	if b {
+		return "on"
+	}
+	return "off"
+}
+
+// cmdRosterOnly implements `roster-only-calls on|off|status`. The setting only gates SIP calls: XMPP
+// (XEP-0353) call notifications are not affected.
+func (h *sipCommands) cmdRosterOnly(ce *commands.Event) {
+	x := h.x
+	if !x.enabled {
+		ce.Reply("SIP calls are disabled on this bridge (network.calls.enabled).")
+		return
+	}
+	ul, refusal := x.commandLogin(ce)
+	if ul == nil {
+		ce.Reply("%s", refusal)
+		return
+	}
+	arg := "status"
+	if len(ce.Args) > 0 {
+		arg = strings.ToLower(ce.Args[0])
+	}
+	if len(ce.Args) > 1 || (arg != "on" && arg != "off" && arg != "status") {
+		ce.Reply("%s", fmt.Sprintf("Usage: `%s roster-only-calls on|off|status`", x.commandPrefix()))
+		return
+	}
+	xc, _ := ul.Client.(*xmppClient) // checkLogin guarantees a real client
+	count, loaded := xc.countRoster(func(j string) bool { _, ok := cheogramE164(j); return ok })
+	if arg == "status" {
+		state := "no"
+		if loaded {
+			state = fmt.Sprintf("yes, %d phone contacts", count)
+		}
+		ce.Reply("%s", fmt.Sprintf("Roster-only calls: %s (roster loaded: %s)", onOff(x.loginPrefs(ul).RosterOnly), state))
+		return
+	}
+	if err := x.setRosterOnly(ce.Ctx, ul, arg == "on"); err != nil {
+		ce.Reply("%s", "Could not save the setting: "+obs.Scrub(err.Error())+".")
+		return
+	}
+	if arg == "off" {
+		ce.Reply("Incoming calls now ring for everyone.")
+		return
+	}
+	prefix := x.commandPrefix()
+	msg := fmt.Sprintf("Incoming calls now ring only for numbers in your Jabber roster (%d phone contacts). Other callers are sent to voicemail. Turn off with `%s roster-only-calls off`.", count, prefix)
+	switch {
+	case !loaded:
+		msg += " Your roster has not loaded yet: calls ring normally until it has."
+	case count == 0:
+		msg += fmt.Sprintf("\n\n**Warning: your roster has no phone contacts, so every incoming call will be sent to voicemail.** Add contacts first (`%s save-contact`, `%s add-to-roster`) or turn this off with `%s roster-only-calls off`.", prefix, prefix, prefix)
+	}
+	if !x.hasAccount(ul.ID) {
+		msg += fmt.Sprintf("\n\nNo SIP account is registered for this login yet (`%s sip-login`); the setting takes effect once calls ring here.", prefix)
+	}
+	ce.Reply("%s", msg)
 }
 
 // registrationState describes acct's registration for sip-status (no secrets).

@@ -47,6 +47,10 @@ type callsExt struct {
 	enabled bool         // cfg.Enabled after postInit
 	rtc     *core.Ingest // created in postInit when enabled
 
+	// prefsMu serializes the commands' read-modify-write + save of JabberLoginMeta.Extra (call prefs,
+	// sip-login/sip-logout credentials). It is taken before mu and never while holding it.
+	prefsMu sync.Mutex
+
 	mu       sync.Mutex
 	rt       *sipaccount.Runtime     // set in start (guarded by mu)
 	calls    *calls.Manager          // set in start (guarded by mu; use manager() / callAPI())
@@ -71,6 +75,8 @@ type callsExt struct {
 	listPortals  func(ctx context.Context) ([]*bridgev2.Portal, error)
 	ensurePL     func(ctx context.Context, roomID id.RoomID) (bool, error)
 	retryDelay   time.Duration
+	// handleInviteFn replaces the call manager's HandleInvite (nil = the manager's).
+	handleInviteFn func(login core.LoginRef, localE164 string, call sipua.InboundCall)
 
 	// Dialpad widget (sipcalls_widget.go).
 	widgetSrv  *widget.Server  // set in start when network.calls.widget.enabled (guarded by mu)
@@ -89,6 +95,7 @@ type loginCalls struct {
 	registered bool                // the attached account's last known state is Registered (guarded by x.mu)
 	authNoted  bool                // auth_failed notice already sent for the current account
 	gen        int                 // bumped when acct is (re)started, replaced or stopped; cancels pending retries
+	prefs      callPrefs           // cached call preferences (guarded by x.mu; written by setRosterOnly after a save)
 }
 
 // carriedCreds are the credentials of a stopped login, valid only for the same *UserLogin.

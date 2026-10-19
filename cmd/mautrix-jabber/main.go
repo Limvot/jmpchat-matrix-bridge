@@ -115,6 +115,12 @@ func main() {
 			Help:          commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Add or rename a contact in your Jabber roster. Usage: `%s add-to-roster <jid> <name>`", prefix)},
 		})
 		br.Bridge.Commands.(*commands.Processor).AddHandler(&commands.FullHandler{
+			Func:          withSpan("save-contact", connector.SaveContactCommand),
+			Name:          "save-contact",
+			RequiresLogin: true,
+			Help:          commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Save the person you are chatting with to your Jabber roster (run inside a one-to-one chat). Usage: `%s save-contact <name>`", prefix)},
+		})
+		br.Bridge.Commands.(*commands.Processor).AddHandler(&commands.FullHandler{
 			Func:          withSpan("search-roster", cmdSearchRoster),
 			Name:          "search-roster",
 			RequiresLogin: true,

@@ -114,6 +114,10 @@ When one Matrix user is logged into multiple Jabber accounts, DMs with the same 
 
 `dialXMPP` derives the connection host from the JID's domain via a plain A/AAAA lookup on port 5222; it does not resolve `_xmpp-client._tcp.<domain>` SRV records, and the `JabberLoginMeta.Server`/`Port` override fields are reserved but not wired in. This means accounts on servers where the client-connect host differs from the JID domain (e.g. `user@example.com` connecting to `xmpp.example.com`) cannot connect. The bridge is otherwise fully server-independent (any account whose domain resolves directly works). See README to-do item 7 (context: closed GitHub issue #1).
 
+### syncRoster replaces the roster cache after the fetch (known race)
+
+`syncRoster` fetches the roster and then replaces the whole in-memory cache (`applyRosterItems(replace=true)`) with that snapshot. A roster push or `SetRosterItem` applied between the server answering the fetch and the replacement is overwritten until the next sync, so a just-added contact can briefly be missing (and, with roster-only calls on, its calls briefly rejected) or a just-removed one reappear. Not fixed: the window is small and the next push, `sync-roster` or reconnect repairs it. A fix would merge by a per-item version or buffer pushes received while a fetch is in flight.
+
 ---
 
 ## Future phases (documented for later)
