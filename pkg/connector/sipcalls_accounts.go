@@ -49,20 +49,32 @@ func setSIPCreds(meta *JabberLoginMeta, c *sipaccount.Credentials) {
 		return
 	}
 	if c == nil {
-		delete(meta.Extra, sipExtraKey)
-		if len(meta.Extra) == 0 {
-			meta.Extra = nil
-		}
+		setExtraKey(meta, sipExtraKey, nil)
 		return
 	}
 	raw, err := json.Marshal(c)
 	if err != nil {
 		return // cannot happen for a struct of strings
 	}
-	if meta.Extra == nil {
-		meta.Extra = make(map[string]json.RawMessage)
+	setExtraKey(meta, sipExtraKey, raw)
+}
+
+// setExtraKey sets (raw != nil) or deletes (raw == nil) one Extra key copy-on-write: the Extra map is
+// read without locks elsewhere, so it is never mutated in place. Empty Extra becomes nil.
+func setExtraKey(meta *JabberLoginMeta, key string, raw json.RawMessage) {
+	extra := cloneExtra(meta.Extra)
+	if raw == nil {
+		delete(extra, key)
+	} else {
+		if extra == nil {
+			extra = make(map[string]json.RawMessage)
+		}
+		extra[key] = raw
 	}
-	meta.Extra[sipExtraKey] = raw
+	if len(extra) == 0 {
+		extra = nil
+	}
+	meta.Extra = extra
 }
 
 // loginMeta returns ul's jabber metadata (nil if none).
@@ -95,6 +107,7 @@ func (x *callsExt) loginLoaded(ul *bridgev2.UserLogin, client *xmppClient) {
 		x.accounts[ul.ID] = lc
 	}
 	lc.ul, lc.client = ul, client
+	lc.prefs = callPrefsOf(meta)
 	// bridgev2 replaces the metadata of an existing login on a jabber re-login: keep the SIP credentials.
 	if cc, ok := x.carry[ul.ID]; ok {
 		delete(x.carry, ul.ID)
@@ -384,18 +397,37 @@ func (x *callsExt) notify(ctx context.Context, roomID id.RoomID, text string) er
 	return err
 }
 
-// onInvite hands an inbound call to the call manager (diago handler goroutine, returns quickly).
+// onInvite hands an inbound call to the call manager (diago handler goroutine, returns quickly). With
+// roster-only calls on, a caller outside the roster is rejected first (see rosterGate).
 func (x *callsExt) onInvite(loginID networkid.UserLoginID, acct *sipaccount.Account, call sipua.InboundCall) {
 	x.mu.Lock()
 	lc := x.accounts[loginID]
 	attached := lc != nil && lc.acct == acct
-	mgr := x.calls
+	var (
+		prefs  callPrefs
+		client *xmppClient
+		ul     *bridgev2.UserLogin
+	)
+	if lc != nil {
+		prefs, client, ul = lc.prefs, lc.client, lc.ul
+	}
+	handle := x.handleInviteFn
+	if handle == nil && x.calls != nil {
+		handle = x.calls.HandleInvite
+	}
 	x.mu.Unlock()
-	if !attached || mgr == nil || !acct.Running() {
+	if !attached || handle == nil || !acct.Running() {
 		call.Reject(480, "Temporarily Unavailable")
 		return
 	}
-	mgr.HandleInvite(core.LoginRef(loginID), acct.Creds().DisplayNumber, call)
+	if prefs.RosterOnly && client != nil {
+		// A map lookup under rosterMu.RLock: no I/O, never blocks the SIP goroutine.
+		if allow, e164 := rosterGate(prefs, call.Info(), x.cfg.DefaultCountryCode, client.inRoster); !allow {
+			x.rejectFiltered(loginID, ul, call, e164)
+			return
+		}
+	}
+	handle(core.LoginRef(loginID), acct.Creds().DisplayNumber, call)
 }
 
 // sipSpanAttrs are the attributes of the account spans (no secrets: masked user, registrar host).

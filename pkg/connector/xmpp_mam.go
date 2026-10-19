@@ -667,6 +667,24 @@ func (x *xmppClient) maybeTriggerBackfillOnNewPortal(ctx context.Context, portal
 	}()
 }
 
+// backfillChatAsync starts the on-view MAM backfill of a freshly created 1:1 portal in its own
+// goroutine and returns at once (the Dialpad widget's Message must not wait for history). It is the
+// goroutine twin of maybeTriggerBackfillOnNewPortal without the portal and MUC checks: callers pass
+// Cheogram 1:1 JIDs only. from is only the trace link origin, never used for cancellation; trigger is
+// the mam.trigger attribute. No-op when backfill is disabled or the client has no login.
+func (x *xmppClient) backfillChatAsync(from context.Context, portalID, trigger string) {
+	if x.login == nil || x.conn == nil || x.conn.backfillConfig == nil || !x.conn.backfillConfig.Enabled {
+		return
+	}
+	origin := from
+	go func() {
+		bctx, span := telemetry.StartLinkedRoot(x.log.WithContext(context.Background()), "mam.backfill_on_view", origin,
+			trace.WithAttributes(attribute.String("mam.trigger", trigger)))
+		defer span.End()
+		x.doMAMBackfillOnView(bctx, span, portalID, x.mamBackfillMaxMessages())
+	}()
+}
+
 // mamBackfillOnView fetches historical MAM messages for a DM portal and queues them as remote events.
 // Called from HandleMatrixViewingChat when the framework never triggers FetchMessages (e.g. appservice
 // flow, sync-portal, pm command). Only runs for DMs; MUC uses different MAM semantics.

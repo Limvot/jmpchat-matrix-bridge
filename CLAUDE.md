@@ -30,7 +30,7 @@ All bridge logic lives in `pkg/connector/`. The bridgev2 framework handles Matri
 
 ### Entry Point
 
-- **`cmd/mautrix-jabber/main.go`** — Bootstrap. Creates `BridgeMain` with `JabberConnector`, registers custom bot commands (`sync-roster`, `add-to-roster`, `search-roster`, `join`, `leave`, `muc-nick`, `muc-nick-default`), injects decoded network config via `PostInit`.
+- **`cmd/mautrix-jabber/main.go`** — Bootstrap. Creates `BridgeMain` with `JabberConnector`, registers custom bot commands (`sync-roster`, `add-to-roster`, `save-contact`, `remove-from-roster`, `search-roster`, `join`, `leave`, `muc-nick`, `muc-nick-default`), injects decoded network config via `PostInit`.
 
 ### Connector Core
 
@@ -81,7 +81,10 @@ All commands use the configured prefix (default `!jabber`):
 | `join <room@conference.domain>` | Join a MUC room |
 | `leave <room@conference.domain>` | Leave a MUC room |
 | `sync-roster` | Re-fetch roster, update display/room names |
-| `add-to-roster <jid> <name>` | Add or rename a roster contact |
+| `add-to-roster <jid> <name>` | Add or rename a roster contact (inside a one-to-one chat, `add-to-roster <name>` works like `save-contact`) |
+| `save-contact <name>` | Inside a one-to-one chat room: save (or rename) that chat's contact in the roster; the room name updates. Works in every build |
+| `remove-from-roster [<jid-or-phone>]` | Remove a contact from the roster; with no argument, inside a one-to-one chat, removes that chat's contact. Names fall back to the JID/number. Works in every build |
+| `roster-only-calls on\|off\|status` | (`sipcalls` build) Ring for incoming SIP calls only from numbers in the roster; others get 480 plus a notice in the management room. Gates SIP calls only, not XEP-0353 call notifications |
 | `search-roster <query>` | Search roster by JID or name |
 | `muc-nick <room-jid> <nick>` | Set room-specific MUC nickname |
 | `muc-nick-default <nick>` | Set default MUC nickname for all rooms |
@@ -158,4 +161,4 @@ A local verification config also exists: `config.verify.yaml` / `registration.ve
 
 ## SIP calls
 
-Calls for Cheogram/JMP numbers (SIP -> MatrixRTC) are behind build tag `sipcalls`, in files named `pkg/connector/*sipcalls*.go` (plus `pkg/telemetry/backend_sipcalls*.go` and `cmd/mautrix-jabber/variant_sipcalls.go`); untagged files only hold call-free extension seams (`extension.go`). The tag is included in the default Docker build/image (with `nolibopusfile`); calls stay off unless `network.calls.enabled: true`. The call core is the public module `github.com/williamkray/mrtc-sip-bridge`; the host contract and user docs are in its `docs/EMBEDDING.md`. Local dev builds with calls use `-tags "nocrypto sipcalls nolibopusfile"` (needs libopus dev headers and pkg-config).
+Calls for Cheogram/JMP numbers (SIP -> MatrixRTC) are behind build tag `sipcalls`, in files named `pkg/connector/*sipcalls*.go` (plus `pkg/telemetry/backend_sipcalls*.go` and `cmd/mautrix-jabber/variant_sipcalls.go`); untagged files only hold call-free extension seams (`extension.go`). `sipcalls_widgetfeatures.go` implements the Dialpad widget's optional host features (`hostkit.RosterOnlyPrefs`/`ChatOpener`/`ContactSaver`/`ContactLookup`, wired as `Deps.Features`): roster-only toggle, Message (reuses `ResolveCallRoom`, detached from the request, MAM backfill afterwards via `xmppClient.backfillChatAsync`), Save contact (the `save-contact` roster set) and the saved-name lookup; the widget and this file never log or trace contact names (the pre-existing `SetRosterItem` and roster-refresh log lines do log the roster name, as for the `save-contact` command). The tag is included in the default Docker build/image (with `nolibopusfile`); calls stay off unless `network.calls.enabled: true`. The call core is the public module `github.com/williamkray/mrtc-sip-bridge`; the host contract and user docs are in its `docs/EMBEDDING.md`. Local dev builds with calls use `-tags "nocrypto sipcalls nolibopusfile"` (needs libopus dev headers and pkg-config).

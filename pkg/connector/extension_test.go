@@ -50,7 +50,7 @@ func TestDMCreateChatResponse(t *testing.T) {
 				t.Errorf("portal key %+v", resp.PortalKey)
 			}
 			pi := resp.PortalInfo
-			if pi == nil || pi.Name == nil || *pi.Name != tc.jid || pi.Type == nil || *pi.Type != database.RoomTypeDM {
+			if pi == nil || pi.Name == nil || *pi.Name != x.dmDisplayName(tc.jid) || pi.Type == nil || *pi.Type != database.RoomTypeDM {
 				t.Fatalf("unexpected portal info %+v", pi)
 			}
 			m := pi.Members

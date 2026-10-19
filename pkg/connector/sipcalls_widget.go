@@ -229,6 +229,7 @@ func (x *callsExt) widgetDeps(requireAccount bool) widget.Deps {
 		EligibleRooms:      func(ctx context.Context) ([]widget.RoomRef, error) { return x.widgetEligibleRooms(ctx, requireAccount) },
 		DefaultCountryCode: x.cfg.DefaultCountryCode,
 		Log:                x.bridgeLog(),
+		Features:           widgetFeatures{x},
 	}
 }
 

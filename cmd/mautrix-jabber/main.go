@@ -66,7 +66,7 @@ func main() {
 		Name:        "mautrix-jabber",
 		Description: "A Matrix-Jabber (XMPP) puppeting bridge.",
 		URL:         "https://github.com/williamkray/mautrix-jabber",
-		Version:     "0.2.1" + buildVariant,
+		Version:     "0.3.0" + buildVariant,
 		Connector:   &connector.JabberConnector{},
 	}
 	br.PostInit = func() {
@@ -112,7 +112,19 @@ func main() {
 			Func:          withSpan("add-to-roster", cmdAddToRoster),
 			Name:          "add-to-roster",
 			RequiresLogin: true,
-			Help:          commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Add or rename a contact in your Jabber roster. Usage: `%s add-to-roster <jid> <name>`", prefix)},
+			Help:          commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Add or rename a contact in your Jabber roster. Usage: `%s add-to-roster <jid> <name>`, or `%s add-to-roster <name>` inside a one-to-one chat", prefix, prefix)},
+		})
+		br.Bridge.Commands.(*commands.Processor).AddHandler(&commands.FullHandler{
+			Func:          withSpan("save-contact", connector.SaveContactCommand),
+			Name:          "save-contact",
+			RequiresLogin: true,
+			Help:          commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Save the person you are chatting with to your Jabber roster (run inside a one-to-one chat). Usage: `%s save-contact <name>`", prefix)},
+		})
+		br.Bridge.Commands.(*commands.Processor).AddHandler(&commands.FullHandler{
+			Func:          withSpan("remove-from-roster", connector.RemoveContactCommand),
+			Name:          "remove-from-roster",
+			RequiresLogin: true,
+			Help:          commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Remove a contact from your Jabber roster. Usage: `%s remove-from-roster <jid-or-phone>`, or `%s remove-from-roster` inside a one-to-one chat", prefix, prefix)},
 		})
 		br.Bridge.Commands.(*commands.Processor).AddHandler(&commands.FullHandler{
 			Func:          withSpan("search-roster", cmdSearchRoster),
@@ -198,8 +210,13 @@ func cmdSyncRoster(ce *commands.Event) {
 }
 
 func cmdAddToRoster(ce *commands.Event) {
+	// Inside a chat, `add-to-roster <name>` (no JID) saves the chat's contact, like save-contact.
+	if ce.Portal != nil && len(ce.Args) > 0 && !strings.Contains(ce.Args[0], "@") {
+		connector.SaveContactCommand(ce)
+		return
+	}
 	if len(ce.Args) < 2 {
-		ce.Reply("Usage: `%s add-to-roster <jid> <name>` — e.g. `%s add-to-roster friend@jabber.org My Friend`", cmdPrefix(ce), cmdPrefix(ce))
+		ce.Reply("Usage: `%s add-to-roster <jid> <name>` — e.g. `%s add-to-roster friend@jabber.org My Friend`. Inside a one-to-one chat, `%s add-to-roster <name>` saves that contact.", cmdPrefix(ce), cmdPrefix(ce), cmdPrefix(ce))
 		return
 	}
 	jid := strings.TrimSpace(strings.ToLower(ce.Args[0]))
