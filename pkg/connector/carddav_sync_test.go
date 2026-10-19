@@ -138,3 +138,18 @@ func TestCardDAVBusyGuard(t *testing.T) {
 		t.Fatalf("last = %+v (%s)", last, id)
 	}
 }
+
+func TestApplyPlanBoundsEachAdd(t *testing.T) {
+	f := &fakeExec{loggedIn: true}
+	env := f.env(0)
+	var deadlines int
+	env.setItem = func(ctx context.Context, _, _ string) error {
+		if _, ok := ctx.Deadline(); ok {
+			deadlines++
+		}
+		return nil
+	}
+	if res := applyPlan(context.WithoutCancel(context.Background()), env, adds(2)); res.Added != 2 || deadlines != 2 {
+		t.Fatalf("res = %+v, adds with a deadline = %d", res, deadlines)
+	}
+}

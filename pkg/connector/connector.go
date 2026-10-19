@@ -528,6 +528,8 @@ func SetMUCPreferredNickForRoom(ctx context.Context, br *bridgev2.Bridge, loginI
 // SetDefaultMUCNick sets the default MUC nickname for the login and persists it in user login metadata.
 // It is used by the !jabber muc-nick-default command.
 func SetDefaultMUCNick(ctx context.Context, br *bridgev2.Bridge, login *bridgev2.UserLogin, nick string) error {
+	extraWriteMu.Lock() // the save marshals the whole metadata, including Extra written by other commands
+	defer extraWriteMu.Unlock()
 	meta, _ := login.Metadata.(*JabberLoginMeta)
 	if meta == nil {
 		meta = &JabberLoginMeta{}

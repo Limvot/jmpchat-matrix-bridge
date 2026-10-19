@@ -337,3 +337,62 @@ func mustURL(t *testing.T, s string) *url.URL {
 	}
 	return u
 }
+
+func TestCardDAVRootWithoutPrincipalFallsBackToWellKnown(t *testing.T) {
+	f := newFakeDAV(t)
+	f.rootUseless = true // e.g. a web server root in front of SOGo answering PROPFIND with a bare collection
+	f.addBook("Personal", "/dav/alice/personal/", "", vc("Ann", "(555) 111-2222"))
+	_, books, err := validateCardDAVLogin(ctxT(t), testCardDAVCfg(), f.srv.URL, f.user, f.pass, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(books) != 1 || books[0].Name != "Personal" {
+		t.Errorf("books = %+v", books)
+	}
+	if seen := strings.Join(f.seen(), "\n"); !strings.Contains(seen, "PROPFIND /.well-known/carddav") {
+		t.Errorf("requests:\n%s", seen)
+	}
+}
+
+func TestCardDAVReportRedirectIsFollowed(t *testing.T) {
+	f := newFakeDAV(t)
+	f.addBook("Moved", "/dav/alice/new/", "", vc("Ann", "(555) 111-2222"))
+	f.addBook("Old", "/dav/alice/old/", "").reportTo = "/dav/alice/new/"
+	c := newCardDAVClient(testCardDAVCfg(), mustURL(t, f.srv.URL), f.user, f.pass)
+	got, err := c.fetchBook(ctxT(t), cdBook{URL: f.srv.URL + "/dav/alice/old/"}, "1", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Contacts) != 1 || got.Contacts[0].Name != "Ann" {
+		t.Errorf("contacts = %+v (an unfollowed redirect must not look like an empty book)", got.Contacts)
+	}
+}
+
+func TestCardDAVNoHTTPDowngradeEvenWhenInsecureAllowed(t *testing.T) {
+	cfg := testCardDAVCfg()
+	cfg.AllowInsecureHTTP = true
+	c := newCardDAVClient(cfg, mustURL(t, "https://dav.example.org/"), "u", "p")
+	_, _, err := c.davRequest(ctxT(t), "PROPFIND", mustURL(t, "http://dav.example.org/dav/"), "0", "", time.Second, func(davResponse) {})
+	wantKind(t, err, kindInsecure)
+}
+
+func TestCardDAVEmptyQueryAnswerFallsBackToMultiget(t *testing.T) {
+	f := newFakeDAV(t)
+	f.addBook("Personal", "/dav/alice/personal/", "empty_query", vc("Ann", "(555) 111-2222"), vc("Bob", "555 111 3333"))
+	s, err := fetchContacts(ctxT(t), testCardDAVCfg(), credsFor(f, "/dav/alice/personal/"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := contactNames(s); !reflect.DeepEqual(got, []string{"Ann", "Bob"}) {
+		t.Errorf("contacts = %v", got)
+	}
+}
+
+func TestCardDAVEmptyBookStaysEmpty(t *testing.T) {
+	f := newFakeDAV(t)
+	f.addBook("Personal", "/dav/alice/personal/", "")
+	s, err := fetchContacts(ctxT(t), testCardDAVCfg(), credsFor(f, "/dav/alice/personal/"))
+	if err != nil || s.Cards != 0 || s.BooksOK != 1 {
+		t.Fatalf("s = %+v err = %v", s, err)
+	}
+}

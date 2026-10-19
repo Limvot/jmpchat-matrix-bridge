@@ -17,6 +17,7 @@ import (
 const (
 	cardDAVMaxConsecutiveFailures = 5
 	cardDAVPreviewLines           = 20
+	cardDAVRosterSetTimeout       = 30 * time.Second // one roster add (IQ round trip plus refresh)
 )
 
 // Executor outcomes.
@@ -96,7 +97,12 @@ func applyPlan(ctx context.Context, env execEnv, adds []rosterAdd) applyResult {
 			}
 		}
 		attempted++
-		if err := env.setItem(ctx, a.JID, a.Name); err != nil {
+		// Bounded: the run's ctx is detached and never cancelled, so an unanswered roster IQ would
+		// otherwise keep the login's sync marked busy until restart.
+		setCtx, cancel := context.WithTimeout(ctx, cardDAVRosterSetTimeout)
+		err := env.setItem(setCtx, a.JID, a.Name)
+		cancel()
+		if err != nil {
 			if strings.Contains(err.Error(), "not connected") {
 				res.Outcome, res.Remaining = outcomeDisconnect, len(adds)-i
 				return res

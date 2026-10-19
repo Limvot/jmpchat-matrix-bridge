@@ -177,7 +177,9 @@ func (c *cardDAVClient) davRequest(ctx context.Context, method string, u *url.UR
 	if !sameSite(c.entered.Hostname(), u.Hostname()) {
 		return res, nil, newCDError(kindCrossHost, "The server pointed to a different site (%s); the bridge will not send your password there.", u.Hostname())
 	}
-	if u.Scheme == "http" && !c.cfg.AllowInsecureHTTP || u.Scheme != "http" && u.Scheme != "https" {
+	// http needs allow_insecure_http, and even then never after an https start (no downgrade by redirect
+	// or server-returned href).
+	if u.Scheme == "http" && (!c.cfg.AllowInsecureHTTP || c.entered.Scheme == "https") || u.Scheme != "http" && u.Scheme != "https" {
 		return res, nil, newCDError(kindInsecure, "CardDAV URLs must use https:// (your password would be sent unencrypted).")
 	}
 	rctx, cancel := context.WithTimeout(ctx, timeout)

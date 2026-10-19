@@ -17,7 +17,9 @@ type fakeBook struct {
 	path  string // e.g. /dav/alice/contacts/
 	name  string
 	cards map[string]string // file name -> vCard
-	mode  string            // "", "fail500", "huge", "trunc507", "reject_query", "gone"
+	mode  string            // "", "fail500", "huge", "trunc507", "reject_query", "empty_query", "gone"
+	// reportTo, when set, answers REPORT with a 308 to this path.
+	reportTo string
 }
 
 // fakeDAV is a minimal CardDAV server (PROPFIND/REPORT, Basic auth) on httptest.NewTLSServer.
@@ -30,6 +32,7 @@ type fakeDAV struct {
 	principal   string
 	home        string
 	homeHref    string // overrides how the home-set href is written (absolute URLs etc.)
+	rootUseless bool   // "/" answers 207 with a plain collection (no principal, home set or book)
 	books       []*fakeBook
 
 	mu       sync.Mutex
@@ -102,16 +105,18 @@ func (f *fakeDAV) handle(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	var props []string
-	switch p {
-	case trimSlash(f.rootDAV):
+	switch {
+	case p == "" && f.rootUseless:
+		props = []string{respOK("/", `<d:resourcetype><d:collection/></d:resourcetype>`)}
+	case p == trimSlash(f.rootDAV):
 		props = []string{respOK(f.rootDAV, `<d:resourcetype><d:collection/></d:resourcetype><d:current-user-principal><d:href>`+xmlEsc(f.principal)+`</d:href></d:current-user-principal>`)}
-	case trimSlash(f.principal):
+	case p == trimSlash(f.principal):
 		href := f.homeHref
 		if href == "" {
 			href = f.home
 		}
 		props = []string{respOK(f.principal, `<d:resourcetype><d:principal/></d:resourcetype><c:addressbook-home-set><d:href>`+xmlEsc(href)+`</d:href></c:addressbook-home-set>`)}
-	case trimSlash(f.home):
+	case p == trimSlash(f.home):
 		props = []string{respOK(f.home, `<d:resourcetype><d:collection/></d:resourcetype>`)}
 		if r.Header.Get("Depth") == "1" {
 			for _, b := range f.books {
@@ -152,6 +157,11 @@ func (f *fakeDAV) handleBook(w http.ResponseWriter, r *http.Request, b *fakeBook
 		}
 		writeMS(w, out)
 	case "REPORT":
+		if b.reportTo != "" {
+			w.Header().Set("Location", b.reportTo)
+			w.WriteHeader(http.StatusPermanentRedirect)
+			return
+		}
 		multiget := strings.Contains(body, "addressbook-multiget")
 		switch {
 		case b.mode == "fail500":
@@ -173,6 +183,13 @@ func (f *fakeDAV) handleBook(w http.ResponseWriter, r *http.Request, b *fakeBook
 			return
 		}
 		out := ""
+		if b.mode == "empty_query" && !multiget { // 207 listing the cards without address-data
+			for _, n := range names {
+				out += respOK(b.path+n, `<d:getetag>"1"</d:getetag>`)
+			}
+			writeMS(w, out)
+			return
+		}
 		for _, n := range names {
 			if multiget && !strings.Contains(body, "<d:href>"+b.path+n+"</d:href>") {
 				continue

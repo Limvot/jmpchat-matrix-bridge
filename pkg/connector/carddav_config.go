@@ -19,7 +19,7 @@ type CardDAVConfig struct {
 }
 
 const (
-	cardDAVMaxContacts        = 5000 // abort the sync (nothing is added) above this many cards
+	cardDAVMaxContacts        = 5000 // cards per sync: a book that would exceed the remaining budget fails (too_large); the others still sync
 	cardDAVMaxAddsPerRun      = 500  // roster entries added by one `carddav-sync apply`
 	cardDAVAddsPerSecond      = 5    // roster add rate
 	cardDAVMaxResponseBytes   = 32 << 20

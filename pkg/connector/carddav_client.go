@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/emersion/go-vcard"
 	"go.opentelemetry.io/otel/attribute"
@@ -53,24 +54,28 @@ const discoveryPropfind = `<?xml version="1.0" encoding="utf-8"?>
 	`<d:resourcetype/><d:displayname/><d:current-user-principal/><c:addressbook-home-set/>` +
 	`</d:prop></d:propfind>`
 
-// propfind runs a PROPFIND, following up to maxCardDAVRedirectHops redirects manually (every hop is
-// re-vetted by davRequest: https rule, same-site rule, SSRF dialer). It returns the answering URL.
-func (c *cardDAVClient) propfind(ctx context.Context, u *url.URL, depth string, handle func(davResponse)) (*url.URL, error) {
+// request sends a PROPFIND/REPORT, following up to maxCardDAVRedirectHops redirects manually with the
+// same method and body (every hop is re-vetted by davRequest: https rule, same-site rule, SSRF dialer).
+// It returns the result and the answering URL.
+func (c *cardDAVClient) request(ctx context.Context, method string, u *url.URL, depth, body string, timeout time.Duration, handle func(davResponse)) (davResult, *url.URL, error) {
 	cur := u
 	for hop := 0; ; hop++ {
-		_, redirect, err := c.davRequest(ctx, "PROPFIND", cur, depth, discoveryPropfind, cardDAVRequestTimeout, handle)
-		if err != nil {
-			return cur, err
-		}
-		if redirect == nil {
-			return cur, nil
+		res, redirect, err := c.davRequest(ctx, method, cur, depth, body, timeout, handle)
+		if err != nil || redirect == nil {
+			return res, cur, err
 		}
 		if hop >= maxCardDAVRedirectHops {
-			return cur, newCDError(kindRedirect, "Too many redirects from %s.", c.host())
+			return res, cur, newCDError(kindRedirect, "Too many redirects from %s.", c.host())
 		}
 		redirect.Fragment, redirect.RawFragment = "", ""
 		cur = redirect
 	}
+}
+
+// propfind runs the discovery PROPFIND (redirects followed by request). It returns the answering URL.
+func (c *cardDAVClient) propfind(ctx context.Context, u *url.URL, depth string, handle func(davResponse)) (*url.URL, error) {
+	_, final, err := c.request(ctx, "PROPFIND", u, depth, discoveryPropfind, cardDAVRequestTimeout, handle)
+	return final, err
 }
 
 // probe PROPFINDs u at depth 0 and returns the response describing u itself.
@@ -113,14 +118,17 @@ func (c *cardDAVClient) listBooks(ctx context.Context, home *url.URL) ([]cdBook,
 // selectBooks.
 func (c *cardDAVClient) discover(ctx context.Context, start *url.URL, selector string) ([]cdBook, error) {
 	info, final, err := c.probe(ctx, start)
-	if err != nil && (start.Path == "" || start.Path == "/") {
-		if k := cardDAVErrorKind(err); k == kindNotFound || k == kindHTTP || k == kindDecode {
+	// A bare host whose root does not answer as DAV, or answers without anything usable (a web-server
+	// root redirecting to the webmail UI, as is common in front of SOGo), gets the /.well-known/carddav
+	// hop.
+	useless := err == nil && !info.IsBook && info.Principal == nil && len(info.HomeSets) == 0
+	if (useless || err != nil) && (start.Path == "" || start.Path == "/") {
+		if k := cardDAVErrorKind(err); useless || k == kindNotFound || k == kindHTTP || k == kindDecode {
 			wk := *start
 			wk.Path = "/.well-known/carddav"
-			var werr error
-			if info, final, werr = c.probe(ctx, &wk); werr == nil {
-				err = nil
-			} else if wk := cardDAVErrorKind(werr); wk != kindNotFound && wk != kindHTTP && wk != kindDecode {
+			if winfo, wfinal, werr := c.probe(ctx, &wk); werr == nil {
+				info, final, err = winfo, wfinal, nil
+			} else if wk := cardDAVErrorKind(werr); !useless && wk != kindNotFound && wk != kindHTTP && wk != kindDecode {
 				err = werr // a security refusal or auth failure is more telling than the first 404
 			}
 		}
@@ -278,7 +286,8 @@ func (f *bookFetch) addCard(r davResponse, defaultCC string) {
 }
 
 // fetchBook downloads one address book with an addressbook-query REPORT; when the server rejects the
-// query it falls back to a listing plus addressbook-multiget in batches of 100. budget is the number of
+// query, or answers it without any card data, it falls back to a listing plus addressbook-multiget in
+// batches of 100. budget is the number of
 // cards still allowed; exceeding it fails the book (too_large).
 func (c *cardDAVClient) fetchBook(ctx context.Context, b cdBook, defaultCC string, budget int) (*bookFetch, error) {
 	u, err := url.Parse(b.URL)
@@ -286,17 +295,25 @@ func (c *cardDAVClient) fetchBook(ctx context.Context, b cdBook, defaultCC strin
 		return nil, newCDError(kindBadURL, "bad address book address")
 	}
 	f := newBookFetch()
-	res, _, err := c.davRequest(ctx, "REPORT", u, "1", queryReportBody(), cardDAVReportTimeout, func(r davResponse) { f.addCard(r, defaultCC) })
-	if err != nil {
-		var ce *cardDAVError
-		if asCDError(err, &ce) && ce.kind == kindHTTP && ce.status != http.StatusUnauthorized {
-			f = newBookFetch()
-			if res, err = c.fetchViaMultiget(ctx, u, defaultCC, f); err != nil {
-				return nil, err
-			}
-		} else {
+	// A redirect is followed (not ignored: an unfollowed one would look like an empty address book).
+	res, _, err := c.request(ctx, "REPORT", u, "1", queryReportBody(), cardDAVReportTimeout, func(r davResponse) { f.addCard(r, defaultCC) })
+	var ce *cardDAVError
+	switch {
+	case err == nil && f.Cards == 0 && !res.Truncated:
+		// A 207 without any card data: some servers mishandle the empty <c:filter/>. List the book and
+		// multiget instead (for a really empty book this costs one PROPFIND); keep the empty answer if
+		// that fails or finds nothing either.
+		mf := newBookFetch()
+		if mres, merr := c.fetchViaMultiget(ctx, u, defaultCC, mf); merr == nil && mf.Cards > 0 {
+			f, res = mf, mres
+		}
+	case err != nil && asCDError(err, &ce) && ce.kind == kindHTTP && ce.status != http.StatusUnauthorized:
+		f = newBookFetch()
+		if res, err = c.fetchViaMultiget(ctx, u, defaultCC, f); err != nil {
 			return nil, err
 		}
+	case err != nil:
+		return nil, err
 	}
 	f.Truncated, f.Bytes = res.Truncated, res.Bytes
 	if res.Bad > 0 {
@@ -330,7 +347,7 @@ func (c *cardDAVClient) fetchViaMultiget(ctx context.Context, book *url.URL, def
 	var total davResult
 	for i := 0; i < len(hrefs); i += 100 {
 		end := min(i+100, len(hrefs))
-		res, _, err := c.davRequest(ctx, "REPORT", book, "1", multigetBody(hrefs[i:end]), cardDAVReportTimeout, func(r davResponse) { f.addCard(r, defaultCC) })
+		res, _, err := c.request(ctx, "REPORT", book, "1", multigetBody(hrefs[i:end]), cardDAVReportTimeout, func(r davResponse) { f.addCard(r, defaultCC) })
 		if err != nil {
 			return total, err
 		}
