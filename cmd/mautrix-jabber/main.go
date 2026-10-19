@@ -126,6 +126,22 @@ func main() {
 			RequiresLogin: true,
 			Help:          commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Remove a contact from your Jabber roster. Usage: `%s remove-from-roster <jid-or-phone>`, or `%s remove-from-roster` inside a one-to-one chat", prefix, prefix)},
 		})
+		for _, c := range []struct {
+			name, desc string
+			fn         func(*commands.Event)
+		}{
+			{"carddav-login", fmt.Sprintf("Set up (or replace) the CardDAV address book to import phone numbers from; the bridge asks for each value. Needs `network.cheogram`. Usage: `%s carddav-login`", prefix), connector.CardDAVLoginCommand},
+			{"carddav-logout", fmt.Sprintf("Remove the CardDAV account of this login (contacts already added to the roster stay). Usage: `%s carddav-logout`", prefix), connector.CardDAVLogoutCommand},
+			{"carddav-status", fmt.Sprintf("Show the CardDAV account and the last sync. Usage: `%s carddav-status`", prefix), connector.CardDAVStatusCommand},
+			{"carddav-sync", fmt.Sprintf("Import phone numbers from your CardDAV address book into your Jabber roster as Cheogram contacts. Without an argument it only previews. Usage: `%s carddav-sync` or `%s carddav-sync apply`", prefix, prefix), connector.CardDAVSyncCommand},
+		} {
+			br.Bridge.Commands.(*commands.Processor).AddHandler(&commands.FullHandler{
+				Func:          withSpan(c.name, c.fn),
+				Name:          c.name,
+				RequiresLogin: true,
+				Help:          commands.HelpMeta{Section: commands.HelpSectionAuth, Description: c.desc},
+			})
+		}
 		br.Bridge.Commands.(*commands.Processor).AddHandler(&commands.FullHandler{
 			Func:          withSpan("search-roster", cmdSearchRoster),
 			Name:          "search-roster",

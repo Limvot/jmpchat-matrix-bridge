@@ -486,7 +486,7 @@ func (x *xmppClient) SetRosterItem(ctx context.Context, jidStr, displayName stri
 	// Update local cache and refresh Matrix so the user sees the new name without waiting for a push.
 	x.applyRosterItems(false, rosterEntry{jid: key, name: item.Name})
 
-	x.logFor(ctx).Info().Str("jid", key).Str("name", item.Name).Msg("Roster item set from Matrix")
+	x.logFor(ctx).Debug().Str("jid", key).Msg("Roster item set from Matrix") // no name: bulk imports (CardDAV) would log every contact
 	x.refreshRosterGhostsAndPortals(ctx, map[string]string{strings.ToLower(key): item.Name})
 	return nil
 }
@@ -842,10 +842,10 @@ func (x *xmppClient) handleRosterPush(ver string, item roster.Item) error {
 
 	x.applyRosterItems(false, rosterEntry{jid: key, name: item.Name, remove: item.Subscription == "remove"})
 
-	x.log.Info().
+	// No name in the log line: bulk roster changes (CardDAV import) would log every contact name.
+	x.log.Debug().
 		Str("bare_jid", key).
 		Str("subscription", item.Subscription).
-		Str("name", item.Name).
 		Msg("Roster push applied")
 
 	// Refresh off the Serve goroutine: this handler runs inside the XMPP read loop, and the ghost/

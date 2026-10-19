@@ -389,6 +389,50 @@ Not expected: XMPP stanza receipt before mux dispatch, Serve start and stop, pre
 
 **Fallback.** If the Logs side panel shows the fields but no link to the trace, go to Logs > Pipelines > Preprocessing for JSON logs and set the Trace Id attributes to only `trace_id` and the Span Id attributes to only `span_id`. Wait a few minutes, send a new message, and check again. If it still fails, try only `dd.trace_id` and `dd.span_id`.
 
+## CardDAV contact import
+
+The bridge can read a CardDAV address book (Nextcloud, SOGo, Radicale, Fastmail and similar) and add the phone numbers in it to your Jabber roster as Cheogram contacts (`+E164@cheogram.com`), named after the contact. It only reads the address book (never writes to it), only adds roster entries (never renames or removes), and only runs when you ask it to. Requires `network.cheogram: true`.
+
+**Commands** (prefix `!jabber`):
+
+| Command | Description |
+|---------|-------------|
+| `carddav-login` | Set up the CardDAV account. Run it in the management room without arguments; the bridge asks for the server URL, username, password and an optional address-book name (one message each; the password message is deleted). It connects and discovers the address books before saving anything |
+| `carddav-sync` | Preview only: shows how many numbers would be added (and up to 20 of them), nothing is written |
+| `carddav-sync apply` | Add the missing numbers to the roster (rate limited, at most 500 per run; run it again to continue). The result arrives as a later message |
+| `carddav-status` | Show the server, the masked username, the address books and the last sync of this bridge run |
+| `carddav-logout` | Remove the stored account. Contacts already added to the roster stay |
+
+**Server URL**: a bare host (`dav.example.org`), a base URL, or the address book's own URL. The bridge probes the URL as an address book, then looks for the user's principal and address-book home (also through `/.well-known/carddav`). Examples:
+
+- Radicale (explicit address book, the most reliable): `https://dav.example.org/alice/contacts/`
+- Nextcloud: `https://cloud.example.org/remote.php/dav` (or just the host; use an app password when 2FA is on)
+- SOGo: `https://mail.example.org/SOGo/dav/` or `https://mail.example.org/SOGo/dav/alice/Contacts/personal/`
+- Fastmail: `https://carddav.fastmail.com` (app password)
+
+iCloud's contacts live on `pNN-contacts.icloud.com` hosts; absolute links on the same registrable domain are followed, but this is untested. Google (OAuth only) is not supported.
+
+Without an address-book name the bridge syncs every address book it finds except generated ones (Nextcloud "Recently contacted", SOGo "collected addresses"). An address book that cannot be read (for example a huge shared or LDAP-backed list that refuses a full listing) is skipped and counted; the other books are still synced. Give an address-book name at login to sync only that one.
+
+**What is imported**: TEL numbers of individual contacts. A contact with one number is saved under its name (FN, else N, NICKNAME or ORG). With several numbers each entry is `Name (label)`: `mobile`, `work`, `home`, `main`, `other`, or the contact's own custom label (for example `John Doe (Office)`; Apple `X-ABLabel` groups are understood). A number that already is in the roster (under any name) is left alone, and a number found in several contacts is added once. Skipped, and counted in the summary: contacts without a number or name (`no_number`, `no_name`), unparsable numbers (`invalid`), short codes (`short_code`), numbers with extensions or pauses (`extension`), fax and pager numbers (`fax`), repeated numbers (`duplicate`) and cards the server sent that cannot be parsed (`bad_card`). Numbers without a leading `+` use `network.carddav.default_country_code`. vCard 2.1 is only partly supported (a bare `TEL;CELL:` parameter is salvaged). A contact deleted from the address book, or a roster entry you removed yourself, is not tracked: removed entries come back with the next `carddav-sync apply`.
+
+Imported numbers do not get Matrix rooms until the first message arrives, and the periodic MAM catch-up skips them until then (see Troubleshooting). Each added contact makes the XMPP server push the roster item back, so a large import takes about `adds / 5` seconds and produces a roster refresh per entry. For roster-only calls, imported numbers count as known numbers.
+
+**Config** (`network.carddav`, set by the bridge admin; all optional):
+
+```yaml
+network:
+    cheogram: true
+    carddav:
+        allow_insecure_http: false   # allow http:// URLs (local testing only; the password is sent in clear)
+        allow_private_hosts: false   # allow servers on loopback / private (RFC1918, ULA) / link-local / CGNAT addresses
+        default_country_code: "1"    # for numbers without a leading +
+```
+
+By default the bridge refuses CardDAV servers on private or local addresses (and never uses proxy environment variables for CardDAV). A home-lab Radicale or Nextcloud on a private address, a Tailscale/CGNAT address or a Docker network needs `allow_private_hosts: true`; the refusal message names this setting. The limits (5000 contacts per sync, 500 adds per run, 5 adds per second, 32 MiB per response) are fixed.
+
+**Credentials** are stored in plaintext in the bridge database (login metadata `extra.carddav`), the same trust boundary as the Jabber password and SIP credentials; use an app-specific password where the provider offers one. The credentials are only sent to the host you entered (or one on the same registrable domain). Commands that take the password are only accepted in the management room; the password message is redacted. Spans and logs contain counts, outcomes and the server host, never names, usernames, passwords, URL paths or vCard content.
+
 ## Calls (SIP via JMP)
 
 Calls to and from JMP/Cheogram numbers ring in the same Matrix room as the texts, using MatrixRTC (Element Call). The call core is [mrtc-sip-bridge](https://github.com/williamkray/mrtc-sip-bridge), embedded in this bridge (build tag `sipcalls`, included in the default Docker image). Calls are off unless `network.calls.enabled: true`; the full user and host documentation is in [docs/EMBEDDING.md](https://github.com/williamkray/mrtc-sip-bridge/blob/main/docs/EMBEDDING.md).
@@ -469,6 +513,7 @@ Canonical list of pending work; completed items have been removed. Order is appr
 6. **Roster isolation (2.1b, multi-user hardening)** — Ensure roster commands (`add-to-roster`, `save-contact`, `sync-roster`) and roster-derived data (ghost display names, DM room names) are strictly isolated per bridged Jabber ID and per Matrix user. When multiple accounts are bridged, roster data from one login must not affect another. Fix mixup behavior where roster or display names from one account leak or override another.
 7. **SRV lookup / per-account server override** — `dialXMPP` only does an A/AAAA lookup on the JID's domain and connects on port 5222; it does not resolve `_xmpp-client._tcp.<domain>` SRV records. Accounts on servers where the client-connect host differs from the JID domain (a common setup) can't connect. Add SRV lookup and wire up the reserved `JabberLoginMeta.Server`/`Port` override fields. Revisit if more connection-failure issues are reported (context: closed GitHub issue #1).
 8. **Archive-wide MAM catch-up** — Replace the per-contact MAM polling with one archive-wide query per cycle (no `with`, RSM `after` the last seen id), routed by peer. That is O(1) IQs regardless of roster size and would close the Cheogram-number gap described under Troubleshooting.
+9. **CardDAV follow-ups** — DNS SRV discovery for CardDAV, tombstones for roster entries removed on purpose, `ResolveCheogramIdentifier` switched to `phone.Normalize` (fixes `15551234567` becoming `+115551234567` and rejected `(555) 123-4567`, and honours the configured country code for non-NANP setups), an optional bulk roster mode that suppresses the per-push refresh, and a Matrix-side contacts tab in the Dialpad widget.
 
 ## Contributing
 
