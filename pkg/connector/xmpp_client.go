@@ -569,7 +569,7 @@ func (x *xmppClient) syncRoster(ctx context.Context) {
 		item := iter.Item()
 		bare := item.JID.Bare().String()
 		itemCount++
-		log.Info().Str("jid", bare).Str("name", item.Name).Str("subscription", item.Subscription).Msg("Roster item from server")
+		log.Info().Str("jid", bare).Str("subscription", item.Subscription).Msg("Roster item from server")
 		if bare == "" {
 			continue
 		}
