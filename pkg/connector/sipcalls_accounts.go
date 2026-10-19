@@ -59,33 +59,6 @@ func setSIPCreds(meta *JabberLoginMeta, c *sipaccount.Credentials) {
 	setExtraKey(meta, sipExtraKey, raw)
 }
 
-// setExtraKey sets (raw != nil) or deletes (raw == nil) one Extra key copy-on-write: the Extra map is
-// read without locks elsewhere, so it is never mutated in place. Empty Extra becomes nil.
-func setExtraKey(meta *JabberLoginMeta, key string, raw json.RawMessage) {
-	extra := cloneExtra(meta.Extra)
-	if raw == nil {
-		delete(extra, key)
-	} else {
-		if extra == nil {
-			extra = make(map[string]json.RawMessage)
-		}
-		extra[key] = raw
-	}
-	if len(extra) == 0 {
-		extra = nil
-	}
-	meta.Extra = extra
-}
-
-// loginMeta returns ul's jabber metadata (nil if none).
-func loginMeta(ul *bridgev2.UserLogin) *JabberLoginMeta {
-	if ul == nil || ul.UserLogin == nil {
-		return nil
-	}
-	meta, _ := ul.Metadata.(*JabberLoginMeta)
-	return meta
-}
-
 // startReq is one pending asynchronous account start.
 type startReq struct {
 	lc   *loginCalls

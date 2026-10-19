@@ -47,10 +47,6 @@ type callsExt struct {
 	enabled bool         // cfg.Enabled after postInit
 	rtc     *core.Ingest // created in postInit when enabled
 
-	// prefsMu serializes the commands' read-modify-write + save of JabberLoginMeta.Extra (call prefs,
-	// sip-login/sip-logout credentials). It is taken before mu and never while holding it.
-	prefsMu sync.Mutex
-
 	// filteredMu guards filteredSeen: login+caller -> last filtered INVITE, used to send one notice
 	// per burst (the provider retries a rejected call with a new INVITE several times a second).
 	filteredMu   sync.Mutex

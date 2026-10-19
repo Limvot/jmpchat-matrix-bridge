@@ -27,8 +27,9 @@ import (
 
 // JabberConfig is the connector-specific config under network.jabber (framework nests it by network ID).
 type JabberConfig struct {
-	ResourcePrefix string `yaml:"resource_prefix"`
-	Cheogram       bool   `yaml:"cheogram"` // resolve phone numbers and short codes to Cheogram JIDs (SMS/MMS)
+	ResourcePrefix string        `yaml:"resource_prefix"`
+	Cheogram       bool          `yaml:"cheogram"` // resolve phone numbers and short codes to Cheogram JIDs (SMS/MMS)
+	CardDAV        CardDAVConfig `yaml:"carddav"`
 }
 
 // BackfillConfig holds backfill settings from config.backfill, used by MAM backfill-on-view and full backfill on login / sync-roster.
@@ -216,9 +217,11 @@ cheogram: false
 	if e != nil {
 		example += e.exampleConfig()
 	}
+	example += cardDAVExampleConfig
 	upgrader = configupgrade.SimpleUpgrader(func(helper configupgrade.Helper) {
 		// Copy user's cheogram value into base so config save preserves it (framework adds "network" prefix).
 		helper.Copy(configupgrade.Bool, "cheogram")
+		upgradeCardDAVConfig(helper)
 		if e != nil {
 			e.upgradeConfig(helper)
 		}

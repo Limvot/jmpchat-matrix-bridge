@@ -75,11 +75,11 @@ func (x *callsExt) loginPrefs(ul *bridgev2.UserLogin) callPrefs {
 }
 
 // setRosterOnly persists the roster-only preference of ul and then updates the cached copy that
-// onInvite reads. Setters are serialized by prefsMu; x.mu is never held across the save. On a save
+// onInvite reads. Setters are serialized by extraWriteMu (taken before x.mu); x.mu is never held across the save. On a save
 // error the metadata is rolled back and the cache is untouched.
 func (x *callsExt) setRosterOnly(ctx context.Context, ul *bridgev2.UserLogin, on bool) error {
-	x.prefsMu.Lock()
-	defer x.prefsMu.Unlock()
+	extraWriteMu.Lock()
+	defer extraWriteMu.Unlock()
 	meta := loginMeta(ul)
 	if meta == nil {
 		return errors.New("no login metadata")

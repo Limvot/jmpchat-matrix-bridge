@@ -3,7 +3,6 @@
 package connector
 
 import (
-	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -24,9 +23,6 @@ func init() { registerCallsCommands = registerSIPCommands }
 
 // sipRegisterTimeout is how long sip-login waits for the registrar's first answer (a var for tests).
 var sipRegisterTimeout = 30 * time.Second
-
-// saveUserLogin persists ul (a var for tests).
-var saveUserLogin = func(ctx context.Context, ul *bridgev2.UserLogin) error { return ul.Save(ctx) }
 
 // sipCommands are the bot commands of the calls extension.
 type sipCommands struct{ x *callsExt }
@@ -91,18 +87,6 @@ func (x *callsExt) callCommandDeps() hostkit.CommandDeps {
 	}
 }
 
-// lookupCommandLogin picks the login by the sender and room (a var for tests).
-var lookupCommandLogin = func(ce *commands.Event) *bridgev2.UserLogin {
-	if ce.Portal != nil && ce.Portal.Receiver != "" {
-		ul := ce.Bridge.GetCachedUserLoginByID(ce.Portal.Receiver)
-		if ul == nil || ul.UserMXID != ce.User.MXID {
-			return nil
-		}
-		return ul
-	}
-	return ce.User.GetDefaultLogin()
-}
-
 // commandLogin returns the login a command acts on: the portal's receiver (which must belong to the
 // sender) in a portal, else the sender's default login. "" refusal when it is a real jabber login.
 func (x *callsExt) commandLogin(ce *commands.Event) (*bridgev2.UserLogin, string) {
@@ -111,13 +95,7 @@ func (x *callsExt) commandLogin(ce *commands.Event) (*bridgev2.UserLogin, string
 
 // checkLogin refuses a nil login and one that is not a real jabber login.
 func (x *callsExt) checkLogin(ul *bridgev2.UserLogin) (*bridgev2.UserLogin, string) {
-	if ul == nil {
-		return nil, fmt.Sprintf("You are not logged in. Use `%s login` first.", x.commandPrefix())
-	}
-	if _, ok := ul.Client.(*xmppClient); !ok {
-		return nil, "Log in to Jabber first."
-	}
-	return ul, ""
+	return checkJabberLogin(ul, x.commandPrefix())
 }
 
 // commandLoginWithAccount is commandLogin that also refuses logins without a SIP account.
@@ -251,7 +229,7 @@ func (h *sipCommands) submitLogin(ce *commands.Event, ul *bridgev2.UserLogin, in
 		ce.Reply("%s", fmt.Sprintf("Could not start the SIP client: %s.", msg)+prevNote)
 		return
 	}
-	x.prefsMu.Lock() // serializes this Extra read-modify-write and save with the call prefs setters
+	extraWriteMu.Lock() // serializes this Extra read-modify-write and save with the other Extra writers
 	prev, hadCreds := sipCreds(meta)
 	setSIPCreds(meta, creds)
 	if err = saveUserLogin(ctx, ul); err != nil {
@@ -261,12 +239,12 @@ func (h *sipCommands) submitLogin(ce *commands.Event, ul *bridgev2.UserLogin, in
 		} else {
 			setSIPCreds(meta, nil)
 		}
-		x.prefsMu.Unlock()
+		extraWriteMu.Unlock()
 		acct.Stop(ctx)
 		ce.Reply("%s", "Registered, but saving failed: "+obs.Scrub(err.Error())+"."+prevNote)
 		return
 	}
-	x.prefsMu.Unlock()
+	extraWriteMu.Unlock()
 	if !x.attachAccount(ul, acct) {
 		outcome = "error"
 		acct.Stop(ctx)
@@ -300,10 +278,10 @@ func (h *sipCommands) cmdLogout(ce *commands.Event) {
 	}
 	x.detachAccount(ce.Ctx, ul.ID)
 	if ok {
-		x.prefsMu.Lock() // serializes this Extra write and save with the call prefs setters
+		extraWriteMu.Lock() // serializes this Extra write and save with the other Extra writers
 		setSIPCreds(meta, nil)
 		err := saveUserLogin(ce.Ctx, ul)
-		x.prefsMu.Unlock()
+		extraWriteMu.Unlock()
 		if err != nil {
 			ce.Reply("%s", "The SIP account was stopped, but removing it failed: "+obs.Scrub(err.Error())+".")
 			return
