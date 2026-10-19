@@ -18,6 +18,7 @@ type cardDAVCreds struct {
 	URL      string   `json:"url"`
 	Username string   `json:"username"`
 	Password string   `json:"password"`
+	Book     string   `json:"book,omitempty"` // the user's address-book selector ("" = all)
 	Books    []string `json:"books,omitempty"`
 }
 
