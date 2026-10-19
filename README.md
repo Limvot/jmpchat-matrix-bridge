@@ -234,34 +234,30 @@ docker build $(./build-args.sh) -t mautrix-jabber .
 
 `./build-args.sh` passes the git commit, tag, repository URL and build time into the build (the `.git` directory isn't part of the build context). They stamp the bridge version string, set the `org.opencontainers.image.revision` / `org.opencontainers.image.source` image labels, and are sent as `git.commit.sha` / `git.repository_url` on traces (used by Datadog's source code integration). A plain `docker build -t mautrix-jabber .` still works; the version then shows `+dev.unknown` and the git metadata is omitted.
 
-**First run (no config):** To create your initial config, run the container with `-e -c -` so it prints the example config to stdout (the default CMD passes config paths, so you must override with these flags):
+**First run (no config):** Run the container with no arguments and nothing mounted at `/data`. It prints an example config to stdout and exits:
 
 ```bash
-docker run --rm mautrix-jabber -e -c - > config.yaml
+docker run --rm mautrix-jabber > config.yaml
 ```
 
 Edit `config.yaml` (database, `homeserver.address`, `homeserver.domain`, `appservice`, `bridge.permissions`). Then generate the registration. The bridge updates the config file when generating tokens, so use a **directory mount** (not single-file mounts) to avoid "device or resource busy" on some systems:
 
 ```bash
-mkdir -p ./bridge-conf && cp config.yaml ./bridge-conf/
-docker run --rm -v "$(pwd)/bridge-conf:/app/conf:rw" \
-  mautrix-jabber -c /app/conf/config.yaml -r /app/conf/registration.yaml -g
-cp ./bridge-conf/registration.yaml ./
-cp ./bridge-conf/config.yaml ./
+mkdir -p ./bridge-data && cp config.yaml ./bridge-data/
+docker run --rm -v "$(pwd)/bridge-data:/data:rw" \
+  mautrix-jabber -c /data/config.yaml -r /data/registration.yaml -g
 ```
 
-Add the registration to your homeserver, then run the bridge with config and registration mounted (read-only is fine) and a volume for the database if using SQLite:
+Add `./bridge-data/registration.yaml` to your homeserver, then run the bridge with the same directory mounted at `/data`. With no arguments, the container runs the bridge using `/data/config.yaml` and `/data/registration.yaml`:
 
 ```bash
 docker run -d --name mautrix-jabber \
-  -v "$(pwd)/config.yaml:/app/config.yaml:ro" \
-  -v "$(pwd)/registration.yaml:/app/registration.yaml:ro" \
-  -v bridge-data:/app/data \
+  -v "$(pwd)/bridge-data:/data" \
   -p 29318:29318 \
   mautrix-jabber
 ```
 
-Use `appservice.hostname: 0.0.0.0` in config so the bridge listens on all interfaces. For SQLite, set `database.uri` to `file:/app/data/mautrix-jabber.db?_txlock=immediate` and mount a volume at `/app/data`. Postgres is also supported.
+Use `appservice.hostname: 0.0.0.0` in config so the bridge listens on all interfaces. For SQLite, set `database.uri` to `file:/data/mautrix-jabber.db?_txlock=immediate` so the database lives in the same mounted directory. Postgres is also supported.
 
 ## Tracing (OpenTelemetry)
 
@@ -334,9 +330,7 @@ services:
   mautrix-jabber:
     image: williamkray/mautrix-jabber
     volumes:
-      - ./config.yaml:/app/config.yaml:ro
-      - ./registration.yaml:/app/registration.yaml:ro
-      - bridge-data:/app/data
+      - ./bridge-data:/data
     environment:
       OTEL_EXPORTER_OTLP_ENDPOINT: http://datadog-agent:4317
       OTEL_EXPORTER_OTLP_PROTOCOL: grpc

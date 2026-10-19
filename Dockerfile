@@ -31,7 +31,7 @@ LABEL org.opencontainers.image.revision=${GIT_COMMIT} \
 RUN apk add --no-cache ca-certificates tzdata sqlite-libs olm opus
 
 # Run as non-root
-RUN adduser -D -h /app -s /sbin/nologin bridge
+RUN adduser -D -h /app -s /sbin/nologin bridge && mkdir -p /data && chown bridge:bridge /data
 WORKDIR /app
 
 COPY --from=builder /build/mautrix-jabber .
@@ -46,4 +46,3 @@ EXPOSE 29318
 EXPOSE 5060-5069/udp 5060-5069/tcp 40000-40100/udp
 
 ENTRYPOINT ["/app/entrypoint.sh"]
-CMD ["-c", "/data/config.yaml", "-r", "/data/registration.yaml"]
