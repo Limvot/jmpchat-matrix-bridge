@@ -4,6 +4,8 @@ import (
 	"sort"
 	"strings"
 	"unicode"
+
+	"github.com/williamkray/mrtc-sip-bridge/pkg/phone"
 )
 
 const (
@@ -232,3 +234,24 @@ func ResolveCheogramMultiIdentifier(input string, enabled bool) (jid string, ok 
 	sort.Strings(jids)
 	return strings.Join(jids, ",") + "@" + cheogramDomain, true
 }
+
+// cheogramE164 returns the E.164 of a Cheogram 1:1 JID ("+15551234567@cheogram.com", domain compared
+// case-insensitively, resource ignored); ok=false for group MMS (comma), short codes (;phone-context),
+// other domains and anything phone.IsE164 rejects.
+func cheogramE164(jidStr string) (string, bool) {
+	if i := strings.IndexByte(jidStr, '/'); i >= 0 {
+		jidStr = jidStr[:i]
+	}
+	at := strings.LastIndexByte(jidStr, '@')
+	if at <= 0 || !strings.EqualFold(jidStr[at+1:], cheogramDomain) {
+		return "", false
+	}
+	local := jidStr[:at]
+	if strings.ContainsAny(local, ",;") || !phone.IsE164(local) {
+		return "", false
+	}
+	return local, true
+}
+
+// cheogramJID returns the Cheogram 1:1 JID of an E.164 number.
+func cheogramJID(e164 string) string { return e164 + "@" + cheogramDomain }

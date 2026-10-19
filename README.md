@@ -444,6 +444,8 @@ Roster-only calls uses the bridge's Jabber roster as the list of known numbers (
 
 When the same Jabber account is used by the bridge and another app (e.g. Gajim, Conversations, Movim), messages from that other client should appear in Matrix via **Message Carbons (XEP-0280)** (real-time) and **MAM catch-up** (~45s polling). Backfill on room open is also supported. If messages are missing: check logs for "Carbons enable failed" (some servers reject carbons); ensure your server supports MAM and archives messages.
 
+**Cheogram numbers and MAM:** to keep large rosters cheap (for example hundreds of imported phone numbers), the periodic MAM catch-up and the post-connect full backfill skip roster entries that are Cheogram 1:1 number JIDs (`+E164@cheogram.com`) unless the number already has a Matrix room or was seen on this connection (after a reconnect only the room check applies; new portals join catch-up immediately). Normal XMPP contacts, group MMS and short codes are unaffected. Known gap: a roster-named number without a Matrix room that texted while the bridge was disconnected, delivered to another client (so not to offline storage), is no longer recovered on reconnect; it appears when the next message arrives. Numbers saved with `save-contact` before any chat are in this class.
+
 ## Status
 
 - **DM bridging** – JID+password login, 1:1 chats, portal creation on first message, identifier resolution (`!jabber pm` / `!jabber start-chat` with optional login JID for multi-account).
@@ -466,6 +468,7 @@ Canonical list of pending work; completed items have been removed. Order is appr
 5. **OMEMO (4.1)** — XEP-0384; decrypt/encrypt on XMPP side in message and inbound paths; key storage. DM first; MUC later if desired.
 6. **Roster isolation (2.1b, multi-user hardening)** — Ensure roster commands (`add-to-roster`, `save-contact`, `sync-roster`) and roster-derived data (ghost display names, DM room names) are strictly isolated per bridged Jabber ID and per Matrix user. When multiple accounts are bridged, roster data from one login must not affect another. Fix mixup behavior where roster or display names from one account leak or override another.
 7. **SRV lookup / per-account server override** — `dialXMPP` only does an A/AAAA lookup on the JID's domain and connects on port 5222; it does not resolve `_xmpp-client._tcp.<domain>` SRV records. Accounts on servers where the client-connect host differs from the JID domain (a common setup) can't connect. Add SRV lookup and wire up the reserved `JabberLoginMeta.Server`/`Port` override fields. Revisit if more connection-failure issues are reported (context: closed GitHub issue #1).
+8. **Archive-wide MAM catch-up** — Replace the per-contact MAM polling with one archive-wide query per cycle (no `with`, RSM `after` the last seen id), routed by peer. That is O(1) IQs regardless of roster size and would close the Cheogram-number gap described under Troubleshooting.
 
 ## Contributing
 

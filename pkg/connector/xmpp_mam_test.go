@@ -25,3 +25,29 @@ func TestBackfillChatAsyncNoOps(t *testing.T) {
 		})
 	}
 }
+
+func TestMAMEligible(t *testing.T) {
+	room := map[string]struct{}{"+15550001111@cheogram.com": {}}
+	known := map[string]struct{}{"+15550002222@cheogram.com": {}}
+	for _, tc := range []struct {
+		jid  string
+		want bool
+	}{
+		{"alice@example.org", true},
+		{"+15550001111@cheogram.com", true},                                     // number with a room
+		{"+15550001111@Cheogram.com", true},                                     // case-insensitive
+		{"+15550002222@cheogram.com", true},                                     // number seen on this connection
+		{"+15550003333@cheogram.com", false},                                    // number without room, never seen
+		{"+15550003333@cheogram.com/res", false},                                // resource ignored
+		{"+15550003333,+15550004444@cheogram.com", true},                        // group MMS is not a number JID
+		{"711;phone-context=ca-us.phone-context.soprani.ca@cheogram.com", true}, // short code
+		{"+15550003333@other.example", true},
+	} {
+		if got := mamEligible(tc.jid, room, known); got != tc.want {
+			t.Errorf("mamEligible(%q) = %v, want %v", tc.jid, got, tc.want)
+		}
+	}
+	if mamEligible("+15550003333@cheogram.com", nil, nil) {
+		t.Error("unknown number with nil sets must not be eligible")
+	}
+}

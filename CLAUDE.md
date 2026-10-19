@@ -48,7 +48,7 @@ All bridge logic lives in `pkg/connector/`. The bridgev2 framework handles Matri
 
 - **`pkg/connector/xmpp_carbons.go`** — XEP-0280 Message Carbons. Enables on connect, parses `<sent>`/`<received>` forwarded stanzas, queues as remote events.
 
-- **`pkg/connector/xmpp_mam.go`** — XEP-0313 Message Archive Management. Backfill-on-view (`FetchMessages`), periodic catch-up loop (~45s interval), deduplication against recent messages.
+- **`pkg/connector/xmpp_mam.go`** — XEP-0313 Message Archive Management. Backfill-on-view (`FetchMessages`), periodic catch-up loop (~45s interval), deduplication against recent messages. Catch-up and full backfill skip Cheogram number JIDs (`cheogramE164`, in `cheogram.go`) that have no Matrix room and were not seen on this connection (`mamEligible`, `roomPortalIDs`: one `GetAllWithMXID` query per cycle), so bulk-imported numbers do not cause polling or portal creation.
 
 - **`pkg/connector/xep0363.go`** — XEP-0363 HTTP File Upload. Discovers upload service via common subdomains, requests upload slots, uploads via HTTP PUT.
 

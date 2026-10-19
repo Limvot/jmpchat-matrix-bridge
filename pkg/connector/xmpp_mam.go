@@ -451,7 +451,15 @@ func (x *xmppClient) runMAMCatchUpOnce(ctx context.Context) {
 	for j := range jidSet {
 		jids = append(jids, j)
 	}
+	withRoom, filter := x.roomPortalIDs(ctx)
+	known := x.knownMAMSnapshot()
+	var skipped int
+	defer func() { span.SetAttributes(attribute.Int("portals.skipped", skipped)) }()
 	for _, bareJID := range jids {
+		if filter && !mamEligible(bareJID, withRoom, known) {
+			skipped++
+			continue
+		}
 		// ctx (span-less) is used for the work so xmpp.iq.mam_query creates no span; the
 		// per-portal span is recorded post-hoc under cycleCtx only when something happened.
 		res := x.mamCatchUpForPortal(ctx, cycleCtx, bareJID)
@@ -494,11 +502,19 @@ func (x *xmppClient) runFullBackfill(ctx context.Context) {
 	log := x.logFor(ctx)
 	span.SetAttributes(attribute.Int("roster.count", len(jids)))
 	log.Info().Int("roster_count", len(jids)).Msg("Full backfill: starting MAM backfill for roster DMs")
-	done := 0
-	defer func() { span.SetAttributes(attribute.Int("backfilled", done)) }()
+	done, skipped := 0, 0
+	defer func() {
+		span.SetAttributes(attribute.Int("backfilled", done), attribute.Int("portals.skipped", skipped))
+	}()
+	withRoom, filter := x.roomPortalIDs(ctx)
+	known := x.knownMAMSnapshot()
 	for _, bareJID := range jids {
 		if ctx.Err() != nil {
 			break
+		}
+		if filter && !mamEligible(bareJID, withRoom, known) {
+			skipped++
+			continue
 		}
 		if x.isMUC(ctx, bareJID) {
 			continue
@@ -798,4 +814,54 @@ func (x *xmppClient) doMAMBackfillOnView(ctx context.Context, span trace.Span, p
 	if queued > 0 {
 		log.Info().Str("portal_id", portalID).Int("queued", queued).Msg("MAM backfill on view: queued historical messages")
 	}
+}
+
+// mamEligible reports whether MAM catch-up / full backfill should query jid. Normal XMPP contacts
+// (anything that is not a Cheogram 1:1 number JID) are always eligible. A Cheogram number is eligible
+// only when it already has a Matrix room (withRoom: lowercased portal IDs of this login with an MXID)
+// or was seen on this connection (known: knownPortalIDsForMAM). This keeps bulk-imported numbers
+// (CardDAV sync) from being polled every cycle and from having up to a year of texts replayed into
+// new portals on every connect; the first inbound message creates the portal as usual.
+func mamEligible(jid string, withRoom, known map[string]struct{}) bool {
+	if _, isNumber := cheogramE164(jid); !isNumber {
+		return true
+	}
+	key := strings.ToLower(jid)
+	if _, ok := withRoom[key]; ok {
+		return true
+	}
+	_, ok := known[key]
+	return ok
+}
+
+// roomPortalIDs returns the lowercased IDs of this login's portals that have a Matrix room, using a
+// single DB query (no per-JID portal cache lock). On error it returns nil and false so callers can
+// fall back to the unfiltered behaviour instead of silently dropping catch-up.
+func (x *xmppClient) roomPortalIDs(ctx context.Context) (map[string]struct{}, bool) {
+	if x.conn == nil || x.conn.br == nil {
+		return nil, false
+	}
+	portals, err := x.conn.br.DB.Portal.GetAllWithMXID(ctx)
+	if err != nil {
+		x.logFor(ctx).Debug().Err(err).Msg("MAM: failed to list portals; not filtering numbers")
+		return nil, false
+	}
+	set := make(map[string]struct{}, len(portals))
+	for _, p := range portals {
+		if p.Receiver == x.loginID {
+			set[strings.ToLower(string(p.ID))] = struct{}{}
+		}
+	}
+	return set, true
+}
+
+// knownMAMSnapshot copies knownPortalIDsForMAM.
+func (x *xmppClient) knownMAMSnapshot() map[string]struct{} {
+	x.knownPortalIDsForMAMMu.Lock()
+	defer x.knownPortalIDsForMAMMu.Unlock()
+	set := make(map[string]struct{}, len(x.knownPortalIDsForMAM))
+	for j := range x.knownPortalIDsForMAM {
+		set[j] = struct{}{}
+	}
+	return set
 }

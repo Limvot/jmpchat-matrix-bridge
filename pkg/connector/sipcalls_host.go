@@ -6,7 +6,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -22,27 +21,6 @@ import (
 	"github.com/williamkray/mrtc-sip-bridge/pkg/obs"
 	"github.com/williamkray/mrtc-sip-bridge/pkg/phone"
 )
-
-// cheogramE164 returns the E.164 of a Cheogram 1:1 JID ("+15551234567@cheogram.com", domain compared
-// case-insensitively, resource ignored); ok=false for group MMS (comma), short codes (;phone-context),
-// other domains and anything phone.IsE164 rejects.
-func cheogramE164(jidStr string) (string, bool) {
-	if i := strings.IndexByte(jidStr, '/'); i >= 0 {
-		jidStr = jidStr[:i]
-	}
-	at := strings.LastIndexByte(jidStr, '@')
-	if at <= 0 || !strings.EqualFold(jidStr[at+1:], cheogramDomain) {
-		return "", false
-	}
-	local := jidStr[:at]
-	if strings.ContainsAny(local, ",;") || !phone.IsE164(local) {
-		return "", false
-	}
-	return local, true
-}
-
-// cheogramJID returns the Cheogram 1:1 JID of an E.164 number.
-func cheogramJID(e164 string) string { return e164 + "@" + cheogramDomain }
 
 // isCallPortal reports whether p is a Cheogram 1:1 portal of loginID (the only portals that carry
 // calls: never group MMS, MUC or other DMs).
