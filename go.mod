@@ -3,6 +3,7 @@ module github.com/mautrix/jabber
 go 1.26.0
 
 require (
+	github.com/emersion/go-vcard v0.1.0
 	github.com/go-logr/logr v1.4.4
 	github.com/mattn/go-sqlite3 v1.14.52
 	github.com/rs/xid v1.6.0
