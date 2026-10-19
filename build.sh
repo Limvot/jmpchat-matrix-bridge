@@ -3,7 +3,7 @@ set -e
 
 # Build inside Docker to ensure a repeatable environment with all dependencies
 # (CGO, libolm, libopus, sqlite-dev). The binary is extracted to the current directory.
-# Extra arguments are passed to docker build (e.g. -t williamkray/mautrix-jabber:v0.4.0).
+# Extra arguments are passed to docker build (e.g. -t williamkray/mautrix-jabber:v0.5.0).
 docker build -t mautrix-jabber $(./build-args.sh) "$@" .
 container_id=$(docker create mautrix-jabber)
 docker cp "$container_id:/app/mautrix-jabber" ./mautrix-jabber
