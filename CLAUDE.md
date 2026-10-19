@@ -81,7 +81,7 @@ All commands use the configured prefix (default `!jabber`):
 | `join <room@conference.domain>` | Join a MUC room |
 | `leave <room@conference.domain>` | Leave a MUC room |
 | `sync-roster` | Re-fetch roster, update display/room names |
-| `add-to-roster <jid> <name>` | Add or rename a roster contact |
+| `add-to-roster <jid> <name>` | Add or rename a roster contact (inside a one-to-one chat, `add-to-roster <name>` works like `save-contact`) |
 | `save-contact <name>` | Inside a one-to-one chat room: save (or rename) that chat's contact in the roster; the room name updates. Works in every build |
 | `roster-only-calls on\|off\|status` | (`sipcalls` build) Ring for incoming SIP calls only from numbers in the roster; others get 480 plus a notice in the management room. Gates SIP calls only, not XEP-0353 call notifications |
 | `search-roster <query>` | Search roster by JID or name |

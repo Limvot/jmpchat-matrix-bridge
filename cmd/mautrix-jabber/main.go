@@ -112,7 +112,7 @@ func main() {
 			Func:          withSpan("add-to-roster", cmdAddToRoster),
 			Name:          "add-to-roster",
 			RequiresLogin: true,
-			Help:          commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Add or rename a contact in your Jabber roster. Usage: `%s add-to-roster <jid> <name>`", prefix)},
+			Help:          commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Add or rename a contact in your Jabber roster. Usage: `%s add-to-roster <jid> <name>`, or `%s add-to-roster <name>` inside a one-to-one chat", prefix, prefix)},
 		})
 		br.Bridge.Commands.(*commands.Processor).AddHandler(&commands.FullHandler{
 			Func:          withSpan("save-contact", connector.SaveContactCommand),
@@ -204,8 +204,13 @@ func cmdSyncRoster(ce *commands.Event) {
 }
 
 func cmdAddToRoster(ce *commands.Event) {
+	// Inside a chat, `add-to-roster <name>` (no JID) saves the chat's contact, like save-contact.
+	if ce.Portal != nil && len(ce.Args) > 0 && !strings.Contains(ce.Args[0], "@") {
+		connector.SaveContactCommand(ce)
+		return
+	}
 	if len(ce.Args) < 2 {
-		ce.Reply("Usage: `%s add-to-roster <jid> <name>` — e.g. `%s add-to-roster friend@jabber.org My Friend`", cmdPrefix(ce), cmdPrefix(ce))
+		ce.Reply("Usage: `%s add-to-roster <jid> <name>` — e.g. `%s add-to-roster friend@jabber.org My Friend`. Inside a one-to-one chat, `%s add-to-roster <name>` saves that contact.", cmdPrefix(ce), cmdPrefix(ce), cmdPrefix(ce))
 		return
 	}
 	jid := strings.TrimSpace(strings.ToLower(ce.Args[0]))

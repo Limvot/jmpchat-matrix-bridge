@@ -422,7 +422,7 @@ Calls to and from JMP/Cheogram numbers ring in the same Matrix room as the texts
 | `widget` | Add the Dialpad widget to the room |
 | `dialpad-link`, `dialpad-links`, `dialpad-revoke` | Create, list and revoke standalone Dialpad links |
 
-Roster-only calls uses the bridge's Jabber roster as the list of known numbers (Cheogram `+E164@cheogram.com` entries, named or not). Save a number from inside its chat room with `save-contact <name>`, or use `add-to-roster`. Enabling it with no phone contacts in the roster works but warns that every call would go to voicemail.
+Roster-only calls uses the bridge's Jabber roster as the list of known numbers (Cheogram `+E164@cheogram.com` entries, named or not). Save a number from inside its chat room with `save-contact <name>` (or `add-to-roster <name>`), or from anywhere with `add-to-roster <jid> <name>`. Enabling it with no phone contacts in the roster works but warns that every call would go to voicemail.
 
 **Ports**: publish the SIP port range (`network.calls.sip_port_min`..`sip_port_max`, default 5060-5069, udp and tcp) and the RTP range (`rtp_port_min`..`rtp_port_max`, default 40000-40100/udp). The Docker image exposes these defaults; publish whatever you configure.
 
