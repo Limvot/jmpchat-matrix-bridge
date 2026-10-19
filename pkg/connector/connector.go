@@ -72,6 +72,12 @@ type RosterManager interface {
 	SetRosterItem(ctx context.Context, jidStr, displayName string) error
 }
 
+// RosterRemover is implemented by the real XMPP client. Use it to remove a contact from the
+// Jabber roster from Matrix (e.g. !jabber remove-from-roster <jid>).
+type RosterRemover interface {
+	RemoveRosterItem(ctx context.Context, jidStr string) error
+}
+
 // RosterSearcher is implemented by the real XMPP client. Use it to search the roster
 // for contacts matching a JID or name pattern.
 type RosterSearcher interface {

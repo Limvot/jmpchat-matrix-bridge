@@ -74,3 +74,79 @@ func saveContactReply(ctx context.Context, prefix string, portal *bridgev2.Porta
 	}
 	return fmt.Sprintf("Saved **%s** (%s) to your roster. The room name will update shortly.", name, jidStr)
 }
+
+// rosterMembership is implemented by the real XMPP client (xmppClient.inRoster).
+type rosterMembership interface {
+	inRoster(bareJID string) (in, loaded bool)
+}
+
+// RemoveContactCommand is the handler of `remove-from-roster [<jid-or-phone>]`: removes a contact from
+// the login's roster. Without an argument it acts on the one-to-one chat it is run in. Works in every build.
+func RemoveContactCommand(ce *commands.Event) {
+	prefix := "!jabber"
+	if ce.Bridge != nil && ce.Bridge.Config != nil && ce.Bridge.Config.CommandPrefix != "" {
+		prefix = ce.Bridge.Config.CommandPrefix
+	}
+	ce.Reply("%s", removeContactReply(ce.Ctx, prefix, ce.Portal, ce.Args,
+		func(p *bridgev2.Portal) *bridgev2.UserLogin {
+			ul := ce.Bridge.GetCachedUserLoginByID(p.Receiver)
+			if ul == nil || ce.User == nil || ul.UserMXID != ce.User.MXID {
+				return nil
+			}
+			return ul
+		},
+		func() *bridgev2.UserLogin {
+			if ce.User == nil {
+				return nil
+			}
+			return ce.User.GetDefaultLogin()
+		}))
+}
+
+// removeContactReply runs remove-from-roster and returns the reply text. loginFor resolves the portal's
+// login (nil = none or not the sender's); defaultLogin is the sender's default login, used outside a portal.
+func removeContactReply(ctx context.Context, prefix string, portal *bridgev2.Portal, args []string, loginFor func(*bridgev2.Portal) *bridgev2.UserLogin, defaultLogin func() *bridgev2.UserLogin) string {
+	inPortal := portal != nil && portal.Portal != nil && portal.Receiver != ""
+	var jidStr string
+	var ul *bridgev2.UserLogin
+	if len(args) == 0 {
+		if !inPortal {
+			return fmt.Sprintf("Usage: `%s remove-from-roster <jid-or-phone>` — e.g. `%s remove-from-roster friend@jabber.org`. Inside a one-to-one chat, `%s remove-from-roster` removes that contact.", prefix, prefix, prefix)
+		}
+		jidStr = string(portal.ID)
+		if _, isGroupMMS := ParseCheogramGroupMMSJID(jidStr); isGroupMMS || portal.RoomType == database.RoomTypeGroupDM || isMUCJID(jidStr) {
+			return "`remove-from-roster` only works in a one-to-one chat, not in a group chat or room."
+		}
+		ul = loginFor(portal)
+	} else {
+		arg := strings.TrimSpace(strings.Join(args, " "))
+		if strings.Contains(arg, "@") {
+			jidStr = strings.ToLower(arg)
+		} else if resolved, ok := ResolveCheogramIdentifier(arg, true); ok {
+			jidStr = strings.ToLower(resolved)
+		} else {
+			return "Invalid JID or phone number. Use user@domain (e.g. user@jabber.org) or a phone number."
+		}
+		if inPortal {
+			ul = loginFor(portal)
+		} else {
+			ul = defaultLogin()
+		}
+	}
+	if ul == nil {
+		return fmt.Sprintf("You must be logged in. Use `%s login` first.", prefix)
+	}
+	rr, ok := ul.Client.(RosterRemover)
+	if !ok {
+		return "Not connected to Jabber. Reconnect (or wait for auto-reconnect) and try again."
+	}
+	if rm, ok := ul.Client.(rosterMembership); ok {
+		if in, loaded := rm.inRoster(jidStr); loaded && !in {
+			return fmt.Sprintf("**%s** is not in your roster.", jidStr)
+		}
+	}
+	if err := rr.RemoveRosterItem(ctx, jidStr); err != nil {
+		return fmt.Sprintf("Failed to remove roster item: %v", err)
+	}
+	return fmt.Sprintf("Removed **%s** from your roster. Display and room names should update shortly.", jidStr)
+}

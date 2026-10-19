@@ -146,3 +146,25 @@ func TestDMDisplayName(t *testing.T) {
 		}
 	}
 }
+
+// RemoveRosterItem's cache update (a removal entry) drops both maps and reverts the room name.
+func TestRosterRemoveRevertsNames(t *testing.T) {
+	x := &xmppClient{loginID: "me@example.com", conn: &JabberConnector{}}
+	x.applyRosterItems(true, rosterEntry{jid: "bob@example.com", name: "Bob"}, rosterEntry{jid: "keep@example.com", name: "Keep"})
+	if got := x.dmDisplayName("bob@example.com"); got != "Bob (me@example.com)" {
+		t.Fatalf("before: %q", got)
+	}
+	x.applyRosterItems(false, rosterEntry{jid: "bob@example.com", remove: true})
+	if in, loaded := x.inRoster("bob@example.com"); in || !loaded {
+		t.Fatalf("after remove: in=%v loaded=%v", in, loaded)
+	}
+	if x.lookupRosterName("bob@example.com") != "" {
+		t.Fatal("name survived removal")
+	}
+	if got := x.dmDisplayName("bob@example.com"); got != "bob@example.com (me@example.com)" {
+		t.Errorf("after: %q", got)
+	}
+	if in, _ := x.inRoster("keep@example.com"); !in || x.lookupRosterName("keep@example.com") != "Keep" {
+		t.Fatal("other entries disturbed")
+	}
+}

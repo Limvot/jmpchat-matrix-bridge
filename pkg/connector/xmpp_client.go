@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -487,6 +488,52 @@ func (x *xmppClient) SetRosterItem(ctx context.Context, jidStr, displayName stri
 
 	x.logFor(ctx).Info().Str("jid", key).Str("name", item.Name).Msg("Roster item set from Matrix")
 	x.refreshRosterGhostsAndPortals(ctx, map[string]string{strings.ToLower(key): item.Name})
+	return nil
+}
+
+// RemoveRosterItem deletes the contact from the roster (RFC 6121 §2.5), drops it from the local cache and
+// refreshes the ghost and DM portal so their names fall back to those of an un-rostered contact.
+func (x *xmppClient) RemoveRosterItem(ctx context.Context, jidStr string) error {
+	jidStr = strings.TrimSpace(strings.ToLower(jidStr))
+	if jidStr == "" || !strings.Contains(jidStr, "@") {
+		return fmt.Errorf("invalid JID: use user@domain")
+	}
+	parsed, err := jid.Parse(jidStr)
+	if err != nil {
+		return fmt.Errorf("invalid JID format: %w", err)
+	}
+	key := parsed.Bare().String()
+	if key == "" {
+		return fmt.Errorf("invalid JID")
+	}
+
+	x.mu.Lock()
+	sess := x.session
+	x.mu.Unlock()
+	if sess == nil {
+		return fmt.Errorf("not connected to Jabber")
+	}
+
+	rmCtx, rmSpan := telemetry.StartChild(ctx, "xmpp.roster.remove", trace.WithSpanKind(trace.SpanKindClient))
+	if rmSpan.IsRecording() {
+		rmSpan.SetAttributes(attribute.String("xmpp.iq.namespace", "jabber:iq:roster"), attribute.String("xmpp.peer.jid", key))
+	}
+	rmErr := roster.Delete(rmCtx, sess, parsed.Bare())
+	telemetry.Fail(rmSpan, rmErr)
+	rmSpan.End()
+	if rmErr != nil {
+		if errors.Is(rmErr, stanza.Error{Condition: stanza.ItemNotFound}) {
+			return fmt.Errorf("%s is not in the roster on the server", key)
+		}
+		return fmt.Errorf("roster remove failed: %w", rmErr)
+	}
+
+	// Drop it from the cache like a subscription=remove push; the refresh then reads the un-rostered
+	// state (no roster name) for the ghost and the DM room name.
+	x.applyRosterItems(false, rosterEntry{jid: key, remove: true})
+
+	x.logFor(ctx).Info().Str("jid", key).Msg("Roster item removed from Matrix")
+	x.refreshRosterGhostsAndPortals(ctx, map[string]string{key: ""})
 	return nil
 }
 

@@ -89,3 +89,90 @@ func TestSaveContactReply(t *testing.T) {
 		t.Errorf("roster set %q %q", fc.jid, fc.name)
 	}
 }
+
+// fakeRemoverClient records RemoveRosterItem calls and reports a fixed roster membership.
+type fakeRemoverClient struct {
+	stubJabberClient
+	jids       []string
+	err        error
+	in, loaded bool
+}
+
+func (f *fakeRemoverClient) RemoveRosterItem(_ context.Context, jidStr string) error {
+	f.jids = append(f.jids, jidStr)
+	return f.err
+}
+
+func (f *fakeRemoverClient) inRoster(string) (bool, bool) { return f.in, f.loaded }
+
+func TestRemoveContactReply(t *testing.T) {
+	fc := &fakeRemoverClient{in: true, loaded: true}
+	ul := &bridgev2.UserLogin{UserLogin: &database.UserLogin{ID: "me@example.com"}, Client: fc}
+	having := func(*bridgev2.Portal) *bridgev2.UserLogin { return ul }
+	none := func(*bridgev2.Portal) *bridgev2.UserLogin { return nil }
+	def := func() *bridgev2.UserLogin { return ul }
+	ctx := context.Background()
+	dm := testDMPortal("+15550001111@cheogram.com", database.RoomTypeDM)
+
+	if got := removeContactReply(ctx, "!jc", nil, nil, having, def); !strings.HasPrefix(got, "Usage: `!jc remove-from-roster <jid-or-phone>`") {
+		t.Errorf("no arg outside portal: %q", got)
+	}
+	for _, p := range []*bridgev2.Portal{
+		testDMPortal("room@conference.example.com", database.RoomTypeGroupDM),
+		testDMPortal("room@muc.example.com", database.RoomTypeDM),
+		testDMPortal("+15550001111,+15550002222@cheogram.com", database.RoomTypeDM),
+	} {
+		if got := removeContactReply(ctx, "!jc", p, nil, having, def); !strings.Contains(got, "one-to-one") {
+			t.Errorf("%s: %q", p.ID, got)
+		}
+	}
+	if got := removeContactReply(ctx, "!jc", dm, nil, none, def); got != "You must be logged in. Use `!jc login` first." {
+		t.Errorf("receiver not sender: %q", got)
+	}
+	if got := removeContactReply(ctx, "!jc", nil, []string{"not a jid!"}, having, def); !strings.HasPrefix(got, "Invalid JID") {
+		t.Errorf("garbage arg: %q", got)
+	}
+	if got := removeContactReply(ctx, "!jc", nil, []string{"a@example.com"}, having, func() *bridgev2.UserLogin { return nil }); !strings.HasPrefix(got, "You must be logged in") {
+		t.Errorf("no default login: %q", got)
+	}
+	if len(fc.jids) != 0 {
+		t.Fatal("remover called on a refused command")
+	}
+
+	// Not in the roster: no IQ.
+	fc.in = false
+	if got := removeContactReply(ctx, "!jc", dm, nil, having, def); got != "**+15550001111@cheogram.com** is not in your roster." {
+		t.Errorf("not in roster: %q", got)
+	}
+	if len(fc.jids) != 0 {
+		t.Fatal("IQ sent for a contact not in the roster")
+	}
+	// Roster not loaded: let the server decide.
+	fc.loaded = true
+	fc.in, fc.loaded = false, false
+	if got := removeContactReply(ctx, "!jc", nil, []string{"A@Example.com"}, having, def); !strings.HasPrefix(got, "Removed **a@example.com**") || len(fc.jids) != 1 {
+		t.Errorf("unloaded roster: %q %v", got, fc.jids)
+	}
+
+	fc.jids = nil
+	fc.in, fc.loaded = true, true
+	if got := removeContactReply(ctx, "!jc", dm, nil, having, def); got != "Removed **+15550001111@cheogram.com** from your roster. Display and room names should update shortly." {
+		t.Errorf("success: %q", got)
+	}
+	// Phone argument is normalized to a Cheogram JID (default +1), outside a portal via the default login.
+	if got := removeContactReply(ctx, "!jc", nil, []string{"555-000-2222"}, none, def); !strings.Contains(got, "**+15550002222@cheogram.com**") {
+		t.Errorf("phone: %q", got)
+	}
+	if len(fc.jids) != 2 || fc.jids[0] != "+15550001111@cheogram.com" || fc.jids[1] != "+15550002222@cheogram.com" {
+		t.Errorf("removed %v", fc.jids)
+	}
+
+	fc.err = errors.New("boom")
+	if got := removeContactReply(ctx, "!jc", dm, nil, having, def); got != "Failed to remove roster item: boom" {
+		t.Errorf("error: %q", got)
+	}
+	ul.Client = &stubJabberClient{}
+	if got := removeContactReply(ctx, "!jc", dm, nil, having, def); !strings.HasPrefix(got, "Not connected to Jabber") {
+		t.Errorf("stub client: %q", got)
+	}
+}

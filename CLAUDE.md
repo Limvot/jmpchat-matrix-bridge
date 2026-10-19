@@ -30,7 +30,7 @@ All bridge logic lives in `pkg/connector/`. The bridgev2 framework handles Matri
 
 ### Entry Point
 
-- **`cmd/mautrix-jabber/main.go`** — Bootstrap. Creates `BridgeMain` with `JabberConnector`, registers custom bot commands (`sync-roster`, `add-to-roster`, `save-contact`, `search-roster`, `join`, `leave`, `muc-nick`, `muc-nick-default`), injects decoded network config via `PostInit`.
+- **`cmd/mautrix-jabber/main.go`** — Bootstrap. Creates `BridgeMain` with `JabberConnector`, registers custom bot commands (`sync-roster`, `add-to-roster`, `save-contact`, `remove-from-roster`, `search-roster`, `join`, `leave`, `muc-nick`, `muc-nick-default`), injects decoded network config via `PostInit`.
 
 ### Connector Core
 
@@ -83,6 +83,7 @@ All commands use the configured prefix (default `!jabber`):
 | `sync-roster` | Re-fetch roster, update display/room names |
 | `add-to-roster <jid> <name>` | Add or rename a roster contact (inside a one-to-one chat, `add-to-roster <name>` works like `save-contact`) |
 | `save-contact <name>` | Inside a one-to-one chat room: save (or rename) that chat's contact in the roster; the room name updates. Works in every build |
+| `remove-from-roster [<jid-or-phone>]` | Remove a contact from the roster; with no argument, inside a one-to-one chat, removes that chat's contact. Names fall back to the JID/number. Works in every build |
 | `roster-only-calls on\|off\|status` | (`sipcalls` build) Ring for incoming SIP calls only from numbers in the roster; others get 480 plus a notice in the management room. Gates SIP calls only, not XEP-0353 call notifications |
 | `search-roster <query>` | Search roster by JID or name |
 | `muc-nick <room-jid> <nick>` | Set room-specific MUC nickname |

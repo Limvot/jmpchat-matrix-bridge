@@ -422,7 +422,7 @@ Calls to and from JMP/Cheogram numbers ring in the same Matrix room as the texts
 | `widget` | Add the Dialpad widget to the room |
 | `dialpad-link`, `dialpad-links`, `dialpad-revoke` | Create, list and revoke standalone Dialpad links |
 
-Roster-only calls uses the bridge's Jabber roster as the list of known numbers (Cheogram `+E164@cheogram.com` entries, named or not). Save a number from inside its chat room with `save-contact <name>` (or `add-to-roster <name>`), or from anywhere with `add-to-roster <jid> <name>`. Enabling it with no phone contacts in the roster works but warns that every call would go to voicemail.
+Roster-only calls uses the bridge's Jabber roster as the list of known numbers (Cheogram `+E164@cheogram.com` entries, named or not). Save a number from inside its chat room with `save-contact <name>` (or `add-to-roster <name>`), or from anywhere with `add-to-roster <jid> <name>`. Remove a contact with `remove-from-roster` inside its chat room, or `remove-from-roster <jid-or-phone>` from anywhere. Enabling it with no phone contacts in the roster works but warns that every call would go to voicemail.
 
 **Ports**: publish the SIP port range (`network.calls.sip_port_min`..`sip_port_max`, default 5060-5069, udp and tcp) and the RTP range (`rtp_port_min`..`rtp_port_max`, default 40000-40100/udp). The Docker image exposes these defaults; publish whatever you configure.
 
@@ -454,7 +454,7 @@ When the same Jabber account is used by the bridge and another app (e.g. Gajim, 
 
 - **DM bridging** – JID+password login, 1:1 chats, portal creation on first message, identifier resolution (`!jabber pm` / `!jabber start-chat` with optional login JID for multi-account).
 - **E2BE** – Build includes libolm; enable via `encryption.allow` and related config.
-- **Implemented** – Reconnection with backoff, IPv6/dual-stack, media (Matrix↔XMPP), reactions (single per user), quotes/replies, contact roster and display names (`!jabber add-to-roster`, `!jabber save-contact`, `!jabber sync-roster`), MUC (minimal: join/leave, message routing), MAM (XEP-0313) backfill and periodic catch-up (~45s), Message Carbons (XEP-0280). When backfill is enabled, **full backfill** runs for roster DMs after each connect and on `!jabber sync-roster` (so portals get history before new messages; sync-roster runs it without re-login). See [ROADMAP.md](ROADMAP.md) for phase summary.
+- **Implemented** – Reconnection with backoff, IPv6/dual-stack, media (Matrix↔XMPP), reactions (single per user), quotes/replies, contact roster and display names (`!jabber add-to-roster`, `!jabber save-contact`, `!jabber remove-from-roster`, `!jabber sync-roster`), MUC (minimal: join/leave, message routing), MAM (XEP-0313) backfill and periodic catch-up (~45s), Message Carbons (XEP-0280). When backfill is enabled, **full backfill** runs for roster DMs after each connect and on `!jabber sync-roster` (so portals get history before new messages; sync-roster runs it without re-login). See [ROADMAP.md](ROADMAP.md) for phase summary.
 - **Planned** – Unimplemented work is listed in [To-do](#to-do-unimplemented-work) below.
 
 ### Double puppeting
