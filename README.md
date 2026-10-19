@@ -426,7 +426,7 @@ Roster-only calls uses the bridge's Jabber roster as the list of known numbers (
 
 **Ports**: publish the SIP port range (`network.calls.sip_port_min`..`sip_port_max`, default 5060-5069, udp and tcp) and the RTP range (`rtp_port_min`..`rtp_port_max`, default 40000-40100/udp). The Docker image exposes these defaults; publish whatever you configure.
 
-**Dialpad widget/app**: the widget (and the standalone links from `dialpad-link`) lets you send DTMF tones from a keypad during a call. Serve it from a dedicated hostname rather than sharing one with other web apps. See the mrtc-sip-bridge docs for setup.
+**Dialpad widget/app**: the widget (and the standalone links from `dialpad-link`) lets you send DTMF tones from a keypad during a call. In this bridge it can also message a number (opens the number's chat room, with an "Open chat" link), save a number to your Jabber roster under a name (the same as `save-contact`; a name typed with Call is saved before the call), and toggle roster-only calls ("Only ring for contacts"). A saved name replaces an existing roster name. These controls work while the login has a registered SIP account, and Message and Save accept numbers the call allow-list refuses (short codes: use `pm`). Serve it from a dedicated hostname rather than sharing one with other web apps. See the mrtc-sip-bridge docs for setup.
 
 **Known limits**: Element X cannot pick up outbound calls started from Matrix due to an [Element Call notification bug](https://github.com/element-hq/element-call/blob/8be229a438dc363972bdae5f6198607998a851d8/src/state/CallViewModel/CallNotificationLifecycle.ts#L128); use Element Web/Desktop for those.
 

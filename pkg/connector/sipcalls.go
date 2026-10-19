@@ -74,6 +74,10 @@ type callsExt struct {
 	notifyFn     func(ctx context.Context, roomID id.RoomID, text string) error
 	listPortals  func(ctx context.Context) ([]*bridgev2.Portal, error)
 	ensurePL     func(ctx context.Context, roomID id.RoomID) (bool, error)
+	// Widget features (sipcalls_widgetfeatures.go).
+	openChatRoom func(ctx context.Context, ref core.LoginRef, e164 string) (*core.CallRoom, error) // nil = callHost().ResolveCallRoom
+	setRoster    func(ctx context.Context, xc *xmppClient, jid, name string) error                 // nil = xc.SetRosterItem
+	backfillChat func(from context.Context, xc *xmppClient, portalID string)                       // nil = xc.backfillChatAsync
 	retryDelay   time.Duration
 	// handleInviteFn replaces the call manager's HandleInvite (nil = the manager's).
 	handleInviteFn func(login core.LoginRef, localE164 string, call sipua.InboundCall)

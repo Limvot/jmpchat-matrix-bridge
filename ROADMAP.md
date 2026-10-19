@@ -118,6 +118,10 @@ When one Matrix user is logged into multiple Jabber accounts, DMs with the same 
 
 `syncRoster` fetches the roster and then replaces the whole in-memory cache (`applyRosterItems(replace=true)`) with that snapshot. A roster push or `SetRosterItem` applied between the server answering the fetch and the replacement is overwritten until the next sync, so a just-added contact can briefly be missing (and, with roster-only calls on, its calls briefly rejected) or a just-removed one reappear. Not fixed: the window is small and the next push, `sync-roster` or reconnect repairs it. A fix would merge by a per-item version or buffer pushes received while a fetch is in flight.
 
+### Dialpad widget: Message, Save contact and roster-only toggle (done, v0.3.0)
+
+The Dialpad widget (room widget and PWA) can open a number's chat (`OpenChat`, via `ResolveCallRoom`, with the MAM backfill started afterwards), save a number to the roster under a name (same semantics as `save-contact`, overwrites an existing name), show "Saved as ..." in number rooms and toggle roster-only calls (#7). Implemented in `sipcalls_widgetfeatures.go` against mrtc-sip-bridge v0.2.0's optional host interfaces. The features need a ready login (registered SIP account), the same gate as calling. Known limitation: if the user has left an existing portal room, Message returns its room ID without re-inviting (as `pm` does).
+
 ---
 
 ## Future phases (documented for later)
