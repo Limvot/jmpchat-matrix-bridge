@@ -131,6 +131,59 @@ func TestWidgetContactName(t *testing.T) {
 	}
 }
 
+func TestWidgetListContacts(t *testing.T) {
+	h := newWFHarness(t)
+	// Not loaded yet (even with an early push): Loaded false, nothing listed.
+	h.xc.applyRosterItems(false, rosterEntry{jid: wfJID, name: "Alice"})
+	if p, err := h.f.ListContacts(h.ul, "", 0, 25); err != nil || p.Loaded || p.Total != 0 || len(p.Items) != 0 {
+		t.Fatalf("not loaded: %+v %v", p, err)
+	}
+	h.xc.applyRosterItems(true,
+		rosterEntry{jid: wfJID, name: "Alice"},
+		rosterEntry{jid: "+15550002222@cheogram.com"},                        // unnamed
+		rosterEntry{jid: "+15550003333@cheogram.com", name: "bob  \u202e B"}, // cleaned (roster keys are lowercased)
+		rosterEntry{jid: "+15550004444,+15550005555@cheogram.com", name: "Group"},
+		rosterEntry{jid: "123;phone-context=ca-us.phone-context.soprani.ca@cheogram.com", name: "Short"},
+		rosterEntry{jid: "friend@example.com", name: "Friend"},
+		rosterEntry{jid: "+15550006666@cheogram.com", name: "\u202e\x00"}, // empty after cleaning
+	)
+	p, err := h.f.ListContacts(h.ul, "", 0, 25)
+	if err != nil || !p.Loaded || p.Total != 2 || len(p.Items) != 2 {
+		t.Fatalf("mixed roster: %+v %v", p, err)
+	}
+	if p.Items[0] != (hostkit.ContactEntry{Name: "Alice", E164: wfNumber}) ||
+		p.Items[1] != (hostkit.ContactEntry{Name: "bob B", E164: "+15550003333"}) {
+		t.Errorf("items: %+v", p.Items)
+	}
+	// Search, paging and a mutation through the roster push path.
+	if p, _ = h.f.ListContacts(h.ul, "0003", 0, 25); p.Total != 1 || p.Items[0].Name != "bob B" {
+		t.Errorf("digit search: %+v", p)
+	}
+	if p, _ = h.f.ListContacts(h.ul, "", 1, 1); p.Total != 2 || len(p.Items) != 1 || p.Items[0].Name != "bob B" {
+		t.Errorf("page 2: %+v", p)
+	}
+	if p, _ = h.f.ListContacts(h.ul, "", 5, 1); p.Total != 2 || len(p.Items) != 0 || !p.Loaded {
+		t.Errorf("past the end: %+v", p)
+	}
+	h.xc.applyRosterItems(false, rosterEntry{jid: wfJID, name: "Zed"})
+	h.xc.applyRosterItems(false, rosterEntry{jid: "+15550003333@cheogram.com", remove: true})
+	if p, _ = h.f.ListContacts(h.ul, "", 0, 25); p.Total != 1 || p.Items[0].Name != "Zed" {
+		t.Errorf("after push: %+v", p)
+	}
+	// Works offline (no session) and never exposes JIDs: only names and numbers exist in the type.
+	if p, err = h.f.ListContacts(h.ul, "", 0, 25); err != nil || !p.Loaded {
+		t.Errorf("offline: %+v %v", p, err)
+	}
+	other := testLogin(false)
+	other.Client = &stubJabberClient{}
+	if _, err := h.f.ListContacts(other, "", 0, 25); wfActionCode(t, err) != hostkit.CodeUnavailable {
+		t.Errorf("non-xmpp login: %v", err)
+	}
+	if _, err := h.f.ListContacts(nil, "", 0, 25); wfActionCode(t, err) != hostkit.CodeUnavailable {
+		t.Errorf("nil login: %v", err)
+	}
+}
+
 func TestWidgetSaveContact(t *testing.T) {
 	h := newWFHarness(t)
 	type call struct{ jid, name string }

@@ -36,6 +36,7 @@ var (
 	_ hostkit.ChatOpener      = widgetFeatures{}
 	_ hostkit.ContactSaver    = widgetFeatures{}
 	_ hostkit.ContactLookup   = widgetFeatures{}
+	_ hostkit.ContactLister   = widgetFeatures{}
 )
 
 // client returns ul's XMPP client, or the checkLogin refusal as an unavailable error.
@@ -86,6 +87,27 @@ func (f widgetFeatures) ContactName(ul *bridgev2.UserLogin, e164 string) (string
 	name := xc.lookupRosterName(jid)
 	saved, _ := xc.inRoster(jid)
 	return name, saved || name != ""
+}
+
+// ListContacts lists the named Cheogram phone numbers of the roster for the Contacts tab (memory only:
+// the roster lock is held only to copy the names, filtering and sorting run after it). Unnamed numbers,
+// plain Jabber contacts, group MMS and short codes are not listed. Works while offline (the cached roster
+// is still useful). Names and queries are never logged.
+func (f widgetFeatures) ListContacts(ul *bridgev2.UserLogin, query string, offset, limit int) (hostkit.ContactPage, error) {
+	xc, err := f.client(ul)
+	if err != nil {
+		return hostkit.ContactPage{}, err
+	}
+	names, loaded := xc.rosterNamesSnapshot()
+	if !loaded {
+		return hostkit.ContactPage{}, nil
+	}
+	items, total := pageContacts(phoneContacts(names, hostkit.DisplayContactName), query, offset, limit)
+	page := hostkit.ContactPage{Total: total, Loaded: true, Items: make([]hostkit.ContactEntry, 0, len(items))}
+	for _, it := range items {
+		page.Items = append(page.Items, hostkit.ContactEntry{Name: it.name, E164: it.e164})
+	}
+	return page, nil
 }
 
 // SaveContact has the semantics of the save-contact command: the name is set, overwriting an existing
