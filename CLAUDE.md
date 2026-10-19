@@ -79,6 +79,8 @@ Phone numbers from a CardDAV address book are added to the roster as Cheogram co
 
 - **`pkg/connector/metadata.go`** — `JabberLoginMeta` (password, default MUC nick; `Server`/`Port` fields are reserved for a future per-account override and are not yet used).
 
+- **`pkg/connector/roster_contacts.go`** — Named-roster snapshot and pure helpers (`phoneContacts`, `pageContacts`) behind the Dialpad widget Contacts tab (named Cheogram phone numbers only; sort and search rules documented in the file).
+
 - **`pkg/connector/id.go`** — `EventSender` construction from JIDs.
 
 - **`pkg/connector/capabilities.go`** — Declared capabilities: text, image/video/audio/file (50 MiB), captions, replies, reactions.
