@@ -51,6 +51,11 @@ type callsExt struct {
 	// sip-login/sip-logout credentials). It is taken before mu and never while holding it.
 	prefsMu sync.Mutex
 
+	// filteredMu guards filteredSeen: login+caller -> last filtered INVITE, used to send one notice
+	// per burst (the provider retries a rejected call with a new INVITE several times a second).
+	filteredMu   sync.Mutex
+	filteredSeen map[string]time.Time
+
 	mu       sync.Mutex
 	rt       *sipaccount.Runtime     // set in start (guarded by mu)
 	calls    *calls.Manager          // set in start (guarded by mu; use manager() / callAPI())

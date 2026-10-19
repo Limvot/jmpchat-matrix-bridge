@@ -138,11 +138,40 @@ func (x *callsExt) rejectFiltered(loginID networkid.UserLoginID, ul *bridgev2.Us
 			attribute.String("reason", "not_in_roster")))
 	defer span.End()
 	call.Reject(480, "Temporarily Unavailable")
+	if !x.firstFiltered(string(loginID)+"|"+e164, time.Now()) {
+		x.logFor(ctx).Debug().Str("login", string(loginID)).Str("from", e164).
+			Msg("Rejected inbound call: caller not in roster (repeat INVITE, no notice)")
+		return
+	}
 	x.logFor(ctx).Info().Str("login", string(loginID)).Str("from", e164).
 		Msg("Rejected inbound call: caller not in roster (roster-only calls)")
 	if ul != nil {
 		go x.sendFilteredNotice(ul, e164)
 	}
+}
+
+// filteredNoticeQuiet is how long after the last filtered INVITE from a caller further INVITEs from
+// that caller are treated as the same call attempt (no new notice). Every repeat extends the window.
+const filteredNoticeQuiet = 2 * time.Minute
+
+// firstFiltered records a filtered INVITE for key (login|caller) at now and reports whether it starts
+// a new burst, i.e. whether a notice should be sent.
+func (x *callsExt) firstFiltered(key string, now time.Time) bool {
+	x.filteredMu.Lock()
+	defer x.filteredMu.Unlock()
+	if x.filteredSeen == nil {
+		x.filteredSeen = make(map[string]time.Time)
+	}
+	last, seen := x.filteredSeen[key]
+	x.filteredSeen[key] = now
+	if len(x.filteredSeen) > 256 {
+		for k, t := range x.filteredSeen {
+			if now.Sub(t) >= filteredNoticeQuiet {
+				delete(x.filteredSeen, k)
+			}
+		}
+	}
+	return !seen || now.Sub(last) >= filteredNoticeQuiet
 }
 
 // sendFilteredNotice tells the login's owner (management room) that a call was blocked.

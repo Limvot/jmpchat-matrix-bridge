@@ -352,3 +352,30 @@ func TestSetRosterOnlyRollbackKeepsOtherKeys(t *testing.T) {
 		t.Fatal("SIP credentials lost")
 	}
 }
+
+func TestFirstFilteredCoalescesRetries(t *testing.T) {
+	x := &callsExt{}
+	t0 := time.Unix(1_000_000, 0)
+	if !x.firstFiltered("a|+15550001111", t0) {
+		t.Fatal("first INVITE should notify")
+	}
+	// Provider retries several times a second: one notice for the burst.
+	for i := 1; i <= 16; i++ {
+		if x.firstFiltered("a|+15550001111", t0.Add(time.Duration(i)*400*time.Millisecond)) {
+			t.Fatalf("retry %d notified", i)
+		}
+	}
+	if !x.firstFiltered("a|+15550002222", t0.Add(time.Second)) {
+		t.Fatal("other caller should notify")
+	}
+	if !x.firstFiltered("b|+15550001111", t0.Add(time.Second)) {
+		t.Fatal("other login should notify")
+	}
+	last := t0.Add(16 * 400 * time.Millisecond)
+	if x.firstFiltered("a|+15550001111", last.Add(filteredNoticeQuiet-time.Second)) {
+		t.Fatal("still within the quiet window")
+	}
+	if !x.firstFiltered("a|+15550001111", last.Add(2*filteredNoticeQuiet)) {
+		t.Fatal("a later call should notify again")
+	}
+}
