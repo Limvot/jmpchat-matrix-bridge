@@ -480,6 +480,12 @@ Roster-only calls uses the bridge's Jabber roster as the list of known numbers (
 
 **Known limits**: Element X cannot pick up outbound calls started from Matrix due to an [Element Call notification bug](https://github.com/element-hq/element-call/blob/8be229a438dc363972bdae5f6198607998a851d8/src/state/CallViewModel/CallNotificationLifecycle.ts#L128); use Element Web/Desktop for those.
 
+## Multi-user chats (MUC)
+
+`!jabber join <room@service>` joins a MUC and creates its Matrix room. The room is always created as a group chat. Without the command (for example a room first seen through an inbound message), the bridge asks the server with disco#info, falling back to a name heuristic (`@conference.`, `@muc.`, `@groups.` for Snikket) when the server cannot be asked.
+
+A room joined before this was fixed (for example on a Snikket `groups.` domain) may have been created as a one-to-one chat; its outgoing messages then fail. The bridge does not migrate these. Run bridgev2's `!jabber delete-portal` inside that Matrix room, then `!jabber join <room-jid>` again.
+
 ## Verifying
 
 1. **Registration** – `registration.yaml` is valid YAML and has `id`, `url`, `as_token`, `hs_token`, `sender_localpart`, and `namespaces.users` with `exclusive: true` and regexes that match your `username_template` (e.g. `@jabber_.*`). If using E2BE, verify `de.sorunome.msc2409.push_ephemeral: true`, `io.element.msc4190: true`, and `org.matrix.msc3202: true` are present.

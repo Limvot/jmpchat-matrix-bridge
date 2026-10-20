@@ -866,7 +866,8 @@ func (x *xmppClient) handleRosterPush(ver string, item roster.Item) error {
 
 // isMUCJID is a fallback heuristic when disco is unavailable (offline or disco failed).
 func isMUCJID(jidStr string) bool {
-	return strings.Contains(jidStr, "@conference.") || strings.Contains(jidStr, "@muc.")
+	return strings.Contains(jidStr, "@conference.") || strings.Contains(jidStr, "@muc.") ||
+		strings.Contains(jidStr, "@groups.") // Snikket
 }
 
 // portalIsMUC returns whether the portal should be treated as a MUC (groupchat, MUC join).
@@ -991,7 +992,10 @@ func (x *xmppClient) getChatInfo(ctx context.Context, portal *bridgev2.Portal) (
 		x.ensureRosterSynced(ctx)
 		return x.getDecoratedDMChatInfo(ctx, portal, portalID)
 	}
-	if isMUCJID(portalID) {
+	// isMUC asks the server (disco#info, cached) and falls back to the isMUCJID heuristic when
+	// offline or disco fails. GetChatInfo runs from bridgev2 portal/command goroutines (also the
+	// ChatResync GetChatInfoFunc), never on the mellium Serve goroutine, so the IQ round trip is safe.
+	if x.isMUC(ctx, portalID) {
 		return x.getMUCChatInfo(ctx, portal, portalID)
 	}
 
