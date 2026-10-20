@@ -30,6 +30,49 @@ type messageIDs struct {
 	StanzaIDs  []stanzaIDRef
 	OriginID   string
 	OccupantID string // XEP-0421 occupant-id; only meaningful for groupchat
+
+	// Retract is the XEP-0424/0425 retraction carried by the stanza (nil when none), and Tombstone is
+	// set for an archived original that was retracted (<retracted>). Both are filled by finish().
+	Retract   *retractInfo
+	Tombstone bool
+	scan      *retractScan
+}
+
+// track feeds a start element of any depth to the identifier and retraction scanners; depth is the
+// element's depth and childDepth the depth of direct children of the <message>.
+func (m *messageIDs) track(se xml.StartElement, depth, childDepth int) {
+	if depth == childDepth {
+		m.observe(se)
+	}
+	if m.scan == nil {
+		m.scan = &retractScan{}
+	}
+	m.scan.start(se, depth, childDepth)
+}
+
+// trackChars feeds character data to the retraction scanner (reason text).
+func (m *messageIDs) trackChars(cd xml.CharData) {
+	if m.scan != nil {
+		m.scan.chars(cd)
+	}
+}
+
+// trackEnd feeds an end element (depth of the element that closes) to the retraction scanner.
+func (m *messageIDs) trackEnd(depth int) {
+	if m.scan != nil {
+		m.scan.end(depth)
+	}
+}
+
+// finish resolves the retraction state once the whole message was read. Callers must drop the body
+// of the message when Retract is set: it is the XEP-0424 fallback text and must never be bridged.
+func (m *messageIDs) finish() {
+	if m.scan == nil {
+		return
+	}
+	m.Retract = m.scan.result()
+	m.Tombstone = m.scan.tombstone
+	m.scan = nil
 }
 
 // observe inspects a start element that is a direct child of the message (the caller checks the

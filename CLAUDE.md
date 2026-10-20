@@ -48,6 +48,12 @@ All bridge logic lives in `pkg/connector/`. The bridgev2 framework handles Matri
 
 - **`pkg/connector/xmpp_message.go`** — Message conversion. Parses XMPP message content (body text, XEP-0066 OOB media URLs, XEP-0461 replies, XEP-0444 reactions, chat state notifications). Builds `bridgev2.ConvertedMessagePart` for Matrix. Handles deferred stanza ID metadata updates.
 
+### Retractions and moderation (XMPP -> Matrix)
+
+- **`pkg/connector/xmpp_retract_parse.go`** — `retractScan`: XEP-0424/0425 (`:1`) and legacy `:0` detection by resolved namespace on direct children of `<message>` (never the XEP-0353 jingle `<retract>`); the parsers (`parseMessageBodyOOBIDs`, carbons, MAM) fill `messageIDs.Retract`/`Tombstone` and drop the fallback body whenever a retract element is present.
+- **`pkg/connector/xmpp_retract.go`** — room-scoped `findMessagesByXMPPRef` (per-kind lookup order). **`xmpp_retract_event.go`** — `retraction`, `validateRetraction` (all sender rules), `newRetractionEvent` (`simplevent.MessageRemove` + `PreHandleWithResultFunc`/`PostHandleFunc`, `retractionEnv` seam), reason path (`removeWithReason`: connector redacts with `Reason` and returns Success; no reason uses the bridgev2 path), the `jabber_retracted:<login>:<lower portal>:<ref>` KV tombstones (checked in `jabberRemoteMessage.ConvertMessage` and the MAM paths) and the MAM batch filter.
+- Retraction events never create portals and go through `queueRemoteEvent` (`x.queueHook` is a test seam).
+
 ### Protocol Extensions
 
 - **`pkg/connector/xmpp_carbons.go`** — XEP-0280 Message Carbons. Enables on connect, parses `<sent>`/`<received>` forwarded stanzas, queues as remote events.

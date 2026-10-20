@@ -127,9 +127,7 @@ func parseMessageBodyOOBIDs(t xml.TokenReader) (body, oobURL, replyID string, re
 		switch v := tok.(type) {
 		case xml.StartElement:
 			depth++
-			if depth == 2 {
-				ids.observe(v)
-			}
+			ids.track(v, depth, 2)
 			jmi = detectJingleMessage(jmi, v)
 			if v.Name.Local == "body" {
 				inBody = true
@@ -154,6 +152,7 @@ func parseMessageBodyOOBIDs(t xml.TokenReader) (body, oobURL, replyID string, re
 				reactionEmojiBuf.Reset()
 			}
 		case xml.CharData:
+			ids.trackChars(v)
 			if inBody {
 				bodyBuf.Write([]byte(v))
 			}
@@ -165,6 +164,7 @@ func parseMessageBodyOOBIDs(t xml.TokenReader) (body, oobURL, replyID string, re
 			}
 		case xml.EndElement:
 			depth--
+			ids.trackEnd(depth + 1)
 			if v.Name.Local == "body" {
 				inBody = false
 			}
@@ -188,7 +188,12 @@ func parseMessageBodyOOBIDs(t xml.TokenReader) (body, oobURL, replyID string, re
 			}
 		}
 	}
-	return strings.TrimSpace(bodyBuf.String()), strings.TrimSpace(urlBuf.String()), replyID, reactionTarget, reactionEmojis, jmi, ids, nil
+	ids.finish()
+	body = strings.TrimSpace(bodyBuf.String())
+	if ids.Retract != nil {
+		body = "" // XEP-0424 fallback text ("... retracted ..."); never bridge it
+	}
+	return body, strings.TrimSpace(urlBuf.String()), replyID, reactionTarget, reactionEmojis, jmi, ids, nil
 }
 
 // tokenReaderWithPrefix implements xml.TokenReader by yielding one token then delegating to r.
@@ -284,6 +289,19 @@ func (x *xmppClient) handleMessageWithOOB(t xmlstream.TokenReadEncoder, start *x
 		fromBare = fromBare[:i]
 	}
 	if fromBare == "" {
+		return nil
+	}
+	// XEP-0424/0425 retraction or moderation: never bridged as a message (the fallback body was
+	// already dropped by the parser). Must precede the jingle and "no body" handling below.
+	if ids.Retract != nil {
+		x.handleInboundRetraction(retraction{
+			info:       *ids.Retract,
+			channel:    retractChanLive,
+			msgType:    attrValue(start.Attr, "type"),
+			fromFull:   from,
+			occupantID: ids.OccupantID,
+		}, networkid.PortalKey{ID: networkid.PortalID(fromBare), Receiver: x.loginID},
+			attrValue(start.Attr, "id"), ids, string(x.loginID))
 		return nil
 	}
 	// XEP-0353 Jingle Message Initiation (call signalling): surface as a Matrix notice.
@@ -429,6 +447,25 @@ func (x *xmppClient) handleGroupchatWithOOB(t xmlstream.TokenReadEncoder, start 
 	body, oobURL, replyID, reactionTarget, reactionEmojis, _, ids, err := parseMessageBodyOOBIDs(t)
 	if err != nil {
 		x.log.Warn().Err(err).Msg("Failed to parse MUC message body/OOB/reactions")
+		return nil
+	}
+	// XEP-0424/0425 retraction or moderation (including the room's moderation notice, which has no
+	// body): handled before the "no body" skip and the self-echo skip below, and never bridged as a
+	// message. Logging stays free of the fallback body and the reason.
+	if ids.Retract != nil {
+		room := bareJID(from)
+		if room == "" {
+			return nil
+		}
+		x.handleInboundRetraction(retraction{
+			info:       *ids.Retract,
+			channel:    retractChanLive,
+			groupchat:  true,
+			msgType:    "groupchat",
+			fromFull:   from,
+			occupantID: ids.OccupantID,
+		}, networkid.PortalKey{ID: networkid.PortalID(room), Receiver: x.loginID},
+			attrValue(start.Attr, "id"), ids, room)
 		return nil
 	}
 	// Skip only if no body, no OOB, and no reactions (e.g. chat state).
@@ -1221,6 +1258,12 @@ func (m *jabberRemoteMessage) dbMeta() *MessageMetadata {
 
 // ConvertMessage converts the XMPP message and attaches dbMeta to every part.
 func (m *jabberRemoteMessage) ConvertMessage(ctx context.Context, portal *bridgev2.Portal, intent bridgev2.MatrixAPI) (*bridgev2.ConvertedMessage, error) {
+	// bridgev2 deletes the row of a retracted message, so a replay (MUC history on join, MAM, backfill)
+	// would bring it back; the retracted-refs record keeps it out.
+	if m.x != nil && m.x.isRetracted(ctx, m.portalKey.ID, string(m.id), m.stanzaID, m.originID) {
+		zerolog.Ctx(ctx).Debug().Msg("Ignoring replayed message that was retracted")
+		return nil, bridgev2.ErrIgnoringRemoteEvent
+	}
 	cm, err := m.convertMessage(ctx, portal, intent)
 	if err != nil || cm == nil {
 		return cm, err
