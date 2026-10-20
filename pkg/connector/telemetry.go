@@ -40,7 +40,7 @@ func (x *xmppClient) queueRemoteEvent(ctx context.Context, evt bridgev2.RemoteEv
 		case *simplevent.PreConvertedMessage:
 			attachTraceHooks(&e.EventMeta, sc)
 		case *simplevent.MessageRemove:
-			attachTraceHooks(&e.EventMeta, sc)
+			attachLazyTraceHooks(&e.EventMeta, sc)
 		}
 		span.SetAttributes(attribute.String("xmpp.peer.jid", string(evt.GetPortalKey().ID)))
 	}
@@ -68,6 +68,30 @@ func attachTraceHooks(m *simplevent.EventMeta, sc trace.SpanContext) {
 			telemetry.EndRemoteEvent(ctx)
 		}
 	}
+}
+
+// lazySpanKey carries the parent span context for a handling span that the event's pre-handler starts.
+type lazySpanKey struct{}
+
+// attachLazyTraceHooks is attachTraceHooks for events whose handling span is started by their own
+// pre-handler (startLazyRemoteEvent) and ended by it or the post-handler. bridgev2 returns Ignored
+// for events of portals without a Matrix room before any pre/post handler runs, so a span started in
+// MutateContext would never end; here MutateContext only carries the parent span context.
+func attachLazyTraceHooks(m *simplevent.EventMeta, sc trace.SpanContext) {
+	if m.MutateContextFunc == nil {
+		m.MutateContextFunc = func(ctx context.Context) context.Context {
+			return context.WithValue(ctx, lazySpanKey{}, sc)
+		}
+	}
+}
+
+// startLazyRemoteEvent starts the handling span from the span context attachLazyTraceHooks stored in
+// ctx (no-op, returning ctx, when there is none).
+func startLazyRemoteEvent(ctx context.Context) context.Context {
+	if sc, ok := ctx.Value(lazySpanKey{}).(trace.SpanContext); ok {
+		return telemetry.StartRemoteEvent(ctx, sc)
+	}
+	return ctx
 }
 
 // logFor returns x.log enriched with the trace fields of ctx's span (x.log itself when none).
