@@ -14,6 +14,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"strings"
 	"sync"
 	"time"
 
@@ -54,6 +55,14 @@ type mucOccupant struct {
 	doneHash string    // advertised state ("none" or hash) last fully handled
 	failHash string    // advertised state whose fetch failed
 	failAt   time.Time
+	prop     *mucProp // pending propagation from the 1:1 path (latest wins)
+}
+
+// mucProp is an avatar the 1:1 path just applied for the occupant's real JID: remove, or apply the
+// already-uploaded mxc (no IQ, no upload).
+type mucProp struct {
+	remove bool
+	mxc    mucMXC
 }
 
 // adv is the advertised state: "none", the hash, or "" when unknown.
@@ -73,6 +82,7 @@ type mucOccSnapshot struct {
 	photo   photoKind
 	hash    string
 	realJID string
+	prop    *mucProp
 }
 
 func (s mucOccSnapshot) adv() string { return (&mucOccupant{photo: s.photo, hash: s.hash}).adv() }
@@ -373,7 +383,9 @@ func (s *mucAvatarState) dequeue() (key string, snap mucOccSnapshot, ok bool) {
 		if rec == nil {
 			continue
 		}
-		return k, mucOccSnapshot{room: rec.room, photo: rec.photo, hash: rec.hash, realJID: rec.realJID}, true
+		snap = mucOccSnapshot{room: rec.room, photo: rec.photo, hash: rec.hash, realJID: rec.realJID, prop: rec.prop}
+		rec.prop = nil
+		return k, snap, true
 	}
 	return "", mucOccSnapshot{}, false
 }
@@ -555,6 +567,10 @@ func avatarErrInfo(err error) (typ, cond string) {
 
 // process handles one job on the worker goroutine (never on Serve).
 func (s *mucAvatarState) process(ctx context.Context, key string, snap mucOccSnapshot) {
+	if snap.prop != nil {
+		s.processProp(ctx, key, snap)
+		return
+	}
 	if snap.photo == photoUnknown {
 		return
 	}
@@ -632,6 +648,87 @@ func (s *mucAvatarState) process(ctx context.Context, key string, snap mucOccSna
 	case mucActFetch:
 		s.fetchAndApply(ctx, key, snap, adv, ghost, ghostHash, setOutcome)
 	}
+}
+
+// propagateContact is called (from any goroutine, memory only, no IQ) after the 1:1 path applied a
+// new avatar (mxc != nil, SHA-1 realHash) or a removal (mxc == nil) for the real bare JID. Every
+// occupant of this session whose room-reported real JID matches and which has a ghost gets a
+// propagation job that applies the cached avatar. The real JID comes from the room's item jid (the
+// room sets it; occupants cannot claim one). The 60 s minimum interval does not apply: no IQ is
+// made. The occupant's advertised state is marked handled so a later stale room presence (the
+// client did not resend room presence) enqueues nothing and cannot revert the ghost; a different
+// advertised hash later still goes through the normal path.
+func (s *mucAvatarState) propagateContact(realBare string, mxc *mucMXC) (matched int) {
+	if realBare == "" {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.initLocked()
+	if mxc != nil {
+		if len(s.mxcByHash)+1 > mucAvatarMXCCap {
+			s.mxcByHash = make(map[string]mucMXC)
+		}
+		s.mxcByHash[mxc.realHash] = *mxc
+	}
+	for key, rec := range s.occ {
+		if !rec.hasGhost || rec.realJID == "" || !strings.EqualFold(rec.realJID, realBare) {
+			continue
+		}
+		p := &mucProp{remove: mxc == nil}
+		if mxc != nil {
+			p.mxc = *mxc
+		}
+		rec.prop = p
+		rec.doneHash = rec.adv()
+		s.enqueueLocked(key)
+		matched++
+	}
+	return matched
+}
+
+// processProp applies a propagation job: no IQ, no fetch, no upload.
+func (s *mucAvatarState) processProp(ctx context.Context, key string, snap mucOccSnapshot) {
+	log := s.log(ctx)
+	ghost, err := s.getGhost(ctx, key)
+	if err != nil {
+		log.Debug().Err(err).Str("occupant", key).Msg("MUC avatar: ghost lookup failed")
+		return
+	}
+	if ghost == nil {
+		s.clearHasGhost(key)
+		return
+	}
+	p := snap.prop
+	ghostHash := ghost.StoredAvatarHash()
+	if p.remove {
+		if ghostHash == "" {
+			return
+		}
+	} else if ghostHash == p.mxc.realHash && ghost.AvatarApplied() {
+		return
+	}
+	ctx, span := telemetry.Start(ctx, "xmpp.muc_avatar.refresh")
+	defer span.End()
+	log = s.log(ctx)
+	outcome := "changed"
+	if p.remove {
+		outcome = "removed"
+	}
+	if span.IsRecording() {
+		span.SetAttributes(attribute.String("xmpp.room.jid", snap.room), attribute.String("xmpp.peer.jid", key),
+			attribute.String("xmpp.avatar.source", "contact"), attribute.String("xmpp.avatar.outcome", outcome))
+	}
+	if p.remove {
+		applyGhostAvatar(ctx, ghost, &bridgev2.Avatar{Remove: true}, "", nil)
+		s.bump(func(st *mucAvatarStats) { st.removed++ })
+		log.Debug().Str("occupant", key).Msg("MUC avatar removed (propagated from contact)")
+		return
+	}
+	avatar := &bridgev2.Avatar{ID: avatarIDFromHash(p.mxc.realHash), MXC: id.ContentURIString(p.mxc.mxc), Hash: p.mxc.sha256}
+	applyGhostAvatar(ctx, ghost, avatar, p.mxc.realHash, nil)
+	s.bump(func(st *mucAvatarStats) { st.applied++ })
+	log.Debug().Str("occupant", key).Str("photo_hash", p.mxc.realHash).Msg("Applied cached MUC avatar (propagated from contact)")
 }
 
 func (s *mucAvatarState) fetchAndApply(ctx context.Context, key string, snap mucOccSnapshot, adv string, ghost avatarGhost, ghostHash string, setOutcome func(source, outcome string)) {
@@ -815,6 +912,12 @@ func (x *xmppClient) noteMUCPresence(occupantFull, room, typ string, info presen
 	if x.mucAv.notePresence(occupantFull, room, info, typ == "unavailable", own) {
 		x.log.Debug().Int("cap", mucOccupantCap).Msg("MUC avatar occupant table full, ignoring new occupants this session")
 	}
+}
+
+// propagateContactAvatar is called by the 1:1 path after it applied a new avatar (mxc != nil) or
+// removal (mxc == nil) for bare JID. Memory only; safe from any goroutine.
+func (x *xmppClient) propagateContactAvatar(bareJID string, mxc *mucMXC) {
+	x.mucAv.propagateContact(bareJID, mxc)
 }
 
 // noteMUCGhost is called (Serve, memory only) once ensureMUCGhostDisplayName holds the ghost.
