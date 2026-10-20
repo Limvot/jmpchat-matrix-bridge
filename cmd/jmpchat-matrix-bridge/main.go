@@ -112,25 +112,25 @@ func main() {
 			Func:          withSpan("sync-roster", cmdSyncRoster),
 			Name:          "sync-roster",
 			RequiresLogin: true,
-			Help:          commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Re-fetch roster from server and update Matrix display/room names; when backfill is enabled, also runs full MAM backfill for roster DMs. Usage: `%s sync-roster`", prefix)},
+			Help:          commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Re-fetch roster from server and update Matrix display/room names; when backfill is enabled, also runs full MAM backfill for roster DMs. Usage: `%s sync-roster [_login JID_]`", prefix)},
 		})
 		br.Bridge.Commands.(*commands.Processor).AddHandler(&commands.FullHandler{
 			Func:          withSpan("add-to-roster", cmdAddToRoster),
 			Name:          "add-to-roster",
 			RequiresLogin: true,
-			Help:          commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Add or rename a contact in your Jabber roster. Usage: `%s add-to-roster <jid> <name>`, or `%s add-to-roster <name>` inside a one-to-one chat", prefix, prefix)},
+			Help:          commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Add or rename a contact in your Jabber roster. Usage: `%s add-to-roster [_login JID_] <jid> <name>`, or `%s add-to-roster [_login JID_] <name>` inside a one-to-one chat", prefix, prefix)},
 		})
 		br.Bridge.Commands.(*commands.Processor).AddHandler(&commands.FullHandler{
 			Func:          withSpan("save-contact", connector.SaveContactCommand),
 			Name:          "save-contact",
 			RequiresLogin: true,
-			Help:          commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Save the person you are chatting with to your Jabber roster (run inside a one-to-one chat). Usage: `%s save-contact <name>`", prefix)},
+			Help:          commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Save the person you are chatting with to your Jabber roster (run inside a one-to-one chat). Usage: `%s save-contact [_login JID_] <name>`", prefix)},
 		})
 		br.Bridge.Commands.(*commands.Processor).AddHandler(&commands.FullHandler{
 			Func:          withSpan("remove-from-roster", connector.RemoveContactCommand),
 			Name:          "remove-from-roster",
 			RequiresLogin: true,
-			Help:          commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Remove a contact from your Jabber roster. Usage: `%s remove-from-roster <jid-or-phone>`, or `%s remove-from-roster` inside a one-to-one chat", prefix, prefix)},
+			Help:          commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Remove a contact from your Jabber roster. Usage: `%s remove-from-roster [_login JID_] <jid-or-phone>`, or `%s remove-from-roster [_login JID_]` inside a one-to-one chat", prefix, prefix)},
 		})
 		for _, c := range []struct {
 			name, desc string
@@ -152,31 +152,31 @@ func main() {
 			Func:          withSpan("search-roster", cmdSearchRoster),
 			Name:          "search-roster",
 			RequiresLogin: true,
-			Help:          commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Search your Jabber roster for contacts matching a JID or name. Usage: `%s search-roster <query>`", prefix)},
+			Help:          commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Search your Jabber roster for contacts matching a JID or name. Usage: `%s search-roster [_login JID_] <query>`", prefix)},
 		})
 		br.Bridge.Commands.(*commands.Processor).AddHandler(&commands.FullHandler{
 			Func:          withSpan("join", cmdMUCJoin),
 			Name:          "join",
 			RequiresLogin: true,
-			Help:          commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Join a multi-user chat (MUC) room. Usage: `%s join <room-jid>` (e.g. room@conference.example.com)", prefix)},
+			Help:          commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Join a multi-user chat (MUC) room. Usage: `%s join [_login JID_] <room-jid>` (e.g. room@conference.example.com)", prefix)},
 		})
 		br.Bridge.Commands.(*commands.Processor).AddHandler(&commands.FullHandler{
 			Func:          withSpan("leave", cmdMUCLeave),
 			Name:          "leave",
 			RequiresLogin: true,
-			Help:          commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Leave a multi-user chat (MUC) room. Usage: `%s leave <room-jid>`", prefix)},
+			Help:          commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Leave a multi-user chat (MUC) room. Usage: `%s leave [_login JID_] <room-jid>`", prefix)},
 		})
 		br.Bridge.Commands.(*commands.Processor).AddHandler(&commands.FullHandler{
 			Func:          withSpan("muc-nick", cmdMUCNick),
 			Name:          "muc-nick",
 			RequiresLogin: true,
-			Help:          commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Set preferred MUC nickname for a room. Usage: `%s muc-nick <room-jid> <nick>`", prefix)},
+			Help:          commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Set preferred MUC nickname for a room. Usage: `%s muc-nick [_login JID_] <room-jid> <nick>`", prefix)},
 		})
 		br.Bridge.Commands.(*commands.Processor).AddHandler(&commands.FullHandler{
 			Func:          withSpan("muc-nick-default", cmdMUCNickDefault),
 			Name:          "muc-nick-default",
 			RequiresLogin: true,
-			Help:          commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Set default MUC nickname for all rooms. Usage: `%s muc-nick-default <nick>`", prefix)},
+			Help:          commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Set default MUC nickname for all rooms. Usage: `%s muc-nick-default [_login JID_] <nick>`", prefix)},
 		})
 	}
 	br.PostStart = func() {
@@ -196,7 +196,7 @@ func main() {
 }
 
 func cmdSyncRoster(ce *commands.Event) {
-	login := ce.User.GetDefaultLogin()
+	login, _, explicit := connector.CommandLogin(ce, 0)
 	if login == nil {
 		ce.Reply("You must be logged in. Use `%s login` first.", cmdPrefix(ce))
 		return
@@ -211,10 +211,11 @@ func cmdSyncRoster(ce *commands.Event) {
 	// "started" message isn't held until the whole sync completes. Detach from ce.Ctx so the
 	// work isn't cancelled when the command handler returns.
 	bf, hasBackfill := login.Client.(connector.FullBackfillRunner)
+	notice := connector.CommandLoginNotice(ce, login, explicit)
 	if hasBackfill {
-		ce.Reply("Roster sync started. Display names and room names will update shortly. Full backfill (if enabled) is running in the background.")
+		ce.Reply("Roster sync started. Display names and room names will update shortly. Full backfill (if enabled) is running in the background.%s", notice)
 	} else {
-		ce.Reply("Roster sync started. Display names and room names will update shortly.")
+		ce.Reply("Roster sync started. Display names and room names will update shortly.%s", notice)
 	}
 	ctx := context.WithoutCancel(ce.Ctx)
 	// Carry only the span context so the goroutine never touches the handler's live span.
@@ -232,22 +233,27 @@ func cmdSyncRoster(ce *commands.Event) {
 }
 
 func cmdAddToRoster(ce *commands.Event) {
-	// Inside a chat, `add-to-roster <name>` (no JID) saves the chat's contact, like save-contact.
-	if ce.Portal != nil && len(ce.Args) > 0 && !strings.Contains(ce.Args[0], "@") {
+	// Inside a chat, `add-to-roster [<login>] <name>` (no JID) saves the chat's contact, like save-contact.
+	// An own login ID as the first argument selects the account unless too few arguments would remain.
+	minArgs := 2
+	if ce.Portal != nil {
+		minArgs = 1
+	}
+	login, args, explicit := connector.CommandLogin(ce, minArgs)
+	if ce.Portal != nil && len(args) > 0 && !strings.Contains(args[0], "@") {
 		connector.SaveContactCommand(ce)
 		return
 	}
-	if len(ce.Args) < 2 {
+	if len(args) < 2 {
 		ce.Reply("Usage: `%s add-to-roster <jid> <name>` — e.g. `%s add-to-roster friend@jabber.org My Friend`. Inside a one-to-one chat, `%s add-to-roster <name>` saves that contact.", cmdPrefix(ce), cmdPrefix(ce), cmdPrefix(ce))
 		return
 	}
-	jid := strings.TrimSpace(strings.ToLower(ce.Args[0]))
-	name := strings.TrimSpace(strings.Join(ce.Args[1:], " "))
+	jid := strings.TrimSpace(strings.ToLower(args[0]))
+	name := strings.TrimSpace(strings.Join(args[1:], " "))
 	if jid == "" || !strings.Contains(jid, "@") {
 		ce.Reply("Invalid JID. Use the form user@domain (e.g. user@jabber.org).")
 		return
 	}
-	login := ce.User.GetDefaultLogin()
 	if login == nil {
 		ce.Reply("You must be logged in. Use `%s login` first.", cmdPrefix(ce))
 		return
@@ -261,20 +267,20 @@ func cmdAddToRoster(ce *commands.Event) {
 		ce.Reply("Failed to set roster name: %v", err)
 		return
 	}
-	ce.Reply("Roster updated: **%s** is now **%s**. Display and room names should update shortly.", jid, name)
+	ce.Reply("Roster updated: **%s** is now **%s**. Display and room names should update shortly.%s", jid, name, connector.CommandLoginNotice(ce, login, explicit))
 }
 
 func cmdSearchRoster(ce *commands.Event) {
-	if len(ce.Args) == 0 {
+	login, args, explicit := connector.CommandLogin(ce, 1)
+	if len(args) == 0 {
 		ce.Reply("Usage: `%s search-roster <query>` — e.g. `%s search-roster megan` or `%s search-roster @example.com`", cmdPrefix(ce), cmdPrefix(ce), cmdPrefix(ce))
 		return
 	}
-	query := strings.TrimSpace(strings.Join(ce.Args, " "))
+	query := strings.TrimSpace(strings.Join(args, " "))
 	if query == "" {
 		ce.Reply("Query cannot be empty.")
 		return
 	}
-	login := ce.User.GetDefaultLogin()
 	if login == nil {
 		ce.Reply("You must be logged in. Use `%s login` first.", cmdPrefix(ce))
 		return
@@ -301,20 +307,20 @@ func cmdSearchRoster(ce *commands.Event) {
 			lines = append(lines, fmt.Sprintf("- %s", contact.JID))
 		}
 	}
-	ce.Reply("Found %d contact(s) matching **%s**:\n%s", len(results), query, strings.Join(lines, "\n"))
+	ce.Reply("Found %d contact(s) matching **%s**:\n%s%s", len(results), query, strings.Join(lines, "\n"), connector.CommandLoginNotice(ce, login, explicit))
 }
 
 func cmdMUCJoin(ce *commands.Event) {
-	if len(ce.Args) == 0 {
+	login, args, explicit := connector.CommandLogin(ce, 1)
+	if len(args) == 0 {
 		ce.Reply("Usage: `%s join <room-jid>` — e.g. `%s join myroom@conference.example.com`", cmdPrefix(ce), cmdPrefix(ce))
 		return
 	}
-	roomJID := strings.TrimSpace(strings.ToLower(ce.Args[0]))
+	roomJID := strings.TrimSpace(strings.ToLower(args[0]))
 	if roomJID == "" || !strings.Contains(roomJID, "@") {
 		ce.Reply("Invalid room JID. Use the form room@conference.domain (e.g. myroom@conference.example.com).")
 		return
 	}
-	login := ce.User.GetDefaultLogin()
 	if login == nil {
 		ce.Reply("You must be logged in. Use `%s login` first.", cmdPrefix(ce))
 		return
@@ -354,20 +360,20 @@ func cmdMUCJoin(ce *commands.Event) {
 			_ = userIntent.EnsureJoined(ce.Ctx, portal.MXID)
 		}
 	}
-	ce.Reply("Joined **%s**. Room: %s", roomJID, portal.MXID.String())
+	ce.Reply("Joined **%s**. Room: %s%s", roomJID, portal.MXID.String(), connector.CommandLoginNotice(ce, login, explicit))
 }
 
 func cmdMUCLeave(ce *commands.Event) {
-	if len(ce.Args) == 0 {
+	login, args, explicit := connector.CommandLogin(ce, 1)
+	if len(args) == 0 {
 		ce.Reply("Usage: `%s leave <room-jid>` — e.g. `%s leave myroom@conference.example.com`", cmdPrefix(ce), cmdPrefix(ce))
 		return
 	}
-	roomJID := strings.TrimSpace(strings.ToLower(ce.Args[0]))
+	roomJID := strings.TrimSpace(strings.ToLower(args[0]))
 	if roomJID == "" || !strings.Contains(roomJID, "@") {
 		ce.Reply("Invalid room JID. Use the form room@conference.domain (e.g. myroom@conference.example.com).")
 		return
 	}
-	login := ce.User.GetDefaultLogin()
 	if login == nil {
 		ce.Reply("You must be logged in. Use `%s login` first.", cmdPrefix(ce))
 		return
@@ -381,16 +387,17 @@ func cmdMUCLeave(ce *commands.Event) {
 		ce.Reply("Failed to leave room: %v", err)
 		return
 	}
-	ce.Reply("Left **%s**. You can leave the Matrix room from the room menu if desired.", roomJID)
+	ce.Reply("Left **%s**. You can leave the Matrix room from the room menu if desired.%s", roomJID, connector.CommandLoginNotice(ce, login, explicit))
 }
 
 func cmdMUCNick(ce *commands.Event) {
-	if len(ce.Args) < 2 {
+	login, args, explicit := connector.CommandLogin(ce, 2)
+	if len(args) < 2 {
 		ce.Reply("Usage: `%s muc-nick <room-jid> <nick>` — e.g. `%s muc-nick myroom@conference.example.com MyNick`", cmdPrefix(ce), cmdPrefix(ce))
 		return
 	}
-	roomJID := strings.TrimSpace(strings.ToLower(ce.Args[0]))
-	nick := strings.TrimSpace(ce.Args[1])
+	roomJID := strings.TrimSpace(strings.ToLower(args[0]))
+	nick := strings.TrimSpace(args[1])
 	if roomJID == "" || !strings.Contains(roomJID, "@") {
 		ce.Reply("Invalid room JID. Use the form room@conference.domain.")
 		return
@@ -399,7 +406,6 @@ func cmdMUCNick(ce *commands.Event) {
 		ce.Reply("Nick cannot be empty.")
 		return
 	}
-	login := ce.User.GetDefaultLogin()
 	if login == nil {
 		ce.Reply("You must be logged in. Use `%s login` first.", cmdPrefix(ce))
 		return
@@ -408,20 +414,20 @@ func cmdMUCNick(ce *commands.Event) {
 		ce.Reply("Failed to set MUC nick: %v", err)
 		return
 	}
-	ce.Reply("Preferred nick for **%s** set to **%s**. It will be used on next join (and on 409 retry).", roomJID, nick)
+	ce.Reply("Preferred nick for **%s** set to **%s**. It will be used on next join (and on 409 retry).%s", roomJID, nick, connector.CommandLoginNotice(ce, login, explicit))
 }
 
 func cmdMUCNickDefault(ce *commands.Event) {
-	if len(ce.Args) == 0 {
+	login, args, explicit := connector.CommandLogin(ce, 1)
+	if len(args) == 0 {
 		ce.Reply("Usage: `%s muc-nick-default <nick>` — e.g. `%s muc-nick-default MyNick`", cmdPrefix(ce), cmdPrefix(ce))
 		return
 	}
-	nick := strings.TrimSpace(strings.Join(ce.Args, " "))
+	nick := strings.TrimSpace(strings.Join(args, " "))
 	if nick == "" {
 		ce.Reply("Nick cannot be empty.")
 		return
 	}
-	login := ce.User.GetDefaultLogin()
 	if login == nil {
 		ce.Reply("You must be logged in. Use `%s login` first.", cmdPrefix(ce))
 		return
@@ -430,5 +436,5 @@ func cmdMUCNickDefault(ce *commands.Event) {
 		ce.Reply("Failed to set default MUC nick: %v", err)
 		return
 	}
-	ce.Reply("Default MUC nick set to **%s**. It will be used for rooms that don't have a room-specific nick.", nick)
+	ce.Reply("Default MUC nick set to **%s**. It will be used for rooms that don't have a room-specific nick.%s", nick, connector.CommandLoginNotice(ce, login, explicit))
 }

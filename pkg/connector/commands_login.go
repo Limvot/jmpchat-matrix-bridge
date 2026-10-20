@@ -7,16 +7,13 @@ import (
 	"maunium.net/go/mautrix/bridgev2/commands"
 )
 
-// lookupCommandLogin picks the login by the sender and room (a var for tests).
+// lookupCommandLogin picks the login by the sender and room, without explicit selection (a var for tests).
 var lookupCommandLogin = func(ce *commands.Event) *bridgev2.UserLogin {
 	if ce.Portal != nil && ce.Portal.Receiver != "" {
-		ul := ce.Bridge.GetCachedUserLoginByID(ce.Portal.Receiver)
-		if ul == nil || ul.UserMXID != ce.User.MXID {
-			return nil
-		}
-		return ul
+		return portalLoginOf(ce)
 	}
-	return ce.User.GetDefaultLogin()
+	ul, _, _ := pickCommandLogin(nil, 0, ce.User.GetUserLogins(), nil, ce.User.GetDefaultLogin)
+	return ul
 }
 
 // checkJabberLogin refuses a nil login and one that is not a real jabber login ("" refusal and the login

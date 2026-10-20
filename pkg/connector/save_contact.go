@@ -23,7 +23,12 @@ func SaveContactCommand(ce *commands.Event) {
 	if ce.Bridge != nil && ce.Bridge.Config != nil && ce.Bridge.Config.CommandPrefix != "" {
 		prefix = ce.Bridge.Config.CommandPrefix
 	}
-	ce.Reply("%s", saveContactReply(ce.Ctx, prefix, ce.Portal, ce.Args, func(p *bridgev2.Portal) *bridgev2.UserLogin {
+	// An explicit leading login ID selects the account (the name is then the rest).
+	login, args, explicit := CommandLogin(ce, 1)
+	ce.Reply("%s", saveContactReply(ce.Ctx, prefix, ce.Portal, args, func(p *bridgev2.Portal) *bridgev2.UserLogin {
+		if explicit {
+			return login
+		}
 		// The portal's login must belong to the sender (a portal room can have another user's login).
 		ul := ce.Bridge.GetCachedUserLoginByID(p.Receiver)
 		if ul == nil || ce.User == nil || ul.UserMXID != ce.User.MXID {
@@ -87,20 +92,28 @@ func RemoveContactCommand(ce *commands.Event) {
 	if ce.Bridge != nil && ce.Bridge.Config != nil && ce.Bridge.Config.CommandPrefix != "" {
 		prefix = ce.Bridge.Config.CommandPrefix
 	}
-	ce.Reply("%s", removeContactReply(ce.Ctx, prefix, ce.Portal, ce.Args,
+	// Outside a chat a target is required, so a lone login ID is the target, not an account selection.
+	minArgs := 1
+	if ce.Portal != nil && ce.Portal.Receiver != "" {
+		minArgs = 0
+	}
+	login, args, explicit := CommandLogin(ce, minArgs)
+	reply := removeContactReply(ce.Ctx, prefix, ce.Portal, args,
 		func(p *bridgev2.Portal) *bridgev2.UserLogin {
+			if explicit {
+				return login
+			}
 			ul := ce.Bridge.GetCachedUserLoginByID(p.Receiver)
 			if ul == nil || ce.User == nil || ul.UserMXID != ce.User.MXID {
 				return nil
 			}
 			return ul
 		},
-		func() *bridgev2.UserLogin {
-			if ce.User == nil {
-				return nil
-			}
-			return ce.User.GetDefaultLogin()
-		}))
+		func() *bridgev2.UserLogin { return login })
+	if strings.HasPrefix(reply, "Removed **") {
+		reply += CommandLoginNotice(ce, login, explicit)
+	}
+	ce.Reply("%s", reply)
 }
 
 // removeContactReply runs remove-from-roster and returns the reply text. loginFor resolves the portal's
