@@ -173,7 +173,7 @@ func initWith(ctx context.Context, o Options, getenv func(string) string) {
 // buildResource builds the resource: defaults < DD_* < OTEL_* env. git.commit.sha and
 // git.repository_url are what Datadog's source code integration reads from OTel resources.
 func buildResource(ctx context.Context, o Options, getenv func(string) string) (*resource.Resource, error) {
-	name := "mautrix-jabber"
+	name := "jmpchat-matrix-bridge"
 	version := o.ServiceVersion
 	commit, repo := o.CommitSHA, o.RepositoryURL
 	if v := strings.TrimSpace(getenv("DD_GIT_COMMIT_SHA")); v != "" {

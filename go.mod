@@ -1,4 +1,4 @@
-module github.com/mautrix/jabber
+module github.com/williamkray/jmpchat-matrix-bridge
 
 go 1.26.0
 

@@ -18,7 +18,7 @@ ARG BUILD_TIME=unknown
 RUN CGO_ENABLED=1 go build -tags "sipcalls nolibopusfile" -ldflags "-s -w \
 	-X main.Commit=${GIT_COMMIT} -X main.Tag=${GIT_TAG} \
 	-X main.RepositoryURL=${GIT_REPOSITORY_URL} -X main.BuildTime=${BUILD_TIME}" \
-	-o mautrix-jabber ./cmd/mautrix-jabber
+	-o jmpchat-matrix-bridge ./cmd/jmpchat-matrix-bridge
 
 # Runtime stage
 FROM alpine:3.19
@@ -34,7 +34,9 @@ RUN apk add --no-cache ca-certificates tzdata sqlite-libs olm opus
 RUN adduser -D -h /app -s /sbin/nologin bridge && mkdir -p /data && chown bridge:bridge /data
 WORKDIR /app
 
-COPY --from=builder /build/mautrix-jabber .
+COPY --from=builder /build/jmpchat-matrix-bridge .
+# compat: pre-rename binary path, remove in a later major
+RUN ln -s jmpchat-matrix-bridge /app/mautrix-jabber
 COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 

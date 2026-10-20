@@ -14,6 +14,7 @@ registration.verify.yaml
 *.db-wal
 
 # Build artifacts
+/jmpchat-matrix-bridge
 /mautrix-jabber
 vendor
 

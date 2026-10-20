@@ -1,4 +1,4 @@
-# mautrix-jabber production roadmap
+# jmpchat-matrix-bridge production roadmap (formerly mautrix-jabber)
 
 Prioritized, step-by-step plan to make the bridge production-ready: security, scalability, native UX (media, reactions, quotes, mentions), MUC, and optional OMEMO. This is the **canonical planning document**; implementation notes and known issues are included below.
 

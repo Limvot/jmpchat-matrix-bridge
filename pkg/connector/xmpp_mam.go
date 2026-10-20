@@ -22,7 +22,7 @@ import (
 	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/event"
 
-	"github.com/mautrix/jabber/pkg/telemetry"
+	"github.com/williamkray/jmpchat-matrix-bridge/pkg/telemetry"
 )
 
 const (

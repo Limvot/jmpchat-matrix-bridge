@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/mautrix/jabber/pkg/connector"
-	"github.com/mautrix/jabber/pkg/telemetry"
+	"github.com/williamkray/jmpchat-matrix-bridge/pkg/connector"
+	"github.com/williamkray/jmpchat-matrix-bridge/pkg/telemetry"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 	"maunium.net/go/mautrix/bridgev2/commands"
@@ -63,11 +63,16 @@ func knownOrEmpty(s string) string {
 
 func main() {
 	br := &mxmain.BridgeMain{
-		Name:        "mautrix-jabber",
-		Description: "A Matrix-Jabber (XMPP) puppeting bridge.",
-		URL:         "https://github.com/williamkray/mautrix-jabber",
-		Version:     "0.5.0" + buildVariant,
-		Connector:   &connector.JabberConnector{},
+		Name:        "jmpchat-matrix-bridge",
+		Description: "A Matrix-Jabber (XMPP) puppeting bridge, focused on JMP.chat/Cheogram (SMS/MMS, SIP calls, CardDAV contacts).",
+		URL:         "https://github.com/williamkray/jmpchat-matrix-bridge",
+		// DBOwner pins the database owner to the value the bridge had when it was called
+		// mautrix-jabber. mxmain derives the owner from Name ("megabridge/"+Name) and the
+		// database layer refuses to start if the stored owner differs, so renaming without
+		// this would lock every existing deployment out of its database. Never change it.
+		DBOwner:   "megabridge/mautrix-jabber",
+		Version:   "0.5.0" + buildVariant,
+		Connector: &connector.JabberConnector{},
 	}
 	br.PostInit = func() {
 		telemetry.Init(context.Background(), telemetry.Options{

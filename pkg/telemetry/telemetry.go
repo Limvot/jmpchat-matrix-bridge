@@ -16,7 +16,7 @@ import (
 )
 
 // TracerName is the instrumentation scope name used for all spans.
-const TracerName = "github.com/mautrix/jabber"
+const TracerName = "github.com/williamkray/jmpchat-matrix-bridge"
 
 // Options configures Init.
 type Options struct {

@@ -25,6 +25,7 @@ import (
 // testCallsExt returns a calls extension of a fresh connector over a minimal bridge (no Matrix, no DB).
 func testCallsExt(t *testing.T, cheogram bool) (*callsExt, *JabberConnector) {
 	t.Helper()
+	t.Setenv("JMPCHAT_BRIDGE_CHEOGRAM", "")
 	t.Setenv("MAUTRIX_JABBER_CHEOGRAM", "")
 	// Commands are registered by sipcalls_commands.go; they need a real processor, which these tests
 	// do not have.

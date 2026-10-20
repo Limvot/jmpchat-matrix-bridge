@@ -14,7 +14,7 @@ import (
 	"maunium.net/go/mautrix/bridgev2/commands"
 	"maunium.net/go/mautrix/bridgev2/networkid"
 
-	"github.com/mautrix/jabber/pkg/telemetry"
+	"github.com/williamkray/jmpchat-matrix-bridge/pkg/telemetry"
 )
 
 // errCardDAVNeedCheogram is the refusal when network.cheogram is off.

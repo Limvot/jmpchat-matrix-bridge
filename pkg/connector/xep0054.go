@@ -23,7 +23,7 @@ import (
 	"mellium.im/xmpp/jid"
 	"mellium.im/xmpp/stanza"
 
-	"github.com/mautrix/jabber/pkg/telemetry"
+	"github.com/williamkray/jmpchat-matrix-bridge/pkg/telemetry"
 )
 
 const (

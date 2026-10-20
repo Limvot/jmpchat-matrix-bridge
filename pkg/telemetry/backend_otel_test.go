@@ -71,7 +71,7 @@ func TestResourcePrecedence(t *testing.T) {
 		return out
 	}
 	a := get(map[string]string{})
-	if a["service.name"] != "mautrix-jabber" || a["service.version"] != "1.0" ||
+	if a["service.name"] != "jmpchat-matrix-bridge" || a["service.version"] != "1.0" ||
 		a["git.commit.sha"] != "abc123" || a["git.repository_url"] != "https://example.com/repo" {
 		t.Errorf("defaults: %v", a)
 	}

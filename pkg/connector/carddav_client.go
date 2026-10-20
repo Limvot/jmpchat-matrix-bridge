@@ -15,7 +15,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 
-	"github.com/mautrix/jabber/pkg/telemetry"
+	"github.com/williamkray/jmpchat-matrix-bridge/pkg/telemetry"
 )
 
 const maxCardDAVRedirectHops = 3

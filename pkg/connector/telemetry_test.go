@@ -11,7 +11,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"maunium.net/go/mautrix/bridgev2/simplevent"
 
-	"github.com/mautrix/jabber/pkg/telemetry"
+	"github.com/williamkray/jmpchat-matrix-bridge/pkg/telemetry"
 )
 
 // assertFields checks that out is one JSON line holding each trace key exactly once, with the

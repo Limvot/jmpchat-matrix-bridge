@@ -1,6 +1,18 @@
-# mautrix-jabber
+# jmpchat-matrix-bridge
 
-A Matrix–Jabber (XMPP) puppeting bridge. Use your Matrix account to send and receive messages with Jabber users and join Jabber MUCs, with double-puppet support. Primary use case is for bridging JMP.chat (Cheogram) messages to matrix, for this reason PM handling is much more thorough than multi-user chat (MUC) capabilities. If using this for more broad Jabber/XMPP use cases, you may be better served by a different project.
+A Matrix <-> Jabber/XMPP puppeting bridge built for [JMP.chat](https://jmp.chat): SMS/MMS through Cheogram, SIP calls (to MatrixRTC), CardDAV contact import, and a Dialpad widget. It is also a regular Jabber/XMPP puppeting bridge (DMs, MUCs, media, reactions, replies, carbons, MAM backfill); the Cheogram, SIP and CardDAV features are optional extras you can ignore. Use your Matrix account to send and receive messages with Jabber users, with double-puppet support. PM handling is much more thorough than multi-user chat (MUC) capabilities. Not affiliated with the mautrix project; built on the mautrix-go bridgev2 library.
+
+## Formerly mautrix-jabber / migrating
+
+This project was called mautrix-jabber before version 0.6.0 (docs of earlier releases use the old name). Upgrading is a drop-in change:
+
+- (a) Your existing config, `registration.yaml`, database (including the database owner marker, which stays `megabridge/mautrix-jabber`; never change it), rooms, ghosts, the `!jabber` command prefix, the appservice id and ports keep working unchanged. No registration regeneration is needed.
+- (b) What changed: the Docker image is `williamkray/jmpchat-matrix-bridge` and the binary is `jmpchat-matrix-bridge`; paths `/app` and `/data` and the entrypoint behavior are unchanged. Update your compose `image:` and any command that invokes the binary by name.
+- (b2) The old binary path `/app/mautrix-jabber` remains in the image as a compat symlink for custom entrypoints/commands; it will be removed in a later major version.
+- (c) The old image `williamkray/mautrix-jabber` gets no new tags (last: v0.5.0) and is deprecated.
+- (d) The default telemetry `service.name` is now `jmpchat-matrix-bridge`: update dashboards/monitors, or set `OTEL_SERVICE_NAME=mautrix-jabber` (or `DD_SERVICE`) to keep the old name; explicitly set values are unaffected.
+- (e) `MAUTRIX_JABBER_CHEOGRAM` is still read; `JMPCHAT_BRIDGE_CHEOGRAM` is preferred.
+- (f) Double-puppeted events now carry `fi.mau.double_puppet_source=jmpchat-matrix-bridge`, and the Matrix HTTP User-Agent changed. The `m.bridge` room state `protocol.id` becomes `github.com/williamkray/jmpchat-matrix-bridge`; existing rooms switch over gradually as their bridge info is next updated.
 
 ## Prerequisites
 
@@ -19,10 +31,10 @@ Default build includes **Matrix end-to-bridge encryption (E2BE)** and requires C
 Or with Go (libolm dev headers must be installed):
 
 ```bash
-CGO_ENABLED=1 go build -ldflags "-s -w" -o mautrix-jabber ./cmd/mautrix-jabber
+CGO_ENABLED=1 go build -ldflags "-s -w" -o jmpchat-matrix-bridge ./cmd/jmpchat-matrix-bridge
 ```
 
-To build without encryption support (no libolm): `go build -tags nocrypto -ldflags "-s -w" -o mautrix-jabber ./cmd/mautrix-jabber`. The Docker image is built with E2BE and SIP call support. To include [calls](#calls-sip-via-jmp) in a Go build, add the tags `sipcalls nolibopusfile` (e.g. `-tags "nocrypto sipcalls nolibopusfile"`; needs libopus dev headers and pkg-config).
+To build without encryption support (no libolm): `go build -tags nocrypto -ldflags "-s -w" -o jmpchat-matrix-bridge ./cmd/jmpchat-matrix-bridge`. The Docker image is built with E2BE and SIP call support. To include [calls](#calls-sip-via-jmp) in a Go build, add the tags `sipcalls nolibopusfile` (e.g. `-tags "nocrypto sipcalls nolibopusfile"`; needs libopus dev headers and pkg-config).
 
 ## Setup
 
@@ -33,13 +45,13 @@ The bridge follows the same setup flow as other mautrix Go bridges: generate an 
 Generate `config.yaml` from the built-in example:
 
 ```bash
-./mautrix-jabber -e
+./jmpchat-matrix-bridge -e
 ```
 
 This writes `config.yaml` (or use `-c path` to choose a file). To print the example to stdout instead of writing a file, use `-c -`:
 
 ```bash
-./mautrix-jabber -e -c -
+./jmpchat-matrix-bridge -e -c -
 ```
 
 ### 2. Edit config
@@ -48,7 +60,7 @@ In `config.yaml` set at least:
 
 - **`database`**  
   - PostgreSQL: `type: postgres` and a real `uri` (e.g. `postgres://user:password@host/db?sslmode=disable`).  
-  - SQLite (e.g. for local testing): `type: sqlite3-fk-wal` and `uri: file:mautrix-jabber.db?_txlock=immediate`.
+  - SQLite (e.g. for local testing): `type: sqlite3-fk-wal` and `uri: file:jmpchat-matrix-bridge.db?_txlock=immediate`.
 
 - **`homeserver.address`** – URL the bridge uses to reach the homeserver (e.g. `http://localhost:8008`).
 
@@ -56,7 +68,7 @@ In `config.yaml` set at least:
 
 - **`appservice`** – `address`, `hostname`, `port` so the homeserver can reach the bridge. The rest can stay as generated.
 
-**Cheogram (SMS/MMS):** Set `network.cheogram: true` to resolve phone numbers and short codes to Cheogram JIDs (e.g. `!jabber pm 2121112222` → +12121112222@cheogram.com). Fallback: `MAUTRIX_JABBER_CHEOGRAM=true` if connector config is not available.
+**Cheogram (SMS/MMS):** Set `network.cheogram: true` to resolve phone numbers and short codes to Cheogram JIDs (e.g. `!jabber pm 2121112222` → +12121112222@cheogram.com). Fallback: `JMPCHAT_BRIDGE_CHEOGRAM=true` if connector config is not available (the pre-rename `MAUTRIX_JABBER_CHEOGRAM` is still accepted).
 
   When Cheogram is enabled, **group MMS** is also supported. Cheogram represents group MMS conversations as a single JID whose local part is a comma-separated list of phone numbers (e.g. `+12121112222,+12023334444@cheogram.com`). The bridge treats that as one portal but creates a separate Matrix ghost for each number, so display names and roster resolution apply per participant. Outbound: `!jabber pm 212-111-2222, 2023334444, 18188675309` normalizes and sorts the numbers, then opens a DM with the combined JID. Inbound: messages from that JID are attributed to the correct sender (from a `<xmpp:JID>` body prefix when present, or the first number as fallback), and that prefix is stripped from the bridged message body.
 
@@ -67,13 +79,13 @@ In `config.yaml` set at least:
 Generate the appservice registration from your config (required for the homeserver to accept the bridge):
 
 ```bash
-./mautrix-jabber -g
+./jmpchat-matrix-bridge -g
 ```
 
 Or with custom paths:
 
 ```bash
-./mautrix-jabber -g -c config.yaml -r registration.yaml
+./jmpchat-matrix-bridge -g -c config.yaml -r registration.yaml
 ```
 
 This:
@@ -107,13 +119,13 @@ Restart the homeserver. It should start without error; if it does not, check `re
 ### 5. Run the bridge
 
 ```bash
-./mautrix-jabber
+./jmpchat-matrix-bridge
 ```
 
 Or with custom paths:
 
 ```bash
-./mautrix-jabber -c config.yaml -r registration.yaml
+./jmpchat-matrix-bridge -c config.yaml -r registration.yaml
 ```
 
 The bridge will listen on `appservice.hostname` and `appservice.port`. When the homeserver sends appservice transactions to `appservice.address`, the bridge should handle them without crashing.
@@ -229,15 +241,15 @@ For more details, see [End-to-bridge encryption](https://docs.mau.fi/bridges/gen
 Build the image:
 
 ```bash
-docker build $(./build-args.sh) -t mautrix-jabber .
+docker build $(./build-args.sh) -t jmpchat-matrix-bridge .
 ```
 
-`./build-args.sh` passes the git commit, tag, repository URL and build time into the build (the `.git` directory isn't part of the build context). They stamp the bridge version string, set the `org.opencontainers.image.revision` / `org.opencontainers.image.source` image labels, and are sent as `git.commit.sha` / `git.repository_url` on traces (used by Datadog's source code integration). A plain `docker build -t mautrix-jabber .` still works; the version then shows `+dev.unknown` and the git metadata is omitted.
+`./build-args.sh` passes the git commit, tag, repository URL and build time into the build (the `.git` directory isn't part of the build context). They stamp the bridge version string, set the `org.opencontainers.image.revision` / `org.opencontainers.image.source` image labels, and are sent as `git.commit.sha` / `git.repository_url` on traces (used by Datadog's source code integration). A plain `docker build -t jmpchat-matrix-bridge .` still works; the version then shows `+dev.unknown` and the git metadata is omitted.
 
 **First run (no config):** Run the container with no arguments and nothing mounted at `/data`. It prints an example config to stdout and exits:
 
 ```bash
-docker run --rm mautrix-jabber > config.yaml
+docker run --rm jmpchat-matrix-bridge > config.yaml
 ```
 
 Edit `config.yaml` (database, `homeserver.address`, `homeserver.domain`, `appservice`, `bridge.permissions`). Then generate the registration. The bridge updates the config file when generating tokens, so use a **directory mount** (not single-file mounts) to avoid "device or resource busy" on some systems:
@@ -245,19 +257,19 @@ Edit `config.yaml` (database, `homeserver.address`, `homeserver.domain`, `appser
 ```bash
 mkdir -p ./bridge-data && cp config.yaml ./bridge-data/
 docker run --rm -v "$(pwd)/bridge-data:/data:rw" \
-  mautrix-jabber -c /data/config.yaml -r /data/registration.yaml -g
+  jmpchat-matrix-bridge -c /data/config.yaml -r /data/registration.yaml -g
 ```
 
 Add `./bridge-data/registration.yaml` to your homeserver, then run the bridge with the same directory mounted at `/data`. With no arguments, the container runs the bridge using `/data/config.yaml` and `/data/registration.yaml`:
 
 ```bash
-docker run -d --name mautrix-jabber \
+docker run -d --name jmpchat-matrix-bridge \
   -v "$(pwd)/bridge-data:/data" \
   -p 29318:29318 \
-  mautrix-jabber
+  jmpchat-matrix-bridge
 ```
 
-Use `appservice.hostname: 0.0.0.0` in config so the bridge listens on all interfaces. For SQLite, set `database.uri` to `file:/data/mautrix-jabber.db?_txlock=immediate` so the database lives in the same mounted directory. Postgres is also supported.
+Use `appservice.hostname: 0.0.0.0` in config so the bridge listens on all interfaces. For SQLite, set `database.uri` to `file:/data/jmpchat-matrix-bridge.db?_txlock=immediate` so the database lives in the same mounted directory. Postgres is also supported.
 
 ## Tracing (OpenTelemetry)
 
@@ -276,7 +288,7 @@ Tracing is optional and **off by default**. It is enabled purely by environment 
 | `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES` | Standard resource settings; these override the `DD_*` fallbacks below. |
 | `OTEL_BSP_SCHEDULE_DELAY`, other `OTEL_BSP_*` | Batch export tuning, e.g. `1000` (ms) for faster delivery while testing. |
 
-Resource defaults: `service.name` is `mautrix-jabber` and `service.version` is the bridge version. `DD_SERVICE`, `DD_VERSION` and `DD_ENV` (sets both `deployment.environment.name` and `deployment.environment`) are used as fallbacks, and the `OTEL_*` variables above take precedence over them. `git.commit.sha` and `git.repository_url` come from the build metadata (see [Docker](#docker)); `DD_GIT_COMMIT_SHA` / `DD_GIT_REPOSITORY_URL` override them.
+Resource defaults: `service.name` is `jmpchat-matrix-bridge` and `service.version` is the bridge version. `DD_SERVICE`, `DD_VERSION` and `DD_ENV` (sets both `deployment.environment.name` and `deployment.environment`) are used as fallbacks, and the `OTEL_*` variables above take precedence over them. `git.commit.sha` and `git.repository_url` come from the build metadata (see [Docker](#docker)); `DD_GIT_COMMIT_SHA` / `DD_GIT_REPOSITORY_URL` override them.
 
 **Match the protocol to the port.** Port 4317 is gRPC and port 4318 is HTTP. If the configured protocol and port disagree (for example `http/protobuf` against `:4317`), the bridge logs a startup warning and you will see export errors in the log. On success it logs one `OpenTelemetry tracing enabled` line with the protocol, `scheme://host:port` and sampler.
 
@@ -291,7 +303,7 @@ OTEL_EXPORTER_OTLP_PROTOCOL=grpc
 OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
 OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
 
-OTEL_SERVICE_NAME=mautrix-jabber
+OTEL_SERVICE_NAME=jmpchat-matrix-bridge
 OTEL_RESOURCE_ATTRIBUTES=deployment.environment.name=prod
 ```
 
@@ -318,7 +330,7 @@ OTEL_EXPORTER_OTLP_PROTOCOL=grpc
 OTEL_EXPORTER_OTLP_ENDPOINT=http://datadog-agent:4318
 OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
 
-DD_SERVICE=mautrix-jabber   # optional
+DD_SERVICE=jmpchat-matrix-bridge   # optional
 DD_ENV=prod                 # optional
 DD_VERSION=0.1.8            # optional
 ```
@@ -327,14 +339,14 @@ DD_VERSION=0.1.8            # optional
 
 ```yaml
 services:
-  mautrix-jabber:
-    image: williamkray/mautrix-jabber
+  jmpchat-matrix-bridge:
+    image: williamkray/jmpchat-matrix-bridge
     volumes:
       - ./bridge-data:/data
     environment:
       OTEL_EXPORTER_OTLP_ENDPOINT: http://datadog-agent:4317
       OTEL_EXPORTER_OTLP_PROTOCOL: grpc
-      DD_SERVICE: mautrix-jabber
+      DD_SERVICE: jmpchat-matrix-bridge
       DD_ENV: prod
     depends_on: [datadog-agent]
 
@@ -444,7 +456,7 @@ Calls to and from JMP/Cheogram numbers ring in the same Matrix room as the texts
 - Unencrypted portals (the call rooms must not use Matrix encryption).
 - `network.cheogram: true` and JMP SIP credentials for the account.
 
-**Enable**: set `network.calls.enabled: true` and review the rest of the `network.calls` section in the example config (`./mautrix-jabber -e`).
+**Enable**: set `network.calls.enabled: true` and review the rest of the `network.calls` section in the example config (`./jmpchat-matrix-bridge -e`).
 
 **Commands** (prefix `!jabber`):
 
@@ -474,9 +486,9 @@ Roster-only calls uses the bridge's Jabber roster as the list of known numbers (
 
 2. **Synapse** – After adding the registration and restarting, Synapse starts and does not reject the file. If using E2BE, verify experimental features (`msc2409_to_device_messages_enabled`, `msc3202_transaction_extensions`) are enabled in `homeserver.yaml`.
 
-3. **Bridge** – `./mautrix-jabber` starts, binds to the appservice port, and does not panic when it receives `/transactions` from the homeserver. If using E2BE, check logs for "End-to-bridge encryption is in appservice mode" and verify no `NotImplementedError` from Synapse.
+3. **Bridge** – `./jmpchat-matrix-bridge` starts, binds to the appservice port, and does not panic when it receives `/transactions` from the homeserver. If using E2BE, check logs for "End-to-bridge encryption is in appservice mode" and verify no `NotImplementedError` from Synapse.
 
-**Local run (no Synapse):** use a config with `database.type: sqlite3-fk-wal` and `database.uri: file:mautrix-jabber-verify.db?_txlock=immediate`, `homeserver.address` and `homeserver.domain` set, and `bridge.permissions` including your domain. Generate registration with `-g -c config.verify.yaml -r registration.verify.yaml`, then run `./mautrix-jabber -c config.verify.yaml -r registration.verify.yaml`. The bridge will start, listen on the appservice port, and retry the homeserver (connection refused if Synapse is not running). Full `/transactions` handling can only be checked with a real homeserver.
+**Local run (no Synapse):** use a config with `database.type: sqlite3-fk-wal` and `database.uri: file:mautrix-jabber-verify.db?_txlock=immediate`, `homeserver.address` and `homeserver.domain` set, and `bridge.permissions` including your domain. Generate registration with `-g -c config.verify.yaml -r registration.verify.yaml`, then run `./jmpchat-matrix-bridge -c config.verify.yaml -r registration.verify.yaml`. The bridge will start, listen on the appservice port, and retry the homeserver (connection refused if Synapse is not running). Full `/transactions` handling can only be checked with a real homeserver.
 
 ## Troubleshooting
 

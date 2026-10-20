@@ -7,6 +7,8 @@ import (
 	"maunium.net/go/mautrix/event"
 )
 
+// jabberCapID is a stored/compared capability ID, not a project name: it deliberately keeps the
+// pre-rename value (changing it would make bridgev2 re-send room features for every room).
 const jabberCapID = "github.com/mautrix/jabber.capabilities.2025_02"
 
 // jabberCaps declares which message types the bridge is allowed to send to the connector.

@@ -1,4 +1,5 @@
 # Build
+/jmpchat-matrix-bridge
 /mautrix-jabber
 
 # Config and registration (contain secrets and local paths)

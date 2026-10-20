@@ -83,9 +83,9 @@ type cdHarness struct {
 func newCDHarness(t *testing.T, cfg CardDAVConfig, cheogram bool) *cdHarness {
 	t.Helper()
 	if cheogram {
-		t.Setenv("MAUTRIX_JABBER_CHEOGRAM", "1")
+		t.Setenv("JMPCHAT_BRIDGE_CHEOGRAM", "1")
 	} else {
-		t.Setenv("MAUTRIX_JABBER_CHEOGRAM", "0")
+		t.Setenv("JMPCHAT_BRIDGE_CHEOGRAM", "0")
 	}
 	h := &cdHarness{t: t, bot: &cdBot{}}
 	h.ul = cardDAVTestLogin()

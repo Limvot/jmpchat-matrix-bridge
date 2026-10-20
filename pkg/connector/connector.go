@@ -22,7 +22,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/mautrix/jabber/pkg/telemetry"
+	"github.com/williamkray/jmpchat-matrix-bridge/pkg/telemetry"
 )
 
 // JabberConfig is the connector-specific config under network.jabber (framework nests it by network ID).
@@ -140,18 +140,35 @@ func (c *JabberConnector) SetAppServiceID(id string) {
 	c.appServiceID = id
 }
 
+const (
+	cheogramEnvVar       = "JMPCHAT_BRIDGE_CHEOGRAM"
+	cheogramEnvVarLegacy = "MAUTRIX_JABBER_CHEOGRAM" // pre-rename name, still honoured
+)
+
+// cheogramEnv reports the env fallback: JMPCHAT_BRIDGE_CHEOGRAM wins when set to a
+// parseable bool (even false); otherwise the legacy MAUTRIX_JABBER_CHEOGRAM is used.
+func cheogramEnv() bool {
+	for _, name := range []string{cheogramEnvVar, cheogramEnvVarLegacy} {
+		v := strings.TrimSpace(strings.ToLower(os.Getenv(name)))
+		if v == "" {
+			continue
+		}
+		if b, err := strconv.ParseBool(v); err == nil {
+			return b
+		}
+	}
+	return false
+}
+
 // CheogramEnabled returns true if network.cheogram is true in the config,
-// or if MAUTRIX_JABBER_CHEOGRAM is true/1 (fallback when config is unavailable).
+// or if JMPCHAT_BRIDGE_CHEOGRAM (legacy MAUTRIX_JABBER_CHEOGRAM) is true/1 (fallback when config is unavailable).
 func CheogramEnabled(br *bridgev2.Bridge) bool {
 	if br != nil {
 		if cfg := getJabberConfigFromBridge(br); cfg != nil && cfg.Cheogram {
 			return true
 		}
 	}
-	if b, err := strconv.ParseBool(strings.TrimSpace(strings.ToLower(os.Getenv("MAUTRIX_JABBER_CHEOGRAM")))); err == nil && b {
-		return true
-	}
-	return false
+	return cheogramEnv()
 }
 
 // getJabberConfigFromBridge returns the connector's network config. The bridge's Config is only
@@ -186,7 +203,7 @@ func (c *JabberConnector) GetName() bridgev2.BridgeName {
 		DisplayName:         "Jabber",
 		NetworkURL:          "https://xmpp.org/",
 		NetworkID:           "jabber",
-		BeeperBridgeType:    "github.com/mautrix/jabber",
+		BeeperBridgeType:    "github.com/williamkray/jmpchat-matrix-bridge",
 		DefaultPort:         29318, // mau.fi/ports or any free port
 		DefaultCommandPrefix: "!jabber",
 	}

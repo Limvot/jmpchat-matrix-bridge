@@ -106,7 +106,7 @@ func TestInitServiceName(t *testing.T) {
 	var got mrtctelemetry.Options
 	mrtcInit = func(_ context.Context, o mrtctelemetry.Options) { got = o }
 	Init(context.Background(), Options{ServiceVersion: "1.2.3", CommitSHA: "abc", RepositoryURL: "https://example.invalid/r", Log: zerolog.Nop()})
-	if got.ServiceName != "mautrix-jabber" || got.ServiceVersion != "1.2.3" || got.CommitSHA != "abc" || got.RepositoryURL != "https://example.invalid/r" {
+	if got.ServiceName != "jmpchat-matrix-bridge" || got.ServiceVersion != "1.2.3" || got.CommitSHA != "abc" || got.RepositoryURL != "https://example.invalid/r" {
 		t.Fatalf("unexpected options %+v", got)
 	}
 	if Enabled() {

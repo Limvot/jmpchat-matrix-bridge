@@ -15,7 +15,7 @@ import (
 )
 
 // serviceName is the resource service.name default of this binary.
-const serviceName = "mautrix-jabber"
+const serviceName = "jmpchat-matrix-bridge"
 
 // mrtcInit is a test seam.
 var mrtcInit = mrtctelemetry.Init

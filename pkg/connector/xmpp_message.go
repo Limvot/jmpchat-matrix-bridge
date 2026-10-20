@@ -15,7 +15,7 @@ import (
 	"mellium.im/xmpp/stanza"
 	"mellium.im/xmlstream"
 
-	"github.com/mautrix/jabber/pkg/telemetry"
+	"github.com/williamkray/jmpchat-matrix-bridge/pkg/telemetry"
 )
 
 const (

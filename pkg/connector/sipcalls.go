@@ -35,7 +35,7 @@ func init() {
 // postInit when the config decoded (enabled or not; the commands check x.enabled themselves).
 var registerCallsCommands func(x *callsExt, proc *commands.Processor)
 
-// callsExt embeds the mrtc-sip-bridge call core in mautrix-jabber: one SIP account per jabber login,
+// callsExt embeds the mrtc-sip-bridge call core in jmpchat-matrix-bridge: one SIP account per jabber login,
 // calls ring in the caller's Cheogram portal.
 type callsExt struct {
 	c   *JabberConnector
