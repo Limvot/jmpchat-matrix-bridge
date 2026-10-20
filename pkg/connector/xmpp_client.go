@@ -1561,7 +1561,7 @@ func (x *xmppClient) joinMUC(ctx context.Context, roomJIDStr string, hist *mucHi
 		return fmt.Errorf("MUC JID with resource: %w", err)
 	}
 	// Track pending join so presence handler can store our occupant JID (and detect 409).
-	x.startMUCJoinTrack(roomJIDStr, base, nick)
+	x.startMUCJoinTrack(roomJIDStr, base, nick, hist)
 	if err := x.sendMUCJoin(ctx, roomJIDStr, nick, hist); err != nil {
 		x.dropMUCJoinTrack(roomJIDStr)
 		return err
