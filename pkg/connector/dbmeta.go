@@ -9,8 +9,12 @@ import (
 type PortalMetadata struct {
 	// Lazy resync tracking - resync portal if LastSync is older than 24 hours
 	LastSync jsontime.Unix `json:"last_sync,omitempty"`
-	// MUCPreferredNick is the preferred MUC nickname for this room (room-specific; used by JoinMUC and 409 retry).
+	// MUCPreferredNick is the user-set MUC nickname for this room (muc-nick; used by JoinMUC and as the base of 409 retries).
 	MUCPreferredNick string `json:"muc_preferred_nick,omitempty"`
+	// MUCAutoNick is an alternative nick the bridge picked after the preferred one got a 409; it is
+	// only used while the preferred nick still equals MUCAutoNickBase. Never set by the user.
+	MUCAutoNick     string `json:"muc_auto_nick,omitempty"`
+	MUCAutoNickBase string `json:"muc_auto_nick_base,omitempty"`
 }
 
 // GhostMetadata stores ghost user metadata for profile refresh tracking.

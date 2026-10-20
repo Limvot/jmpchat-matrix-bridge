@@ -53,6 +53,13 @@ type xmppClient struct {
 	queueHook func(bridgev2.RemoteEvent) bridgev2.EventHandlingResult
 	// noticeHook, when set (tests only), receives portal notices instead of the bridge bot.
 	noticeHook func(portal *bridgev2.Portal, text string)
+	// mucNoticeHook / mucNickSaveHook / mucSendJoinHook (tests only) replace the MUC nick notices,
+	// the auto-nick persistence and the join presence send.
+	mucNoticeHook    func(roomBare, text string)
+	mucNickSaveHook  func(roomBare, base, nick string) error
+	mucSendJoinHook  func(roomBare, nick string) error
+	// mucJoinTracks follows 409 retry chains per room; guarded by mucPendingJoinMu.
+	mucJoinTracks map[string]*mucJoinTrack
 	mu          sync.Mutex
 	session     *xmpp.Session
 	// sessionCancel cancels the context shared by this session's background goroutines (roster
@@ -1503,32 +1510,11 @@ func (x *xmppClient) dmCreateChatResponse(jidStr string) *bridgev2.CreateChatRes
 	return resp
 }
 
-// getPreferredMUCNick returns the nick to use for joining the given MUC: room-specific preferred,
-// then default preferred, then login localpart / "bridge".
+// getPreferredMUCNick returns the nick to use for joining the given MUC: a remembered automatic
+// alternative (see chooseMUCNick), else room-specific preferred, default preferred, or the login
+// localpart / "bridge".
 func (x *xmppClient) getPreferredMUCNick(ctx context.Context, roomJIDStr string) string {
-	// Room-specific preferred nick (portal metadata)
-	if x.conn != nil && x.conn.br != nil {
-		portalKey := networkid.PortalKey{ID: networkid.PortalID(roomJIDStr), Receiver: x.loginID}
-		if portal, err := x.conn.br.GetPortalByKey(ctx, portalKey); err == nil && portal != nil {
-			if meta, _ := portal.Metadata.(*PortalMetadata); meta != nil && meta.MUCPreferredNick != "" {
-				return meta.MUCPreferredNick
-			}
-		}
-	}
-	// Default preferred nick (login metadata)
-	if x.login != nil {
-		if meta, _ := x.login.Metadata.(*JabberLoginMeta); meta != nil && meta.DefaultMUCNick != "" {
-			return meta.DefaultMUCNick
-		}
-	}
-	// Fallback: localpart of login JID or "bridge"
-	nick := string(x.loginID)
-	if at := strings.IndexByte(nick, '@'); at > 0 {
-		nick = nick[:at]
-	}
-	if nick == "" {
-		nick = "bridge"
-	}
+	_, nick := x.mucNickChoice(ctx, roomJIDStr)
 	return nick
 }
 
@@ -1546,6 +1532,32 @@ func (x *xmppClient) JoinMUC(ctx context.Context, roomJIDStr string) error {
 }
 
 func (x *xmppClient) joinMUC(ctx context.Context, roomJIDStr string) error {
+	roomJID, err := jid.Parse(roomJIDStr)
+	if err != nil {
+		return fmt.Errorf("invalid MUC JID %q: %w", roomJIDStr, err)
+	}
+	base, nick := x.mucNickChoice(ctx, roomJIDStr)
+	if _, err := roomJID.WithResource(nick); err != nil {
+		return fmt.Errorf("MUC JID with resource: %w", err)
+	}
+	// Track pending join so presence handler can store our occupant JID (and detect 409).
+	x.startMUCJoinTrack(roomJIDStr, base, nick)
+	if err := x.sendMUCJoin(ctx, roomJIDStr, nick); err != nil {
+		x.dropMUCJoinTrack(roomJIDStr)
+		return err
+	}
+	x.logFor(ctx).Info().
+		Str("room", roomJIDStr).
+		Str("nick", nick).
+		Msg("Sent MUC join presence")
+	return nil
+}
+
+// sendMUCJoin sends the XEP-0045 join presence for room/nick.
+func (x *xmppClient) sendMUCJoin(ctx context.Context, roomJIDStr, nick string) error {
+	if x.mucSendJoinHook != nil {
+		return x.mucSendJoinHook(roomJIDStr, nick)
+	}
 	x.mu.Lock()
 	sess := x.session
 	x.mu.Unlock()
@@ -1556,81 +1568,18 @@ func (x *xmppClient) joinMUC(ctx context.Context, roomJIDStr string) error {
 	if err != nil {
 		return fmt.Errorf("invalid MUC JID %q: %w", roomJIDStr, err)
 	}
-	nick := x.getPreferredMUCNick(ctx, roomJIDStr)
 	toJID, err := roomJID.WithResource(nick)
 	if err != nil {
 		return fmt.Errorf("MUC JID with resource: %w", err)
 	}
-	// Track pending join so presence handler can store our occupant JID (and detect 409).
-	x.mucPendingJoinMu.Lock()
-	if x.mucPendingJoin == nil {
-		x.mucPendingJoin = make(map[string]string)
-	}
-	x.mucPendingJoin[roomJIDStr] = nick
-	x.mucPendingJoinMu.Unlock()
-
 	// XEP-0045: optional <x xmlns='http://jabber.org/protocol/muc'/> so servers treat this as a MUC join.
 	mucX := xml.StartElement{Name: xml.Name{Space: "http://jabber.org/protocol/muc", Local: "x"}}
 	payload := xmlstream.Wrap(nil, mucX)
 	p := stanza.Presence{To: toJID}.Wrap(payload)
 	if err := sess.Send(ctx, p); err != nil {
-		x.mucPendingJoinMu.Lock()
-		delete(x.mucPendingJoin, roomJIDStr)
-		x.mucPendingJoinMu.Unlock()
 		return fmt.Errorf("send MUC join presence: %w", err)
 	}
-	x.logFor(ctx).Info().
-		Str("room", roomJIDStr).
-		Str("nick", nick).
-		Msg("Sent MUC join presence")
 	return nil
-}
-
-// retryMUCJoinAfterConflict sends a MUC join with an alternative nick (triedNick+"_1") after a 409 conflict.
-// Called from the presence handler; runs in a goroutine.
-func (x *xmppClient) retryMUCJoinAfterConflict(roomBare, triedNick string) {
-	ctx, span := telemetry.Start(context.Background(), "xmpp.muc.join_retry", trace.WithSpanKind(trace.SpanKindProducer))
-	defer span.End()
-	log := x.logFor(ctx)
-	if span.IsRecording() {
-		span.SetAttributes(attribute.String("xmpp.room.jid", roomBare))
-	}
-	altNick := triedNick + "_1"
-	x.mu.Lock()
-	sess := x.session
-	x.mu.Unlock()
-	if sess == nil {
-		log.Warn().Str("room", roomBare).Msg("MUC 409 retry skipped: not connected")
-		return
-	}
-	roomJID, err := jid.Parse(roomBare)
-	if err != nil {
-		log.Warn().Err(err).Str("room", roomBare).Msg("MUC 409 retry: invalid room JID")
-		return
-	}
-	toJID, err := roomJID.WithResource(altNick)
-	if err != nil {
-		log.Warn().Err(err).Str("room", roomBare).Msg("MUC 409 retry: failed to build JID")
-		return
-	}
-	x.mucPendingJoinMu.Lock()
-	if x.mucPendingJoin == nil {
-		x.mucPendingJoin = make(map[string]string)
-	}
-	x.mucPendingJoin[roomBare] = altNick
-	x.mucPendingJoinMu.Unlock()
-
-	mucX := xml.StartElement{Name: xml.Name{Space: "http://jabber.org/protocol/muc", Local: "x"}}
-	payload := xmlstream.Wrap(nil, mucX)
-	p := stanza.Presence{To: toJID}.Wrap(payload)
-	if err := sess.Send(ctx, p); err != nil {
-		x.mucPendingJoinMu.Lock()
-		delete(x.mucPendingJoin, roomBare)
-		x.mucPendingJoinMu.Unlock()
-		log.Warn().Err(err).Str("room", roomBare).Str("nick", altNick).Msg("MUC 409 retry: send failed")
-		return
-	}
-	log.Info().Str("room", roomBare).Str("nick", altNick).Msg("MUC 409 retry: sent join with alternative nick")
 }
 
 // getMUCOurOccupantJID returns our full occupant JID (room@service/nick) for the given MUC room if known.

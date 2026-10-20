@@ -537,7 +537,7 @@ func SetMUCPreferredNickForRoom(ctx context.Context, br *bridgev2.Bridge, loginI
 	if meta == nil {
 		meta = &PortalMetadata{}
 	}
-	meta.MUCPreferredNick = nick
+	setExplicitMUCNick(meta, nick)
 	portal.Metadata = meta
 	return portal.Save(ctx)
 }
