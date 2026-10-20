@@ -380,20 +380,28 @@ func TestRedactPartsWithReason(t *testing.T) {
 // ---- tombstone record ----
 
 func TestRetractedKeyFormat(t *testing.T) {
-	if got := retractedKey("me@example.com", "Room@MUC.example.com", "S1"); got != "jabber_retracted:me@example.com:room@muc.example.com:S1" {
+	if got := retractedKey("me@example.com", "Room@MUC.example.com", "snd=room%2Fbob", "S1"); got != "jabber_retracted:me@example.com:room@muc.example.com:snd=room%2Fbob:S1" {
 		t.Errorf("key = %q", got)
+	}
+	if got := senderScopes("Room@MUC.example.com/Bob:x", "OCC 1"); fmt.Sprint(got) != "[snd=room%40muc.example.com%2Fbob%3Ax occ=OCC+1]" {
+		t.Errorf("scopes = %v", got)
 	}
 }
 
 func TestRetractedRefsOf(t *testing.T) {
 	got := retractedRefsOf([]*database.Message{
-		row(mucPortal(), "m1", "x", &MessageMetadata{XMPPMessageID: "m1", StanzaID: "S1", OriginID: "O1"}),
-		row(mucPortal(), "m1", "x", &MessageMetadata{StanzaID: "S1"}), // second part, duplicates collapse
+		row(mucPortal(), "m1", "Room@muc.example.com/Bob", &MessageMetadata{XMPPMessageID: "m1", StanzaID: "S1", OriginID: "O1", OccupantID: "OCC"}),
+		row(mucPortal(), "m1", "Room@muc.example.com/Bob", &MessageMetadata{StanzaID: "S1", OccupantID: "OCC"}), // second part, duplicates collapse
 		row(mucPortal(), "matrix:$e", "x", &MessageMetadata{XMPPMessageID: "gen"}),
 		row(mucPortal(), "old", "x", nil),
 	})
-	if fmt.Sprint(got) != "[m1 S1 O1 gen old]" {
-		t.Errorf("refs = %v (matrix: ids are not XMPP refs, aliases are)", got)
+	var keys []string
+	for _, r := range got {
+		keys = append(keys, r.Scope+"|"+r.Ref)
+	}
+	want := "[snd=room%40muc.example.com%2Fbob|m1 occ=OCC|m1 snd=room%40muc.example.com%2Fbob|S1 occ=OCC|S1 snd=room%40muc.example.com%2Fbob|O1 occ=OCC|O1 stanza|S1 snd=x|gen snd=x|old]"
+	if fmt.Sprint(keys) != want {
+		t.Errorf("refs = %v\nwant %s (matrix: ids are not XMPP refs, aliases are)", keys, want)
 	}
 }
 
@@ -407,19 +415,35 @@ func newDBClient(t *testing.T) (*xmppClient, *database.Database) {
 func TestRetractedRecordRealKV(t *testing.T) {
 	ctx := context.Background()
 	x, db := newDBClient(t)
-	if x.isRetracted(ctx, "room@muc.example.com", "S1", "") {
+	bob := retractedSender{senderID: "room@muc.example.com/bob", occupantID: "OCC-BOB"}
+	if x.isRetracted(ctx, "room@muc.example.com", bob, "S1", "") {
 		t.Fatal("nothing recorded yet")
 	}
-	markRetractedRefs(ctx, db.KV, retractTestLogin, "room@muc.example.com", []string{"S1", "m1"})
-	for _, ref := range []string{"S1", "m1"} {
-		if !x.isRetracted(ctx, "ROOM@muc.example.com", "nope", ref) {
-			t.Errorf("ref %s not found (portal id is case-insensitive)", ref)
-		}
+	victim := row(mucPortal(), "m1", "room@muc.example.com/bob", &MessageMetadata{StanzaID: "S1", OccupantID: "OCC-BOB"})
+	markRetractedRefs(ctx, db.KV, retractTestLogin, "room@muc.example.com", retractedRefsOf([]*database.Message{victim}))
+	if !x.isRetracted(ctx, "ROOM@muc.example.com", bob, "nope", "m1") {
+		t.Error("own id not found (portal id is case-insensitive)")
 	}
-	if x.isRetracted(ctx, "other@muc.example.com", "S1") {
+	// Same occupant under another nick (occupant scope), same nick without occupant-id (sender scope).
+	if !x.isRetracted(ctx, "room@muc.example.com", retractedSender{senderID: "room@muc.example.com/renamed", occupantID: "OCC-BOB"}, "m1") {
+		t.Error("occupant-id scope not matched")
+	}
+	if !x.isRetracted(ctx, "room@muc.example.com", retractedSender{senderID: "Room@muc.example.com/BOB"}, "m1") {
+		t.Error("sender scope not matched")
+	}
+	// Another occupant using the same id attribute or victim's stanza-id as its id is not suppressed.
+	mallory := retractedSender{senderID: "room@muc.example.com/mallory", occupantID: "OCC-M", stanzaID: "S-MAL"}
+	if x.isRetracted(ctx, "room@muc.example.com", mallory, "m1", "S1") {
+		t.Error("tombstone leaked to another sender")
+	}
+	// The room-assigned stanza-id is authoritative regardless of sender.
+	if !x.isRetracted(ctx, "room@muc.example.com", retractedSender{senderID: "room@muc.example.com/other", stanzaID: "S1"}, "zzz") {
+		t.Error("stanza-id tombstone not authoritative")
+	}
+	if x.isRetracted(ctx, "other@muc.example.com", bob, "m1", "S1") {
 		t.Error("record leaked into another portal")
 	}
-	if (&xmppClient{}).isRetracted(ctx, "a", "b") {
+	if (&xmppClient{}).isRetracted(ctx, "a", retractedSender{}, "b") {
 		t.Error("client without a bridge must not report retractions")
 	}
 }
@@ -427,18 +451,47 @@ func TestRetractedRecordRealKV(t *testing.T) {
 func TestConvertMessageIgnoresRetractedReplay(t *testing.T) {
 	ctx := context.Background()
 	x, db := newDBClient(t)
-	markRetractedRefs(ctx, db.KV, retractTestLogin, "room@muc.example.com", []string{"S-RETRACTED", "id-retracted"})
-	mk := func(id, stanza string) *jabberRemoteMessage {
-		return &jabberRemoteMessage{portalKey: mucPortal(), id: networkid.MessageID(id), stanzaID: stanza, body: "again", x: x}
+	const alice = "room@muc.example.com/alice"
+	victim := row(mucPortal(), "id-retracted", alice, &MessageMetadata{StanzaID: "S-RETRACTED", OccupantID: "OCC-A"})
+	markRetractedRefs(ctx, db.KV, retractTestLogin, "room@muc.example.com", retractedRefsOf([]*database.Message{victim}))
+	mk := func(sender, occ, id, stanza string) *jabberRemoteMessage {
+		return &jabberRemoteMessage{portalKey: mucPortal(), sender: bridgev2.EventSender{Sender: networkid.UserID(sender)}, occupantID: occ, id: networkid.MessageID(id), stanzaID: stanza, body: "again", x: x}
 	}
-	if _, err := mk("fresh-id", "S-RETRACTED").ConvertMessage(ctx, nil, nil); !errors.Is(err, bridgev2.ErrIgnoringRemoteEvent) {
+	if _, err := mk(alice, "OCC-A", "fresh-id", "S-RETRACTED").ConvertMessage(ctx, nil, nil); !errors.Is(err, bridgev2.ErrIgnoringRemoteEvent) {
 		t.Errorf("replay by stanza-id: err = %v", err)
 	}
-	if _, err := mk("id-retracted", "").ConvertMessage(ctx, nil, nil); !errors.Is(err, bridgev2.ErrIgnoringRemoteEvent) {
+	if _, err := mk(alice, "OCC-A", "id-retracted", "").ConvertMessage(ctx, nil, nil); !errors.Is(err, bridgev2.ErrIgnoringRemoteEvent) {
 		t.Errorf("replay by id attr: err = %v", err)
 	}
-	if cm, err := mk("fresh-id", "S-NEW").ConvertMessage(ctx, nil, nil); err != nil || cm == nil || len(cm.Parts) != 1 {
+	if cm, err := mk(alice, "OCC-A", "fresh-id", "S-NEW").ConvertMessage(ctx, nil, nil); err != nil || cm == nil || len(cm.Parts) != 1 {
 		t.Errorf("unrelated message must convert: %v %v", cm, err)
+	}
+	// Spoof: another occupant picks the victim's stanza-id or id attribute as its own message id.
+	for _, id := range []string{"S-RETRACTED", "id-retracted"} {
+		if cm, err := mk("room@muc.example.com/mallory", "OCC-M", id, "S-MALLORY").ConvertMessage(ctx, nil, nil); err != nil || cm == nil {
+			t.Errorf("message with spoofed id %s was suppressed: %v %v", id, cm, err)
+		}
+	}
+}
+
+// A MAM original hidden by an in-batch retraction is tombstoned so a later page cannot resurrect it.
+func TestMAMHiddenOriginalIsTombstoned(t *testing.T) {
+	ctx := context.Background()
+	x, _ := newDBClient(t)
+	orig := mamResultItem{From: "Bob@example.com/p", Type: "chat", StanzaID: "ORIG", ArchiveID: "A1", Body: "hi"}
+	retr := mamResultItem{From: "bob@example.com/q", Type: "chat", StanzaID: "R1", Retract: &retractInfo{Target: "ORIG"}}
+	b := collectBatchRetractions([]mamResultItem{orig, retr})
+	if !x.mamItemHidden(ctx, dmPortal(), orig, b) {
+		t.Fatal("original not hidden by the batch")
+	}
+	// A later page without the retraction.
+	if !x.mamItemHidden(ctx, dmPortal(), orig, nil) {
+		t.Error("original resurrected on a later page")
+	}
+	// Same id from somebody else is unaffected.
+	other := mamResultItem{From: "carol@example.com/p", Type: "chat", StanzaID: "ORIG", Body: "hi"}
+	if x.mamItemHidden(ctx, dmPortal(), other, nil) {
+		t.Error("tombstone leaked to another sender")
 	}
 }
 

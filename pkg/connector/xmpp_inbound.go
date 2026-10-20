@@ -1260,7 +1260,7 @@ func (m *jabberRemoteMessage) dbMeta() *MessageMetadata {
 func (m *jabberRemoteMessage) ConvertMessage(ctx context.Context, portal *bridgev2.Portal, intent bridgev2.MatrixAPI) (*bridgev2.ConvertedMessage, error) {
 	// bridgev2 deletes the row of a retracted message, so a replay (MUC history on join, MAM, backfill)
 	// would bring it back; the retracted-refs record keeps it out.
-	if m.x != nil && m.x.isRetracted(ctx, m.portalKey.ID, string(m.id), m.stanzaID, m.originID) {
+	if m.x != nil && m.x.isRetracted(ctx, m.portalKey.ID, retractedSender{senderID: string(m.sender.Sender), occupantID: m.occupantID, stanzaID: m.stanzaID}, string(m.id), m.stanzaID, m.originID) {
 		zerolog.Ctx(ctx).Debug().Msg("Ignoring replayed message that was retracted")
 		return nil, bridgev2.ErrIgnoringRemoteEvent
 	}
