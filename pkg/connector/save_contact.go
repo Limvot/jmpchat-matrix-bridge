@@ -92,12 +92,9 @@ func RemoveContactCommand(ce *commands.Event) {
 	if ce.Bridge != nil && ce.Bridge.Config != nil && ce.Bridge.Config.CommandPrefix != "" {
 		prefix = ce.Bridge.Config.CommandPrefix
 	}
-	// Outside a chat a target is required, so a lone login ID is the target, not an account selection.
-	minArgs := 1
-	if ce.Portal != nil && ce.Portal.Receiver != "" {
-		minArgs = 0
-	}
-	login, args, explicit := CommandLogin(ce, minArgs)
+	// A lone login ID is always the target, never an account selection: inside a chat
+	// `remove-from-roster <own-jid>` must not silently remove the chat's contact from that account instead.
+	login, args, explicit := CommandLogin(ce, 1)
 	reply := removeContactReply(ce.Ctx, prefix, ce.Portal, args,
 		func(p *bridgev2.Portal) *bridgev2.UserLogin {
 			if explicit {
