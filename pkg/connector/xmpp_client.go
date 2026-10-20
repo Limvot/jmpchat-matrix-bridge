@@ -58,6 +58,14 @@ type xmppClient struct {
 	mucNoticeHook    func(roomBare, text string)
 	mucNickSaveHook  func(roomBare, base, nick string) error
 	mucSendJoinHook  func(roomBare, nick string) error
+	// mucJoinHistHook, mucLeftHook, mucRejoinPortalsHook and mucNewestMsgHook (tests only) observe the
+	// join history request, replace the "left" flag persistence, the portal listing and the newest
+	// bridged message lookup of the MUC auto-rejoin (muc_autorejoin.go).
+	mucJoinHistHook      func(roomBare string, h *mucHistory)
+	mucLeftHook          func(roomBare string, left bool) error
+	mucLeaveHook         func(roomBare string) error // replaces the leave presence send
+	mucRejoinPortalsHook func(ctx context.Context) ([]*database.Portal, error)
+	mucNewestMsgHook     func(ctx context.Context, roomBare string) time.Time
 	// mucJoinTracks follows 409 retry chains per room; guarded by mucPendingJoinMu.
 	mucJoinTracks map[string]*mucJoinTrack
 	// mucJoinGen counts sessions for join state (bumped by resetMUCJoinState); guarded by mucPendingJoinMu.
@@ -234,6 +242,8 @@ func (x *xmppClient) Connect(ctx context.Context) {
 	// MUC occupant avatars: fresh occupant table per session (a rejoin re-sends every presence) and
 	// a single worker; presence handling on Serve only touches memory (xep0054_muc.go).
 	x.startMUCAvatars(sessCtx)
+	// Re-join every bridged MUC of this login (own root span, staggered, ends with sessCtx).
+	go x.runMUCAutoRejoin(sessCtx)
 }
 
 // endSessionLocked cancels the current session's background goroutine context. Requires x.mu held.
@@ -1530,12 +1540,18 @@ func (x *xmppClient) JoinMUC(ctx context.Context, roomJIDStr string) error {
 	if span.IsRecording() {
 		span.SetAttributes(attribute.String("xmpp.room.jid", roomJIDStr))
 	}
-	err := x.joinMUC(ctx, roomJIDStr)
+	// A join the user asked for (join command, sending, viewing the room) ends an earlier "leave".
+	if err := x.setMUCLeft(ctx, roomJIDStr, false); err != nil {
+		x.logFor(ctx).Warn().Err(err).Str("room", roomJIDStr).Msg("Failed to clear MUC left flag")
+	}
+	err := x.joinMUC(ctx, roomJIDStr, nil)
 	telemetry.Fail(span, err)
 	return err
 }
 
-func (x *xmppClient) joinMUC(ctx context.Context, roomJIDStr string) error {
+// joinMUC sends the join presence. hist is the optional XEP-0045 history request (nil = none, the
+// room's default history applies).
+func (x *xmppClient) joinMUC(ctx context.Context, roomJIDStr string, hist *mucHistory) error {
 	roomJID, err := jid.Parse(roomJIDStr)
 	if err != nil {
 		return fmt.Errorf("invalid MUC JID %q: %w", roomJIDStr, err)
@@ -1546,7 +1562,7 @@ func (x *xmppClient) joinMUC(ctx context.Context, roomJIDStr string) error {
 	}
 	// Track pending join so presence handler can store our occupant JID (and detect 409).
 	x.startMUCJoinTrack(roomJIDStr, base, nick)
-	if err := x.sendMUCJoin(ctx, roomJIDStr, nick); err != nil {
+	if err := x.sendMUCJoin(ctx, roomJIDStr, nick, hist); err != nil {
 		x.dropMUCJoinTrack(roomJIDStr)
 		return err
 	}
@@ -1558,7 +1574,10 @@ func (x *xmppClient) joinMUC(ctx context.Context, roomJIDStr string) error {
 }
 
 // sendMUCJoin sends the XEP-0045 join presence for room/nick.
-func (x *xmppClient) sendMUCJoin(ctx context.Context, roomJIDStr, nick string) error {
+func (x *xmppClient) sendMUCJoin(ctx context.Context, roomJIDStr, nick string, hist *mucHistory) error {
+	if x.mucJoinHistHook != nil {
+		x.mucJoinHistHook(roomJIDStr, hist)
+	}
 	if x.mucSendJoinHook != nil {
 		return x.mucSendJoinHook(roomJIDStr, nick)
 	}
@@ -1578,7 +1597,11 @@ func (x *xmppClient) sendMUCJoin(ctx context.Context, roomJIDStr, nick string) e
 	}
 	// XEP-0045: optional <x xmlns='http://jabber.org/protocol/muc'/> so servers treat this as a MUC join.
 	mucX := xml.StartElement{Name: xml.Name{Space: "http://jabber.org/protocol/muc", Local: "x"}}
-	payload := xmlstream.Wrap(nil, mucX)
+	var inner xml.TokenReader
+	if hist != nil {
+		inner = xmlstream.Wrap(nil, xml.StartElement{Name: xml.Name{Local: "history"}, Attr: hist.attrs()})
+	}
+	payload := xmlstream.Wrap(inner, mucX)
 	p := stanza.Presence{To: toJID}.Wrap(payload)
 	if err := sess.Send(ctx, p); err != nil {
 		return fmt.Errorf("send MUC join presence: %w", err)
@@ -1605,11 +1628,20 @@ func (x *xmppClient) LeaveMUC(ctx context.Context, roomJIDStr string) error {
 		span.SetAttributes(attribute.String("xmpp.room.jid", roomJIDStr))
 	}
 	err := x.leaveMUC(ctx, roomJIDStr)
+	if err == nil {
+		// An explicit leave: do not bring the room back on the next connect.
+		if ferr := x.setMUCLeft(ctx, roomJIDStr, true); ferr != nil {
+			x.logFor(ctx).Warn().Err(ferr).Str("room", roomJIDStr).Msg("Failed to persist MUC left flag; the room may be re-joined on reconnect")
+		}
+	}
 	telemetry.Fail(span, err)
 	return err
 }
 
 func (x *xmppClient) leaveMUC(ctx context.Context, roomJIDStr string) error {
+	if x.mucLeaveHook != nil {
+		return x.mucLeaveHook(roomJIDStr)
+	}
 	x.mu.Lock()
 	sess := x.session
 	x.mu.Unlock()

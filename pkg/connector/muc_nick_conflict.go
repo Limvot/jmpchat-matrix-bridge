@@ -182,7 +182,7 @@ func (x *xmppClient) continueMUCJoinAfterConflict(roomBare, next string, tried [
 		x.notifyMUC(ctx, roomBare, mucAllTakenNotice(x.mucCmdPrefix(), roomBare, tried))
 		return
 	}
-	if err := x.sendMUCJoin(ctx, roomBare, next); err != nil {
+	if err := x.sendMUCJoin(ctx, roomBare, next, nil); err != nil {
 		x.dropMUCJoinTrack(roomBare)
 		telemetry.Fail(span, err)
 		log.Warn().Err(err).Str("room", roomBare).Str("nick", next).Msg("MUC 409 retry: send failed")
