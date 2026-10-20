@@ -271,6 +271,54 @@ docker run -d --name jmpchat-matrix-bridge \
 
 Use `appservice.hostname: 0.0.0.0` in config so the bridge listens on all interfaces. For SQLite, set `database.uri` to `file:/data/jmpchat-matrix-bridge.db?_txlock=immediate` so the database lives in the same mounted directory. Postgres is also supported.
 
+## Nix
+
+This repo ships a flake: the bridge as a package, an overlay, and a NixOS module.
+
+```bash
+# build (and run) the binary
+nix run .# -- --version
+nix build .#jmpchat-matrix-bridge
+```
+
+Module usage (in your NixOS flake):
+
+```nix
+inputs.jmpchat.url = "github:Limvot/jmpchat-matrix-bridge";
+
+# NixOS configuration
+imports = [ jmpchat.nixosModules.default ];
+services.jmpchat-matrix-bridge = {
+  enable = true;
+  settings = {
+    homeserver = { address = "https://matrix.example.org"; domain = "example.org"; };
+    appservice = { id = "jabber"; address = "http://127.0.0.1:29318";
+                   hostname = "127.0.0.1"; port = 29318;
+                   bot = { username = "jabberbot"; displayname = "Jabber bridge bot"; }; };
+    bridge.permissions."example.org" = "user";
+    database = { type = "sqlite3-fk-wal";
+                 uri = "file:/var/lib/jmpchat-matrix-bridge/bridge.db?_txlock=immediate"; };
+    network = { cheogram = true; calls = { enabled = true; }; };
+  };
+};
+# ...and add /var/lib/matrix-synapse/jabber-registration.yaml to your
+# homeserver's app_service_config_files.
+```
+
+Notes:
+
+- The module builds with the same configuration as the Docker image (E2BE via
+  libolm, SIP calls via libopus). libolm is currently marked insecure upstream;
+  the module allows `olm-3.2.16` in your nixpkgs config for you.
+- On first boot the init unit writes `config.yaml` from `settings` and generates
+  the registration with `-g`, which also writes the as/hs tokens back into the
+  state config. Both files persist in `/var/lib/jmpchat-matrix-bridge` and
+  become the source of truth; delete both to re-bootstrap (and re-register).
+- The daemon runs as a dedicated non-root user under a systemd sandbox; state
+  (database, logs, config) lives in `/var/lib/jmpchat-matrix-bridge`.
+- If `network.calls.enabled` is true, the module opens SIP signalling
+  (UDP+TCP 5060-5069) and RTP media (UDP 40000-40100) in the firewall.
+
 ## Tracing (OpenTelemetry)
 
 Tracing is optional and **off by default**. It is enabled purely by environment variables; there is no config-file setting. When no endpoint is set, nothing is installed (no exporter, goroutines or sockets), so there is no overhead. Export problems are logged as rate-limited warnings and never stop or block the bridge.
