@@ -129,6 +129,12 @@ func validateRetraction(r retraction, p portalFacts, target *database.Message) (
 			}
 			return true, ""
 		}
+		if r.occupantID != "" {
+			// The room stamps occupant-ids but the target has none (stored before occupant-ids were
+			// persisted): a nick or our current occupant JID proves nothing, since another occupant may
+			// hold it now (or held it while we were away and the retraction is a history replay).
+			return false, "target_without_occupant_id"
+		}
 		if r.fromFull == string(target.SenderID) {
 			return true, ""
 		}
