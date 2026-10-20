@@ -32,7 +32,7 @@ Prioritized, step-by-step plan to make the bridge production-ready: security, sc
 - **2.4 Reactions, quotes, and at-mentions**  
   Make bridged conversations feel native on both sides.
   - **Reactions:** *(basic done)* Map Matrix reactions (e.g. `m.reaction`) to XMPP (XEP-0444 or fallback to a short reply “reacted with …”); map XMPP reactions/replies back to Matrix reactions where supported. Single reaction per user per message works both ways; *future:* preserve multiple reactions (see [README](README.md)#to-do-unimplemented-work).
-  - **Reaction target lookup:** Reactions in Jabber to XMPP-originated messages can fail to bridge. Connector has `GetMessageMetadata()` and deferred metadata update; follow-up in [README](README.md)#to-do-unimplemented-work.
+  - **Reaction target lookup:** Reactions in Jabber to XMPP-originated messages can fail to bridge. Connector persists metadata through `ConvertedMessagePart.DBMetadata`; follow-up in [README](README.md)#to-do-unimplemented-work.
   - **Quotes / replies:** *(done)* Reply chains preserved: Matrix `m.in_reply_to` ↔ XMPP reply/thread (e.g. `<reply>` XEP or stanza reference). Ensure reply metadata is stored and sent so both sides show “replying to X”.
   - **At-mentions:** *(deprioritized)* Map Matrix mentions (`@user:server`) to XMPP (e.g. mention by JID or nick in MUC); map XMPP mentions to Matrix; deferred to a later phase.
 
@@ -104,7 +104,7 @@ Technical context for future work. See [README](README.md#to-do-unimplemented-wo
 
 **Cause:** For XMPP-originated messages the framework may not set `Message.Metadata.XMPPMessageID` when persisting.
 
-**Done in connector:** (1) `GetMessageMetadata()` returns `XMPPMessageID` so the framework can store it. (2) `scheduleStanzaIDMetadataUpdate()` runs after `ConvertMessage` returns: after a short delay we find the just-persisted message and call `br.DB.Message.Update` to set `Metadata.XMPPMessageID`. Reaction lookup uses 30-day window and metadata/ID matching. Follow-up: verify framework persists metadata or extend heuristic.
+**Done in connector:** `ConvertMessage` sets `DBMetadata` (`XMPPMessageID`, stanza-id, origin-id, occupant-id) on every part, which bridgev2 persists with the row (the earlier `GetMessageMetadata()`/deferred update hack was removed). Reaction lookup uses 30-day window and metadata/ID matching.
 
 ### Multi-login edge case / roster isolation
 

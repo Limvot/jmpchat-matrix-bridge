@@ -46,17 +46,24 @@ func (x *xmppClient) carbonOuterFromOK(outer *xml.StartElement, kind string) boo
 // parseInnerMessageFromCarbon reads the inner <message> from a carbon copy and returns
 // from, to, type, id, body. Per XEP-0280/0297, the stream is <received><forwarded><message>...,
 // so we capture from/to/id from the first <message> element we encounter (at any depth).
-func parseInnerMessageFromCarbon(t xmlstream.TokenReadEncoder) (from, to, typeAttr, id, body string, jmi *jingleMessageInfo, err error) {
+func parseInnerMessageFromCarbon(t xmlstream.TokenReadEncoder) (from, to, typeAttr, id, body string, jmi *jingleMessageInfo, ids messageIDs, err error) {
 	depth := 0
+	msgDepth := 0 // depth of the first inner <message>; its direct children carry the XEP-0359 ids
 	for {
 		tok, err := t.Token()
 		if err != nil {
-			return from, to, typeAttr, id, body, jmi, err
+			return from, to, typeAttr, id, body, jmi, ids, err
 		}
 		switch v := tok.(type) {
 		case xml.StartElement:
 			depth++
+			if msgDepth > 0 && depth == msgDepth+1 {
+				ids.observe(v)
+			}
 			jmi = detectJingleMessage(jmi, v)
+			if v.Name.Local == "message" && msgDepth == 0 {
+				msgDepth = depth
+			}
 			if v.Name.Local == "message" && from == "" {
 				from = attrValue(v.Attr, "from")
 				to = attrValue(v.Attr, "to")
@@ -75,7 +82,7 @@ func parseInnerMessageFromCarbon(t xmlstream.TokenReadEncoder) (from, to, typeAt
 		case xml.EndElement:
 			depth--
 			if depth == 0 {
-				return from, to, typeAttr, id, body, jmi, nil
+				return from, to, typeAttr, id, body, jmi, ids, nil
 			}
 		}
 	}
@@ -101,7 +108,7 @@ func (x *xmppClient) handleCarbonSent(t xmlstream.TokenReadEncoder, outer *xml.S
 		consumeUntilEndElement(t, "sent")
 		return nil
 	}
-	from, to, _, id, body, jmi, err := parseInnerMessageFromCarbon(t)
+	from, to, _, id, body, jmi, ids, err := parseInnerMessageFromCarbon(t)
 	consumeUntilEndElement(t, "sent")
 	if err != nil {
 		x.log.Debug().Err(err).Msg("Failed to parse carbon <sent> inner message")
@@ -153,6 +160,8 @@ func (x *xmppClient) handleCarbonSent(t xmlstream.TokenReadEncoder, outer *xml.S
 		body:      body,
 		timestamp: time.Now(),
 		x:         x,
+		stanzaID:  ids.stanzaIDBy(string(x.loginID)),
+		originID:  ids.OriginID,
 	})
 	return nil
 }
@@ -164,7 +173,7 @@ func (x *xmppClient) handleCarbonReceived(t xmlstream.TokenReadEncoder, outer *x
 		consumeUntilEndElement(t, "received")
 		return nil
 	}
-	from, _, _, id, body, jmi, err := parseInnerMessageFromCarbon(t)
+	from, _, _, id, body, jmi, ids, err := parseInnerMessageFromCarbon(t)
 	consumeUntilEndElement(t, "received")
 	if err != nil {
 		x.log.Debug().Err(err).Msg("Failed to parse carbon <received> inner message")
@@ -215,6 +224,8 @@ func (x *xmppClient) handleCarbonReceived(t xmlstream.TokenReadEncoder, outer *x
 		body:      body,
 		timestamp: time.Now(),
 		x:         x,
+		stanzaID:  ids.stanzaIDBy(string(x.loginID)),
+		originID:  ids.OriginID,
 	})
 	return nil
 }

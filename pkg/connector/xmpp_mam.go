@@ -44,10 +44,23 @@ type mamResultItem struct {
 	From      string
 	To        string
 	Type      string
-	StanzaID  string
+	StanzaID  string // inner message `id` attribute (or a generated xmp: id)
+	// ArchiveID is the <result id> (the archive's stanza-id, assigned by our own server); OriginID is
+	// the inner XEP-0359 origin-id. Both are only populated for results that passed the outer-from check.
+	ArchiveID string
+	OriginID  string
 	Body      string
 	Timestamp time.Time
 	QueryID   string
+}
+
+// stableIDs returns the stanza-id/origin-id to persist for an archived message: the archive id of a
+// result from our own account, and the origin-id when it differs from the message id.
+func (i mamResultItem) stableIDs() (stanzaID, originID string) {
+	if i.OriginID != i.StanzaID {
+		originID = i.OriginID
+	}
+	return i.ArchiveID, originID
 }
 
 // mamState holds MAM-related state for the client.
@@ -126,6 +139,8 @@ func (x *xmppClient) handleMAMResult(t xmlstream.TokenReadEncoder, start *xml.St
 	// Parse <forwarded xmlns='urn:xmpp:forward:0'><message .../><delay .../></forwarded>
 	var from, to, msgType, stanzaID, body string
 	var timestamp time.Time
+	var ids messageIDs
+	msgDepth := 0 // depth of the first inner <message>; its direct children carry the XEP-0359 ids
 	depth := 1
 	for depth > 0 {
 		tok, err := t.Token()
@@ -135,6 +150,12 @@ func (x *xmppClient) handleMAMResult(t xmlstream.TokenReadEncoder, start *xml.St
 		switch v := tok.(type) {
 		case xml.StartElement:
 			depth++
+			if msgDepth > 0 && depth == msgDepth+1 {
+				ids.observe(v)
+			}
+			if v.Name.Local == "message" && msgDepth == 0 {
+				msgDepth = depth
+			}
 			// Inner message may have xmlns="jabber:client" (XEP-0297) or inherit forwardNS; accept either.
 			if v.Name.Local == "message" && from == "" {
 				from = attrValue(v.Attr, "from")
@@ -170,8 +191,13 @@ func (x *xmppClient) handleMAMResult(t xmlstream.TokenReadEncoder, start *xml.St
 	if stanzaID == "" {
 		stanzaID = "xmp:" + time.Now().Format("20060102150405.000")
 	}
+	archiveID := attrValue(start.Attr, "id")
+	if archiveID == "" {
+		archiveID = ids.stanzaIDBy(string(x.loginID))
+	}
 	x.mam.deliverMessage(queryID, mamResultItem{
-		From: from, To: to, Type: msgType, StanzaID: stanzaID, Body: body, Timestamp: timestamp, QueryID: queryID,
+		From: from, To: to, Type: msgType, StanzaID: stanzaID, ArchiveID: archiveID, OriginID: ids.OriginID,
+		Body: body, Timestamp: timestamp, QueryID: queryID,
 	})
 	return nil
 }
@@ -388,10 +414,17 @@ func (x *xmppClient) FetchMessages(ctx context.Context, params bridgev2.FetchMes
 		if msgID == "" {
 			msgID = networkid.MessageID("xmp:" + item.Timestamp.Format("20060102150405.000"))
 		}
+		stanzaID, originID := item.stableIDs()
 		cm := &bridgev2.ConvertedMessage{
 			Parts: []*bridgev2.ConvertedMessagePart{{
 				Type:    event.EventMessage,
 				Content: &event.MessageEventContent{MsgType: event.MsgText, Body: item.Body},
+				DBMetadata: &MessageMetadata{
+					XMPPMessageID:  item.StanzaID,
+					StanzaID:       stanzaID,
+					OriginID:       originID,
+					BackfillSource: "mam",
+				},
 			}},
 		}
 		messages = append(messages, &bridgev2.BackfillMessage{
@@ -654,6 +687,7 @@ func (x *xmppClient) mamCatchUpForPortal(ctx, cycleCtx context.Context, bareJID 
 		}
 		senderJID, bodyOut := ResolveCheogramGroupMMSSenderForMAM(item.From, item.Body)
 		sender := x.makeEventSender(senderJID)
+		stanzaID, originID := item.stableIDs()
 		ts := item.Timestamp
 		if ts.IsZero() {
 			ts = time.Now()
@@ -665,6 +699,10 @@ func (x *xmppClient) mamCatchUpForPortal(ctx, cycleCtx context.Context, bareJID 
 			body:      bodyOut,
 			timestamp: ts,
 			x:         x,
+			stanzaID:  stanzaID,
+			originID:  originID,
+
+			backfillSource: "mam",
 		})
 		queued++
 	}
@@ -825,6 +863,7 @@ func (x *xmppClient) doMAMBackfillOnView(ctx context.Context, span trace.Span, p
 		}
 		senderJID, bodyOut := ResolveCheogramGroupMMSSenderForMAM(item.From, item.Body)
 		sender := x.makeEventSender(senderJID)
+		stanzaID, originID := item.stableIDs()
 		ts := item.Timestamp
 		if ts.IsZero() {
 			ts = time.Now()
@@ -836,6 +875,10 @@ func (x *xmppClient) doMAMBackfillOnView(ctx context.Context, span trace.Span, p
 			body:      bodyOut,
 			timestamp: ts,
 			x:         x,
+			stanzaID:  stanzaID,
+			originID:  originID,
+
+			backfillSource: "mam",
 		})
 		queued++
 	}

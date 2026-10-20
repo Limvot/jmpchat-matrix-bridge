@@ -29,11 +29,22 @@ type GhostMetadata struct {
 // This gives a DB mapping: stanza_id (XMPPMessageID) ↔ matrix event id (message row/parts).
 // This is extensible for future features like backfilling and puppeting.
 type MessageMetadata struct {
-	// XMPPMessageID is the XMPP stanza ID. For Matrix→XMPP we set it when sending; for XMPP→Matrix
-	// we provide it via GetMessageMetadata() and scheduleStanzaIDMetadataUpdate() so the bridge DB row
-	// has the mapping for reply/reaction lookups (GetFirstPartByID and metadata search).
+	// XMPPMessageID is the XMPP stanza `id` attribute. For Matrix→XMPP we set it when sending (the
+	// bridgev2 row ID is matrix:$event); for XMPP→Matrix it equals the row ID and is persisted through
+	// ConvertedMessagePart.DBMetadata, so reply/reaction lookups can match on it.
 	XMPPMessageID string `json:"xmpp_message_id,omitempty"`
-	
+
+	// StanzaID is the XEP-0359 <stanza-id> assigned by a trusted entity: the MUC room (groupchat)
+	// or our own account's archive (1:1, equals the MAM <result id>). Never taken from an untrusted `by`.
+	StanzaID string `json:"stanza_id,omitempty"`
+
+	// OriginID is the XEP-0359 <origin-id> when present and different from XMPPMessageID.
+	OriginID string `json:"origin_id,omitempty"`
+
+	// OccupantID is the XEP-0421 occupant-id of the sender for MUC messages. The room is trusted to
+	// have stripped client-supplied values; without that feature it is only sender-chosen.
+	OccupantID string `json:"occupant_id,omitempty"`
+
 	// BackfillSource is set for messages fetched via MAM (XEP-0313) backfill/catch-up.
 	BackfillSource string `json:"backfill_source,omitempty"` // e.g. "mam"
 
