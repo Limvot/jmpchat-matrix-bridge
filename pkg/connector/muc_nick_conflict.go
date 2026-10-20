@@ -92,6 +92,28 @@ func (x *xmppClient) startMUCJoinTrack(roomBare, base, nick string) {
 	x.mucJoinTracks[roomBare] = &mucJoinTrack{base: base}
 }
 
+// resetMUCJoinState drops every pending join and retry chain and starts a new generation. Called
+// on each new session: join state belongs to the session that sent the join presence, and a stale
+// retry goroutine must not send on a newer one (see continueMUCJoinAfterConflict).
+func (x *xmppClient) resetMUCJoinState() {
+	x.mucPendingJoinMu.Lock()
+	x.mucPendingJoin = nil
+	x.mucJoinTracks = nil
+	x.mucJoinGen++
+	x.mucPendingJoinMu.Unlock()
+}
+
+// mucJoinChainCurrent reports whether a retry chain started in generation gen is still the one in
+// flight: same session, and (when next is set) next is still the pending nick for the room.
+func (x *xmppClient) mucJoinChainCurrent(roomBare, next string, gen uint64) bool {
+	x.mucPendingJoinMu.Lock()
+	defer x.mucPendingJoinMu.Unlock()
+	if x.mucJoinGen != gen {
+		return false
+	}
+	return next == "" || x.mucPendingJoin[roomBare] == next
+}
+
 // dropMUCJoinTrack forgets the pending join and chain for a room.
 func (x *xmppClient) dropMUCJoinTrack(roomBare string) {
 	x.mucPendingJoinMu.Lock()
@@ -103,13 +125,15 @@ func (x *xmppClient) dropMUCJoinTrack(roomBare string) {
 // onMUCJoinConflict advances the chain after a 409 for ourNick. handled is false when the error does
 // not belong to the join in flight (stale or duplicate). Otherwise next is the alternative nick to try
 // (now pending), or empty when all are exhausted, in which case tried lists every nick that failed.
+// gen is the session generation the chain belongs to.
 // Pure state change: safe on the Serve goroutine.
-func (x *xmppClient) onMUCJoinConflict(roomBare, ourNick string) (next string, tried []string, handled bool) {
+func (x *xmppClient) onMUCJoinConflict(roomBare, ourNick string) (next string, tried []string, gen uint64, handled bool) {
 	x.mucPendingJoinMu.Lock()
 	defer x.mucPendingJoinMu.Unlock()
+	gen = x.mucJoinGen
 	track := x.mucJoinTracks[roomBare]
 	if track == nil || x.mucPendingJoin[roomBare] != ourNick {
-		return "", nil, false
+		return "", nil, gen, false
 	}
 	track.tried = append(track.tried, ourNick)
 	track.conflicted = true
@@ -125,12 +149,12 @@ func (x *xmppClient) onMUCJoinConflict(roomBare, ourNick string) (next string, t
 		}
 		if !taken {
 			x.mucPendingJoin[roomBare] = cand
-			return cand, append([]string(nil), track.tried...), true
+			return cand, append([]string(nil), track.tried...), gen, true
 		}
 	}
 	tried = append([]string(nil), track.tried...)
 	delete(x.mucJoinTracks, roomBare)
-	return "", tried, true
+	return "", tried, gen, true
 }
 
 // takeMUCJoinTrackLocked removes and returns the chain of a confirmed join. Caller holds mucPendingJoinMu.
@@ -142,12 +166,16 @@ func (x *xmppClient) takeMUCJoinTrackLocked(roomBare string) *mucJoinTrack {
 
 // continueMUCJoinAfterConflict runs in its own goroutine (never on the Serve goroutine): it sends the
 // join with the next alternative nick, or reports that every nick is taken.
-func (x *xmppClient) continueMUCJoinAfterConflict(roomBare, next string, tried []string) {
+func (x *xmppClient) continueMUCJoinAfterConflict(roomBare, next string, tried []string, gen uint64) {
 	ctx, span := telemetry.Start(context.Background(), "xmpp.muc.join_retry", trace.WithSpanKind(trace.SpanKindProducer))
 	defer span.End()
 	log := x.logFor(ctx)
 	if span.IsRecording() {
 		span.SetAttributes(attribute.String("xmpp.room.jid", roomBare), attribute.Int("xmpp.muc.nick_attempts", len(tried)))
+	}
+	if !x.mucJoinChainCurrent(roomBare, next, gen) {
+		log.Debug().Str("room", roomBare).Msg("MUC 409 retry: session changed or chain superseded, dropped")
+		return
 	}
 	if next == "" {
 		log.Warn().Str("room", roomBare).Strs("tried", tried).Msg("MUC join failed: all nicks taken")
@@ -165,7 +193,7 @@ func (x *xmppClient) continueMUCJoinAfterConflict(roomBare, next string, tried [
 
 // announceMUCNickChange runs in its own goroutine once a join with an alternative nick is confirmed:
 // remember the nick for rejoins and tell the user.
-func (x *xmppClient) announceMUCNickChange(roomBare, base, nick string) {
+func (x *xmppClient) announceMUCNickChange(roomBare, base, taken, nick string) {
 	ctx, span := telemetry.Start(context.Background(), "xmpp.muc.nick_notice", trace.WithSpanKind(trace.SpanKindProducer))
 	defer span.End()
 	log := x.logFor(ctx)
@@ -176,7 +204,7 @@ func (x *xmppClient) announceMUCNickChange(roomBare, base, nick string) {
 		telemetry.Fail(span, err)
 		log.Warn().Err(err).Str("room", roomBare).Msg("Failed to remember alternative MUC nick")
 	}
-	x.notifyMUC(ctx, roomBare, mucNickChangedNotice(x.mucCmdPrefix(), roomBare, base, nick))
+	x.notifyMUC(ctx, roomBare, mucNickChangedNotice(x.mucCmdPrefix(), roomBare, taken, nick))
 }
 
 // rememberAutoMUCNick stores a working alternative nick in the portal metadata (separate from the
@@ -237,8 +265,10 @@ func (x *xmppClient) mucCmdPrefix() string {
 	return "!jabber"
 }
 
-func mucNickChangedNotice(prefix, room, base, nick string) string {
-	return fmt.Sprintf("`%s` is taken in %s, joined as `%s`. Use `%s muc-nick %s <nick>` to pick another.", base, room, nick, prefix, room)
+// mucNickChangedNotice words the notice around taken, the first nick actually tried in the chain
+// (the preferred nick, or a remembered alternative that is now taken as well).
+func mucNickChangedNotice(prefix, room, taken, nick string) string {
+	return fmt.Sprintf("`%s` is taken in %s, joined as `%s`. Use `%s muc-nick %s <nick>` to pick another.", taken, room, nick, prefix, room)
 }
 
 func mucAllTakenNotice(prefix, room string, tried []string) string {
