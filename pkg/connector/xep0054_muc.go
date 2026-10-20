@@ -7,6 +7,21 @@
 // ghost for it was seen this session (it spoke), so a join storm costs table entries only.
 // The worker is the sole writer of MUC occupant avatars; getUserInfo keeps returning a nil Avatar
 // for MUC occupants (a stale Avatar from the Serve side could revert or corrupt the applied one).
+//
+// Contact rule (non-anonymous rooms): XMPP has no per-room avatars, the XEP-0153 hash in MUC
+// presence mirrors the account avatar, and rooms often keep advertising an old hash because clients
+// do not resend room presence when the account avatar changes. So when the room reports the
+// occupant's real JID and we hold a 1:1 contact ghost for that bare JID whose avatar is known (see
+// classifyContactGhost), the contact ghost's avatar is authoritative for the occupant: the worker
+// applies the contact's already-uploaded MXC (or removes the avatar when the contact is known to
+// have none), with no IQ and no upload, and skips the room-hash fetch. The room-hash path stays
+// the fallback when there is no real JID or no contact ghost with a known avatar. When the room
+// advertises a state that differs from the contact's, the contact may be the stale side: the worker
+// then asks the 1:1 path to refresh the contact (doAvatarRefresh, which propagates a change back
+// here), at most once per contact per mucContactRefreshAge and once per advertised state per
+// mucAvatarFailRetry, and only when the contact was fetched more than mucContactRefreshAge ago.
+// Propagation (propagateContact) covers changes while the occupant is known; the contact rule
+// covers occupants first seen after the change (e.g. joined after a restart).
 
 package connector
 
@@ -41,6 +56,8 @@ const (
 	mucAvatarFailRetry   = 6 * time.Hour
 	mucAvatarRoomErrMax  = 5
 	mucAvatarStatsPeriod = 60 * time.Second
+	mucContactRefreshAge = 10 * time.Minute // contact rule: min age of a contact fetch before a room-triggered refresh
+	mucContactReqCap     = 1024             // cap on the room-triggered contact refresh record
 )
 
 // mucOccupant is the per-occupant avatar record (key: occupant full JID room@muc/nick).
@@ -56,6 +73,9 @@ type mucOccupant struct {
 	failHash string    // advertised state whose fetch failed
 	failAt   time.Time
 	prop     *mucProp // pending propagation from the 1:1 path (latest wins)
+	// contactTried: a job with the real JID was dequeued this session. Lets an occupant whose
+	// presence carries no usable photo element get one contact-rule job (see shouldEnqueueLocked).
+	contactTried bool
 }
 
 // mucProp is an avatar the 1:1 path just applied for the occupant's real JID: remove, or apply the
@@ -139,6 +159,7 @@ type mucAvatarState struct {
 	stats          mucAvatarStats
 	lastStats      mucAvatarStats
 	lastStatsAt    time.Time
+	contactReq     map[string]mucContactReq // room-triggered contact refreshes, kept across sessions
 
 	// Seams (defaults installed by the xmppClient; tests set their own).
 	now      func() time.Time
@@ -148,6 +169,66 @@ type mucAvatarState struct {
 	paceC    <-chan time.Time // current session's pacing ticker (production pace), guarded by mu
 	sleep    func(ctx context.Context, d time.Duration) error
 	logger   func(ctx context.Context) *zerolog.Logger
+	// getContact loads the 1:1 contact ghost for a bare real JID (no creation, no I/O besides the
+	// DB). nil disables the contact rule.
+	getContact func(ctx context.Context, realBare string) (contactAvatar, error)
+	// refreshContact queues a 1:1 avatar refresh for the contact ghost id (never blocks).
+	refreshContact func(contactID string)
+}
+
+// contactAvatarState is what a 1:1 contact ghost says about the account avatar.
+type contactAvatarState int
+
+const (
+	contactUnknown contactAvatarState = iota // no ghost, never fetched, or no proven MXC: use the room path
+	contactHas                               // avatar with a proven MXC
+	contactNone                              // fetched, known to have no avatar
+)
+
+// contactAvatar is a read-only snapshot of a 1:1 contact ghost's avatar.
+type contactAvatar struct {
+	state     contactAvatarState
+	id        string // ghost id (bare JID) as stored
+	mxc       mucMXC // contactHas only
+	fetchedAt time.Time
+}
+
+// adv is the contact's state in the advertised-state vocabulary ("none" or the SHA-1).
+func (c contactAvatar) adv() string {
+	if c.state == contactHas {
+		return c.mxc.realHash
+	}
+	return "none"
+}
+
+// mucContactReq records the last room-triggered refresh of a contact.
+type mucContactReq struct {
+	adv string
+	at  time.Time
+}
+
+// classifyContactGhost decides what a contact ghost row says. contactHas needs a proven MXC: the
+// stored SHA-1 (computed by us from the fetched bytes) matches the ghost's AvatarID, the MXC is set
+// on Matrix (AvatarSet; a failed upload or profile set leaves it false) and its SHA-256 is known.
+// contactNone needs a completed fetch (AvatarFetchedAt) with no stored hash and no avatar on the
+// ghost, set on Matrix. A rejected photo of a contact that never had an avatar looks the same; the
+// occupant then shows no avatar, as it would after the room-path fetch rejected the same photo.
+func classifyContactGhost(ghostID string, avatarID networkid.AvatarID, avatarMXC id.ContentURIString, avatarSHA [32]byte, avatarSet bool, meta *GhostMetadata) contactAvatar {
+	c := contactAvatar{id: ghostID}
+	if meta == nil || meta.AvatarFetchedAt.Time.IsZero() || !avatarSet {
+		return c
+	}
+	c.fetchedAt = meta.AvatarFetchedAt.Time
+	switch {
+	case meta.AvatarHash != "":
+		if avatarMXC != "" && avatarSHA != ([32]byte{}) && avatarID == avatarIDFromHash(meta.AvatarHash) {
+			c.state = contactHas
+			c.mxc = mucMXC{realHash: meta.AvatarHash, mxc: string(avatarMXC), sha256: avatarSHA}
+		}
+	case avatarID == "" && avatarMXC == "":
+		c.state = contactNone
+	}
+	return c
 }
 
 func (s *mucAvatarState) nowT() time.Time {
@@ -179,6 +260,9 @@ func (s *mucAvatarState) initLocked() {
 	if s.mxcByHash == nil {
 		s.mxcByHash = make(map[string]mucMXC)
 	}
+	if s.contactReq == nil {
+		s.contactReq = make(map[string]mucContactReq)
+	}
 }
 
 // reset starts a fresh session: a rejoin re-sends every presence, so the table, queue and
@@ -200,8 +284,12 @@ func (s *mucAvatarState) reset() {
 
 // shouldEnqueueLocked is the single enqueue condition (see the plan, section 2.2).
 func (s *mucAvatarState) shouldEnqueueLocked(rec *mucOccupant) bool {
-	if !rec.hasGhost || rec.photo == photoUnknown || s.roomDisabled[rec.room] {
+	if !rec.hasGhost || s.roomDisabled[rec.room] {
 		return false
+	}
+	if rec.photo == photoUnknown {
+		// Nothing advertised: only the contact rule can act (no IQ), once per session.
+		return rec.realJID != "" && !rec.contactTried && s.getContact != nil
 	}
 	adv := rec.adv()
 	if adv == rec.doneHash {
@@ -385,6 +473,9 @@ func (s *mucAvatarState) dequeue() (key string, snap mucOccSnapshot, ok bool) {
 		}
 		snap = mucOccSnapshot{room: rec.room, photo: rec.photo, hash: rec.hash, realJID: rec.realJID, prop: rec.prop}
 		rec.prop = nil
+		if rec.realJID != "" {
+			rec.contactTried = true
+		}
 		return k, snap, true
 	}
 	return "", mucOccSnapshot{}, false
@@ -571,7 +662,7 @@ func (s *mucAvatarState) process(ctx context.Context, key string, snap mucOccSna
 		s.processProp(ctx, key, snap)
 		return
 	}
-	if snap.photo == photoUnknown {
+	if snap.photo == photoUnknown && snap.realJID == "" {
 		return
 	}
 	adv := snap.adv()
@@ -584,6 +675,12 @@ func (s *mucAvatarState) process(ctx context.Context, key string, snap mucOccSna
 	if ghost == nil {
 		s.clearHasGhost(key)
 		log.Debug().Str("occupant", key).Msg("MUC avatar: no ghost for occupant, skipped")
+		return
+	}
+	if snap.realJID != "" && s.applyContact(ctx, key, snap, ghost) {
+		return
+	}
+	if snap.photo == photoUnknown {
 		return
 	}
 	ghostHash := ghost.StoredAvatarHash()
@@ -648,6 +745,104 @@ func (s *mucAvatarState) process(ctx context.Context, key string, snap mucOccSna
 	case mucActFetch:
 		s.fetchAndApply(ctx, key, snap, adv, ghost, ghostHash, setOutcome)
 	}
+}
+
+// applyContact applies the contact rule (see the file comment) for an occupant whose room reports
+// a real JID. It returns false when the contact gives no answer (no ghost, avatar unknown, lookup
+// error) and the room-hash path should run. No IQ, no upload, no fetch.
+func (s *mucAvatarState) applyContact(ctx context.Context, key string, snap mucOccSnapshot, ghost avatarGhost) bool {
+	if s.getContact == nil {
+		return false
+	}
+	log := s.log(ctx)
+	c, err := s.getContact(ctx, snap.realJID)
+	if err != nil {
+		log.Debug().Err(err).Str("occupant", key).Msg("MUC avatar: contact ghost lookup failed")
+		return false
+	}
+	if c.state == contactUnknown {
+		return false
+	}
+	adv := snap.adv()
+	settled := s.maybeRefreshContact(ctx, key, adv, c)
+	ghostHash := ghost.StoredAvatarHash()
+	var avatar *bridgev2.Avatar
+	newHash, outcome := "", ""
+	switch c.state {
+	case contactHas:
+		if ghostHash != c.mxc.realHash || !ghost.AvatarApplied() {
+			avatar = &bridgev2.Avatar{ID: avatarIDFromHash(c.mxc.realHash), MXC: id.ContentURIString(c.mxc.mxc), Hash: c.mxc.sha256}
+			newHash, outcome = c.mxc.realHash, "changed"
+		}
+	case contactNone:
+		if ghostHash != "" {
+			avatar = &bridgev2.Avatar{Remove: true}
+			outcome = "removed"
+		}
+	}
+	if avatar == nil {
+		if settled {
+			s.markDone(key, adv)
+		} else {
+			s.markWork(key) // a later presence after the minimum interval re-checks
+		}
+		log.Debug().Str("occupant", key).Str("photo", snap.photo.String()).Bool("settled", settled).
+			Msg("MUC avatar matches the contact avatar, nothing to do")
+		return true
+	}
+	s.markWork(key)
+	ctx, span := telemetry.Start(ctx, "xmpp.muc_avatar.refresh")
+	defer span.End()
+	log = s.log(ctx)
+	if span.IsRecording() {
+		span.SetAttributes(attribute.String("xmpp.room.jid", snap.room), attribute.String("xmpp.peer.jid", key),
+			attribute.String("xmpp.avatar.source", "contact_ghost"), attribute.String("xmpp.avatar.outcome", outcome))
+	}
+	applyGhostAvatar(ctx, ghost, avatar, newHash, nil)
+	if avatar.Remove {
+		s.bump(func(st *mucAvatarStats) { st.removed++ })
+		log.Debug().Str("occupant", key).Msg("MUC avatar removed (contact has none)")
+	} else {
+		s.bump(func(st *mucAvatarStats) { st.applied++ })
+		log.Debug().Str("occupant", key).Str("photo_hash", newHash).Msg("Applied contact avatar to MUC occupant")
+	}
+	if settled && ghost.AvatarApplied() {
+		s.markDone(key, adv)
+	}
+	return true
+}
+
+// maybeRefreshContact handles a room advertising a state that differs from the contact's: the
+// contact may be stale (no 1:1 presence told us). It returns settled=false only when a refresh is
+// still due but the contact was fetched or refreshed too recently; the caller then leaves the
+// advertised state unhandled so a later presence (after the minimum interval) checks again.
+// Bounded: one refresh per contact per mucContactRefreshAge and one per advertised state per
+// mucAvatarFailRetry; the refresh result only flows back through propagateContact (no loop).
+func (s *mucAvatarState) maybeRefreshContact(ctx context.Context, key, adv string, c contactAvatar) (settled bool) {
+	if adv == "" || adv == c.adv() || s.refreshContact == nil {
+		return true
+	}
+	now := s.nowT()
+	s.mu.Lock()
+	s.initLocked()
+	last, had := s.contactReq[c.id]
+	if had && last.adv == adv && now.Sub(last.at) < mucAvatarFailRetry {
+		s.mu.Unlock()
+		return true // already refreshed after seeing this advertisement: the room is the stale side
+	}
+	if now.Sub(c.fetchedAt) < mucContactRefreshAge || (had && now.Sub(last.at) < mucContactRefreshAge) {
+		s.mu.Unlock()
+		return false
+	}
+	if len(s.contactReq) >= mucContactReqCap {
+		s.contactReq = make(map[string]mucContactReq)
+	}
+	s.contactReq[c.id] = mucContactReq{adv: adv, at: now}
+	s.mu.Unlock()
+	s.log(ctx).Debug().Str("occupant", key).Str("advertised", adv).
+		Msg("MUC advertised avatar differs from the contact avatar, refreshing contact")
+	s.refreshContact(c.id)
+	return true
 }
 
 // propagateContact is called (from any goroutine, memory only, no IQ) after the 1:1 path applied a
@@ -917,8 +1112,42 @@ func (x *xmppClient) startMUCAvatars(sessCtx context.Context) {
 	if s.logger == nil {
 		s.logger = x.logFor
 	}
+	if s.getContact == nil {
+		s.getContact = x.loadContactAvatar
+	}
+	if s.refreshContact == nil {
+		s.refreshContact = x.queueAvatarRefresh
+	}
 	s.mu.Unlock()
 	go s.runWorker(sessCtx)
+}
+
+// loadContactAvatar reads the 1:1 contact ghost row for a bare real JID (worker only). It reads a
+// fresh row from the DB instead of the shared cached *bridgev2.Ghost, so it never races with an
+// in-flight UpdateInfo and never creates a ghost; the row can lag an in-flight 1:1 update, which
+// then propagates through propagateContact. Tries the JID as reported, then lowercased.
+func (x *xmppClient) loadContactAvatar(ctx context.Context, realBare string) (contactAvatar, error) {
+	if x.conn == nil || x.conn.br == nil || x.conn.br.DB == nil {
+		return contactAvatar{}, nil
+	}
+	if networkid.UserLoginID(realBare) == x.loginID {
+		return contactAvatar{}, nil // our own account in the room from another client
+	}
+	ids := []string{realBare}
+	if l := strings.ToLower(realBare); l != realBare {
+		ids = append(ids, l)
+	}
+	for _, gid := range ids {
+		g, err := x.conn.br.DB.Ghost.GetByID(ctx, networkid.UserID(gid))
+		if err != nil {
+			return contactAvatar{}, err
+		}
+		if g != nil {
+			meta, _ := g.Metadata.(*GhostMetadata)
+			return classifyContactGhost(gid, g.AvatarID, g.AvatarMXC, g.AvatarHash, g.AvatarSet, meta), nil
+		}
+	}
+	return contactAvatar{}, nil
 }
 
 // noteMUCPresence is called on the Serve goroutine for MUC occupant presence (memory only).
