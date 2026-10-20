@@ -6,13 +6,13 @@ A Matrix <-> Jabber/XMPP puppeting bridge built for [JMP.chat](https://jmp.chat)
 
 This project was called mautrix-jabber before version 0.6.0 (docs of earlier releases use the old name). Upgrading is a drop-in change:
 
-- (a) Your existing config, `registration.yaml`, database (including the database owner marker, which stays `megabridge/mautrix-jabber`; never change it), rooms, ghosts, the `!jabber` command prefix, the appservice id and ports keep working unchanged. No registration regeneration is needed.
-- (b) What changed: the Docker image is `williamkray/jmpchat-matrix-bridge` and the binary is `jmpchat-matrix-bridge`; paths `/app` and `/data` and the entrypoint behavior are unchanged. Update your compose `image:` and any command that invokes the binary by name.
-- (b2) The old binary path `/app/mautrix-jabber` remains in the image as a compat symlink for custom entrypoints/commands; it will be removed in a later major version.
-- (c) The old image `williamkray/mautrix-jabber` gets no new tags (last: v0.5.0) and is deprecated.
-- (d) The default telemetry `service.name` is now `jmpchat-matrix-bridge`: update dashboards/monitors, or set `OTEL_SERVICE_NAME=mautrix-jabber` (or `DD_SERVICE`) to keep the old name; explicitly set values are unaffected.
-- (e) `MAUTRIX_JABBER_CHEOGRAM` is still read; `JMPCHAT_BRIDGE_CHEOGRAM` is preferred.
-- (f) Double-puppeted events now carry `fi.mau.double_puppet_source=jmpchat-matrix-bridge`, and the Matrix HTTP User-Agent changed. The `m.bridge` room state `protocol.id` becomes `github.com/williamkray/jmpchat-matrix-bridge`; existing rooms switch over gradually as their bridge info is next updated.
+- Your existing config, `registration.yaml`, database (including the database owner marker, which stays `megabridge/mautrix-jabber`; never change it), rooms, ghosts, the `!jabber` command prefix, the appservice id and ports keep working unchanged. No registration regeneration is needed.
+- What changed: the Docker image is `williamkray/jmpchat-matrix-bridge` and the binary is `jmpchat-matrix-bridge`; paths `/app` and `/data` and the entrypoint behavior are unchanged. Update your compose `image:` and any command that invokes the binary by name.
+- The old binary path `/app/mautrix-jabber` remains in the image as a compat symlink for custom entrypoints/commands; it will be removed in a later major version.
+- The old image `williamkray/mautrix-jabber` gets no new tags (last: v0.5.0) and is deprecated.
+- The default telemetry `service.name` is now `jmpchat-matrix-bridge`: update dashboards/monitors, or set `OTEL_SERVICE_NAME=mautrix-jabber` (or `DD_SERVICE`) to keep the old name; explicitly set values are unaffected.
+- `MAUTRIX_JABBER_CHEOGRAM` is still read; `JMPCHAT_BRIDGE_CHEOGRAM` is preferred.
+- Double-puppeted events now carry `fi.mau.double_puppet_source=jmpchat-matrix-bridge`, and the Matrix HTTP User-Agent changed. The `m.bridge` room state `protocol.id` becomes `github.com/williamkray/jmpchat-matrix-bridge`; existing rooms switch over gradually as their bridge info is next updated.
 
 ## Prerequisites
 
