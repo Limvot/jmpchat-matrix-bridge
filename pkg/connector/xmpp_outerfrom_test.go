@@ -41,7 +41,7 @@ func TestIsOwnAccountFrom(t *testing.T) {
 		{"", true},
 		{"me@example.com", true},
 		{"ME@Example.com", true},
-		{"me@example.com/phone", true},
+		{"me@example.com/phone", false},
 		{"evil@example.com", false},
 		{"evil@example.com/me@example.com", false},
 		{"me@example.com.evil.org", false},
@@ -70,7 +70,7 @@ func TestSpoofedCarbonsDropped(t *testing.T) {
 		{"received from contact", "received",
 			`<message from="evil@example.com/x" to="me@example.com" type="chat"><received xmlns="urn:xmpp:carbons:2"><forwarded xmlns="urn:xmpp:forward:0"><message xmlns="jabber:client" from="bob@example.com/p" to="me@example.com" id="m2"><body>forged</body></message></forwarded></received></message>`},
 		{"sent from MUC occupant", "sent",
-			`<message from="room@conference.example.com/me" to="me@example.com" type="groupchat"><sent xmlns="urn:xmpp:carbons:2"><forwarded xmlns="urn:xmpp:forward:0"><message xmlns="jabber:client" from="me@example.com/phone" to="bob@example.com" id="m3"><body>forged</body></message></forwarded></sent></message>`},
+			`<message from="room@conference.example.com/me" to="me@example.com" type="chat"><sent xmlns="urn:xmpp:carbons:2"><forwarded xmlns="urn:xmpp:forward:0"><message xmlns="jabber:client" from="me@example.com/phone" to="bob@example.com" id="m3"><body>forged</body></message></forwarded></sent></message>`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			x := newOuterFromTestClient()

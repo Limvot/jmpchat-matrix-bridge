@@ -25,7 +25,8 @@ func isOwnAccountFrom(from string, loginID networkid.UserLoginID) bool {
 	if from == "" {
 		return true
 	}
-	return strings.EqualFold(bareJID(from), bareJID(string(loginID)))
+	// XEP-0280 §11 / XEP-0313: copies and user-archive results come from the bare JID.
+	return !strings.Contains(from, "/") && strings.EqualFold(from, bareJID(string(loginID)))
 }
 
 // carbonOuterFromOK validates the outer <message from> of a carbon copy and logs (no content) when
