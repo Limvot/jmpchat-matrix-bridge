@@ -20,7 +20,6 @@ import (
 	"mellium.im/xmpp/stanza"
 	"mellium.im/xmlstream"
 	"maunium.net/go/mautrix/bridgev2"
-	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/bridgev2/simplevent"
 	"maunium.net/go/mautrix/bridgev2/status"
@@ -34,7 +33,7 @@ const jabberClientNS = "jabber:client"
 
 // ContentKeyStanzaID is the Matrix message content key for the XMPP stanza ID (inbound only).
 // Bridge ConvertedMessagePart.Content is *event.MessageEventContent so we cannot add this key in content;
-// stanza ID is available in GetMessageMetadata() as XMPPMessageID.
+// the stanza ID is persisted as MessageMetadata.XMPPMessageID via ConvertedMessagePart.DBMetadata.
 const ContentKeyStanzaID = "me.mssj.mautrixjabber.stanza_id"
 
 // messageLoggingHandler wraps a mux to log every incoming <message> stanza (before dispatch)
@@ -109,6 +108,13 @@ func attrValue(attrs []xml.Attr, name string) string {
 
 // parseMessageBodyAndOOB reads the message stanza children from t (positioned after <message>) and returns body text, OOB URL (XEP-0066), reply ID (XEP-0461), and reaction data (XEP-0444).
 func parseMessageBodyAndOOB(t xml.TokenReader) (body, oobURL, replyID string, reactionTarget string, reactionEmojis []string, jmi *jingleMessageInfo, err error) {
+	body, oobURL, replyID, reactionTarget, reactionEmojis, jmi, _, err = parseMessageBodyOOBIDs(t)
+	return
+}
+
+// parseMessageBodyOOBIDs is parseMessageBodyAndOOB plus the XEP-0359/0421 identifiers found as
+// direct children of the message (untrusted; see messageIDs).
+func parseMessageBodyOOBIDs(t xml.TokenReader) (body, oobURL, replyID string, reactionTarget string, reactionEmojis []string, jmi *jingleMessageInfo, ids messageIDs, err error) {
 	var bodyBuf, urlBuf, reactionEmojiBuf strings.Builder
 	depth := 1
 	inBody, inOOB, inURL, inReactions, inReaction := false, false, false, false, false
@@ -116,11 +122,14 @@ func parseMessageBodyAndOOB(t xml.TokenReader) (body, oobURL, replyID string, re
 	for depth > 0 {
 		tok, err := t.Token()
 		if err != nil {
-			return strings.TrimSpace(bodyBuf.String()), strings.TrimSpace(urlBuf.String()), replyID, reactionTarget, reactionEmojis, jmi, err
+			return strings.TrimSpace(bodyBuf.String()), strings.TrimSpace(urlBuf.String()), replyID, reactionTarget, reactionEmojis, jmi, ids, err
 		}
 		switch v := tok.(type) {
 		case xml.StartElement:
 			depth++
+			if depth == 2 {
+				ids.observe(v)
+			}
 			jmi = detectJingleMessage(jmi, v)
 			if v.Name.Local == "body" {
 				inBody = true
@@ -179,7 +188,7 @@ func parseMessageBodyAndOOB(t xml.TokenReader) (body, oobURL, replyID string, re
 			}
 		}
 	}
-	return strings.TrimSpace(bodyBuf.String()), strings.TrimSpace(urlBuf.String()), replyID, reactionTarget, reactionEmojis, jmi, nil
+	return strings.TrimSpace(bodyBuf.String()), strings.TrimSpace(urlBuf.String()), replyID, reactionTarget, reactionEmojis, jmi, ids, nil
 }
 
 // tokenReaderWithPrefix implements xml.TokenReader by yielding one token then delegating to r.
@@ -264,7 +273,7 @@ func (x *xmppClient) handleMessageWithOOB(t xmlstream.TokenReadEncoder, start *x
 		_, _, _, _, _, _, _ = parseMessageBodyAndOOB(tWithPrefix)
 		return nil
 	}
-	body, oobURL, replyID, reactionTarget, reactionEmojis, jmi, err := parseMessageBodyAndOOB(tWithPrefix)
+	body, oobURL, replyID, reactionTarget, reactionEmojis, jmi, ids, err := parseMessageBodyOOBIDs(tWithPrefix)
 	if err != nil {
 		x.log.Warn().Err(err).Msg("Failed to parse message body/OOB/reactions")
 		return nil
@@ -367,6 +376,8 @@ func (x *xmppClient) handleMessageWithOOB(t xmlstream.TokenReadEncoder, start *x
 			replyID:        replyID, // XEP-0461 reply ID (XMPP message ID being replied to)
 			reactionTarget: reactionTarget, // XEP-0444 reaction target message ID (empty for non-reactions)
 			reactionEmojis: reactionEmojis, // XEP-0444 reaction emojis (empty for non-reactions)
+			stanzaID:       ids.stanzaIDBy(string(x.loginID)), // archive id assigned by our own server (untrusted `by` ignored)
+			originID:       ids.OriginID,
 			timestamp:      time.Now(),
 			x:              x, // Store reference to xmppClient for database access
 		})
@@ -415,7 +426,7 @@ func (x *xmppClient) handleGroupchatWithOOB(t xmlstream.TokenReadEncoder, start 
 		_, _, _, _, _, _, _ = parseMessageBodyAndOOB(t)
 		return nil
 	}
-	body, oobURL, replyID, reactionTarget, reactionEmojis, _, err := parseMessageBodyAndOOB(t)
+	body, oobURL, replyID, reactionTarget, reactionEmojis, _, ids, err := parseMessageBodyOOBIDs(t)
 	if err != nil {
 		x.log.Warn().Err(err).Msg("Failed to parse MUC message body/OOB/reactions")
 		return nil
@@ -525,6 +536,9 @@ func (x *xmppClient) handleGroupchatWithOOB(t xmlstream.TokenReadEncoder, start 
 			replyID:        replyID,
 			reactionTarget: reactionTarget,
 			reactionEmojis: reactionEmojis,
+			stanzaID:       ids.stanzaIDBy(roomJID), // only the room's own stanza-id is believed
+			originID:       ids.OriginID,
+			occupantID:     ids.OccupantID,
 			timestamp:      time.Now(),
 			x:              x,
 		})
@@ -885,6 +899,12 @@ type jabberRemoteMessage struct {
 	replyID        string   // XEP-0461 reply ID (XMPP message ID being replied to)
 	reactionTarget string   // XEP-0444 reaction target message ID
 	reactionEmojis []string // XEP-0444 reaction emojis
+	// Stable ids stored in MessageMetadata (see dbMeta). stanzaID is only ever set from a stanza-id
+	// whose `by` is a trusted entity (room for groupchat, our account for 1:1 and MAM).
+	stanzaID       string
+	originID       string
+	occupantID     string // XEP-0421, groupchat only
+	backfillSource string // "mam" for events that came out of the archive
 	timestamp      time.Time
 	x              *xmppClient // Reference to xmppClient for database access
 	spanCtx        trace.SpanContext // trace context set by queueRemoteEvent before queueing (zero when tracing is off)
@@ -999,16 +1019,6 @@ func (m *jabberRemoteMessage) PostHandle(ctx context.Context, _ *bridgev2.Portal
 	telemetry.EndRemoteEvent(ctx)
 }
 
-// GetMessageMetadata returns metadata to store with the message when the bridge persists an inbound (XMPP-originated) message.
-// This ensures XMPPMessageID is set so reaction lookups can find the message by stanza id (reaction target).
-// The bridge may use this via type assertion when building database.Message for remote messages.
-func (m *jabberRemoteMessage) GetMessageMetadata() any {
-	if string(m.id) == "" {
-		return nil
-	}
-	return &MessageMetadata{XMPPMessageID: string(m.id)}
-}
-
 // ShouldCreatePortal returns true so the bridge creates a Matrix room when the first message
 // arrives for a new JID (otherwise the portal is not created and the message has nowhere to go).
 func (m *jabberRemoteMessage) ShouldCreatePortal() bool { return true }
@@ -1045,7 +1055,7 @@ func (m *jabberRemoteMessage) GetTargetMessage() (target networkid.MessageID) {
 				return dbMsg.ID
 			}
 			// If not found via direct lookup, search portal messages (for Matrix-originated messages
-			// or XMPP-originated messages when the bridge stores XMPPMessageID via GetMessageMetadata())
+			// or XMPP-originated messages when the bridge stores XMPPMessageID via DBMetadata)
 			searchStart := time.Now().Add(-30 * 24 * time.Hour)
 			tryFind := func() networkid.MessageID {
 				dbMessages, err := m.x.conn.br.DB.Message.GetMessagesBetweenTimeQuery(ctx, m.portalKey, searchStart, time.Now())
@@ -1190,84 +1200,46 @@ func (m *jabberRemoteMessage) GetRemovedEmojiID() networkid.EmojiID {
 const (
 	maxJabberMediaDownloadBytes = 50 * 1024 * 1024 // 50 MiB
 	jabberMediaDownloadTimeout  = 60 * time.Second
-	// delay before we try to update message metadata so the bridge has time to persist the message
-	stanzaIDMetadataUpdateDelay = 1500 * time.Millisecond
 )
 
-// scheduleStanzaIDMetadataUpdate ensures the XMPP stanza ID is stored in the database message row
-// (stanza_id ↔ matrix event id mapping). The bridge may not call GetMessageMetadata() when persisting
-// remote messages, so we run a deferred update: after the framework has inserted the message we find it
-// and set Metadata.XMPPMessageID.
-func (m *jabberRemoteMessage) scheduleStanzaIDMetadataUpdate(ctx context.Context) {
-	if string(m.id) == "" || m.x == nil || m.x.conn == nil || m.x.conn.br == nil {
-		return
+// dbMeta returns the metadata persisted with every converted part of this message. bridgev2 stores
+// ConvertedMessagePart.DBMetadata with the row (it never calls a GetMessageMetadata on the remote
+// event), so this is how the XMPP id mapping reaches the database, synchronously with the insert.
+// OriginID is only kept when it differs from the stanza id attribute.
+func (m *jabberRemoteMessage) dbMeta() *MessageMetadata {
+	meta := &MessageMetadata{
+		XMPPMessageID:  string(m.id),
+		StanzaID:       m.stanzaID,
+		OccupantID:     m.occupantID,
+		BackfillSource: m.backfillSource,
 	}
-	portalKey := m.portalKey
-	senderID := m.sender.Sender
-	stanzaID := string(m.id)
-	br := m.x.conn.br
-	x := m.x
-	// Carry only the span context into the goroutine (not ctx itself: it is the framework's event
-	// context and may hold a DB transaction or portal cancellation).
-	gctx := telemetry.CarrySpan(context.Background(), ctx)
-	go func() {
-		time.Sleep(stanzaIDMetadataUpdateDelay)
-		ctx, span := telemetry.StartChild(gctx, "bridge.stanza_id_update")
-		found := false
-		defer func() {
-			span.SetAttributes(attribute.Bool("bridge.found", found))
-			span.End()
-		}()
-		log := x.logFor(ctx)
-		ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		defer cancel()
-		searchStart := time.Now().Add(-15 * time.Second)
-		messages, err := br.DB.Message.GetMessagesBetweenTimeQuery(ctx, portalKey, searchStart, time.Now())
-		if err != nil {
-			log.Debug().Err(err).Str("stanza_id", stanzaID).Msg("Stanza ID metadata update: GetMessagesBetweenTimeQuery failed")
-			return
-		}
-		var candidate *database.Message
-		for _, msg := range messages {
-			if string(msg.SenderID) != string(senderID) {
-				continue
-			}
-			hasMeta := false
-			if msg.Metadata != nil {
-				if meta, ok := msg.Metadata.(*MessageMetadata); ok && meta != nil && meta.XMPPMessageID != "" {
-					hasMeta = true
-				}
-			}
-			if hasMeta {
-				continue
-			}
-			if candidate == nil || msg.Timestamp.After(candidate.Timestamp) {
-				candidate = msg
-			}
-		}
-		if candidate == nil {
-			log.Debug().Str("stanza_id", stanzaID).Msg("Stanza ID metadata update: no candidate message found")
-			return
-		}
-		candidate.Metadata = &MessageMetadata{XMPPMessageID: stanzaID}
-		if err := br.DB.Message.Update(ctx, candidate); err != nil {
-			log.Warn().Err(err).Str("stanza_id", stanzaID).Str("message_id", string(candidate.ID)).Msg("Stanza ID metadata update: Update failed")
-			return
-		}
-		found = true
-		log.Debug().Str("stanza_id", stanzaID).Str("message_id", string(candidate.ID)).Msg("Stanza ID metadata update: set XMPPMessageID on message")
-	}()
+	if m.originID != string(m.id) {
+		meta.OriginID = m.originID
+	}
+	return meta
 }
 
+// ConvertMessage converts the XMPP message and attaches dbMeta to every part.
 func (m *jabberRemoteMessage) ConvertMessage(ctx context.Context, portal *bridgev2.Portal, intent bridgev2.MatrixAPI) (*bridgev2.ConvertedMessage, error) {
+	cm, err := m.convertMessage(ctx, portal, intent)
+	if err != nil || cm == nil {
+		return cm, err
+	}
+	for _, part := range cm.Parts {
+		if part != nil && part.DBMetadata == nil {
+			part.DBMetadata = m.dbMeta()
+		}
+	}
+	return cm, nil
+}
+
+func (m *jabberRemoteMessage) convertMessage(ctx context.Context, portal *bridgev2.Portal, intent bridgev2.MatrixAPI) (*bridgev2.ConvertedMessage, error) {
 	// Child-only: normally parented by bridge.handle_remote_event; never start a root trace here.
 	ctx, span := telemetry.StartChild(ctx, "bridge.convert_message")
 	defer span.End()
 	if span.IsRecording() {
 		span.SetAttributes(attribute.Bool("xmpp.has_oob", m.oobURL != ""))
 	}
-	// Ensure stanza_id → matrix event id is stored in DB (in case the framework doesn't use GetMessageMetadata).
-	m.scheduleStanzaIDMetadataUpdate(ctx)
 	body := strings.TrimSpace(m.body)
 	// Prefer XEP-0066 OOB URL when present (Jabber client sent media with OOB).
 	if m.oobURL != "" {

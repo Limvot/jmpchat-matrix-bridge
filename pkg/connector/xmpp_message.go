@@ -106,6 +106,14 @@ func reactionsReader(targetMessageID string, emojis []string) xml.TokenReader {
 	return xmlstream.MultiReader(readers...)
 }
 
+// originIDReader returns the XEP-0359 <origin-id id='...'/> element for an outgoing stanza. The id
+// equals the stanza `id` attribute so receivers can match it either way (XEP-0424 retractions,
+// MUC echo correlation). It deliberately does not use stanza.AddOriginID, which would generate a
+// different random id.
+func originIDReader(id string) xml.TokenReader {
+	return stanza.OriginID{ID: id}.TokenReader()
+}
+
 // storeHintReader returns an xml.TokenReader for XEP-0334 Message Processing Hints: <store xmlns='urn:xmpp:hints'/>.
 // This hint indicates that the message should be stored in the message archive.
 func storeHintReader() xml.TokenReader {
@@ -207,7 +215,7 @@ func sendXMPPMessageWithOOB(ctx context.Context, sess *xmpp.Session, to jid.JID,
 		ID:   xmppMsgID, // Set the message ID so XEP-0461 replies can reference it
 	}
 	var readers []xml.TokenReader
-	readers = append(readers, bodyReader(finalBody))
+	readers = append(readers, bodyReader(finalBody), originIDReader(xmppMsgID))
 	if oobURL != "" {
 		log.Debug().
 			Str("final_body", finalBody).
@@ -294,6 +302,7 @@ func sendXMPPReactions(ctx context.Context, sess *xmpp.Session, to jid.JID, targ
 	payload := xmlstream.MultiReader(
 		reactionsReader(targetMessageID, emojis),
 		storeHintReader(),
+		originIDReader(xmppMsgID),
 	)
 	
 	err = sess.Send(ctx, msg.Wrap(payload))

@@ -523,7 +523,7 @@ Automatic double puppeting lets the bridge use the user's real Matrix account (s
 
 Canonical list of pending work; completed items have been removed. Order is approximate (next focus first, then phase order). For phased plan and implementation notes, see [ROADMAP.md](ROADMAP.md).
 
-1. **Reaction target for XMPP-originated messages** — Reactions in Jabber to another user’s XMPP-originated message (e.g. in MUC) sometimes do not bridge to Matrix. Connector implements `GetMessageMetadata()` and deferred stanza-ID metadata update; if the framework does not persist `XMPPMessageID`, reaction lookup can still fail. Follow-up: verify framework use of metadata or extend heuristic.
+1. **Reaction target for XMPP-originated messages** — Reactions in Jabber to another user’s XMPP-originated message (e.g. in MUC) sometimes do not bridge to Matrix. Message metadata (`XMPPMessageID`, stanza-id, origin-id, occupant-id) is now persisted synchronously through `ConvertedMessagePart.DBMetadata`; reaction lookup still uses a 30-day scan, which could be replaced by `findMessagesByXMPPRef`.
 2. **Multiple reactions per user per message** — Today only one reaction per user per message is shown on the other side (Matrix↔Jabber). To preserve multiple: Matrix→Jabber must send full reaction set in one XEP-0444 update (query existing from DB); Jabber→Matrix may need deduplication/event-id handling so each emoji is accepted.
 3. **MUC room topic/description (3.5)** — Validate that room topic and description are correctly read from disco#info (XEP-0128 muc#roominfo) in all cases; fix parsing or source if wrong. Low priority.
 4. **At-mentions (2.4)** — Map Matrix mentions (`@user:server`) to XMPP (e.g. JID or MUC nick) and XMPP mentions to Matrix. Deprioritized; deferred.
