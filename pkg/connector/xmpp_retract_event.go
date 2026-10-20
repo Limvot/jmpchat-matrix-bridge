@@ -226,10 +226,10 @@ func newRetractionEvent(env retractionEnv, portalKey networkid.PortalKey, r retr
 		return preHandleRetraction(ctx, env, evt, st, r, portal)
 	}
 	evt.PostHandleFunc = func(ctx context.Context, portal *bridgev2.Portal) {
-		postHandleRetraction(ctx, env, st, portalKey, portal)
 		if st.hctx != nil {
-			ctx = st.hctx
+			ctx = st.hctx // handling span and trace-annotated logger from the pre-handler
 		}
+		postHandleRetraction(ctx, env, st, portalKey, portal)
 		telemetry.EndRemoteEvent(ctx)
 	}
 	return evt
@@ -317,11 +317,16 @@ const retractScopeStanza = "stanza" // room/archive-assigned stanza-id: unique a
 // retractedRef is one tombstone: a scope (retractScopeStanza, or a sender scope) and a reference.
 type retractedRef struct{ Scope, Ref string }
 
-// senderScopes returns the sender scopes of a message: always `snd=<lower-cased sender id as stored>`
-// (bare JID for 1:1, room/nick for MUC) and, when present, `occ=<occupant-id>` (XEP-0421). Values are
-// query-escaped so that the ':' separators of a key stay unambiguous.
+// senderScopes returns the sender scopes of a message: always `snd=<sender id as stored>` (bare JID
+// for 1:1, room/nick for MUC; only the bare part is lower-cased, MUC nicks are case-sensitive so
+// "Bob" must not share tombstones with "bob") and, when present, `occ=<occupant-id>` (XEP-0421).
+// Values are query-escaped so that the ':' separators of a key stay unambiguous.
 func senderScopes(senderID, occupantID string) []string {
-	out := []string{"snd=" + url.QueryEscape(strings.ToLower(senderID))}
+	norm := strings.ToLower(senderID)
+	if i := strings.IndexByte(senderID, '/'); i >= 0 {
+		norm = strings.ToLower(senderID[:i]) + senderID[i:]
+	}
+	out := []string{"snd=" + url.QueryEscape(norm)}
 	if occupantID != "" {
 		out = append(out, "occ="+url.QueryEscape(occupantID))
 	}

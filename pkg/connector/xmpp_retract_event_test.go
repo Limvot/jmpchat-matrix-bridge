@@ -383,8 +383,15 @@ func TestRetractedKeyFormat(t *testing.T) {
 	if got := retractedKey("me@example.com", "Room@MUC.example.com", "snd=room%2Fbob", "S1"); got != "jabber_retracted:me@example.com:room@muc.example.com:snd=room%2Fbob:S1" {
 		t.Errorf("key = %q", got)
 	}
-	if got := senderScopes("Room@MUC.example.com/Bob:x", "OCC 1"); fmt.Sprint(got) != "[snd=room%40muc.example.com%2Fbob%3Ax occ=OCC+1]" {
+	if got := senderScopes("Room@MUC.example.com/Bob:x", "OCC 1"); fmt.Sprint(got) != "[snd=room%40muc.example.com%2FBob%3Ax occ=OCC+1]" {
 		t.Errorf("scopes = %v", got)
+	}
+	// MUC nicks are case-sensitive: "Bob" and "bob" are different occupants and must not share tombstones.
+	if a, b := senderScopes("room@muc.example.com/Bob", ""), senderScopes("ROOM@muc.example.com/bob", ""); a[0] == b[0] {
+		t.Errorf("nicks differing in case share scope %q", a[0])
+	}
+	if a, b := senderScopes("Alice@Example.com", ""), senderScopes("alice@example.com", ""); a[0] != b[0] {
+		t.Errorf("bare JIDs differing in case: %q vs %q", a[0], b[0])
 	}
 }
 
@@ -399,7 +406,7 @@ func TestRetractedRefsOf(t *testing.T) {
 	for _, r := range got {
 		keys = append(keys, r.Scope+"|"+r.Ref)
 	}
-	want := "[snd=room%40muc.example.com%2Fbob|m1 occ=OCC|m1 snd=room%40muc.example.com%2Fbob|S1 occ=OCC|S1 snd=room%40muc.example.com%2Fbob|O1 occ=OCC|O1 stanza|S1 snd=x|gen snd=x|old]"
+	want := "[snd=room%40muc.example.com%2FBob|m1 occ=OCC|m1 snd=room%40muc.example.com%2FBob|S1 occ=OCC|S1 snd=room%40muc.example.com%2FBob|O1 occ=OCC|O1 stanza|S1 snd=x|gen snd=x|old]"
 	if fmt.Sprint(keys) != want {
 		t.Errorf("refs = %v\nwant %s (matrix: ids are not XMPP refs, aliases are)", keys, want)
 	}
@@ -428,8 +435,11 @@ func TestRetractedRecordRealKV(t *testing.T) {
 	if !x.isRetracted(ctx, "room@muc.example.com", retractedSender{senderID: "room@muc.example.com/renamed", occupantID: "OCC-BOB"}, "m1") {
 		t.Error("occupant-id scope not matched")
 	}
-	if !x.isRetracted(ctx, "room@muc.example.com", retractedSender{senderID: "Room@muc.example.com/BOB"}, "m1") {
-		t.Error("sender scope not matched")
+	if !x.isRetracted(ctx, "room@muc.example.com", retractedSender{senderID: "Room@muc.example.com/bob"}, "m1") {
+		t.Error("sender scope not matched (bare part is case-insensitive)")
+	}
+	if x.isRetracted(ctx, "room@muc.example.com", retractedSender{senderID: "room@muc.example.com/BOB"}, "m1") {
+		t.Error("nick differing in case matched the sender scope")
 	}
 	// Another occupant using the same id attribute or victim's stanza-id as its id is not suppressed.
 	mallory := retractedSender{senderID: "room@muc.example.com/mallory", occupantID: "OCC-M", stanzaID: "S-MAL"}
