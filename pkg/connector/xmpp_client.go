@@ -109,6 +109,8 @@ type xmppClient struct {
 	avatarRefreshing   map[string]bool
 	avatarFetchSem     chan struct{}
 	avatarRefreshingMu sync.Mutex
+	// mucAv is the MUC occupant avatar table, queue and worker state (xep0054_muc.go).
+	mucAv mucAvatarState
 }
 
 // maxConcurrentAvatarFetches caps simultaneous background vCard avatar fetches.
@@ -218,6 +220,9 @@ func (x *xmppClient) Connect(ctx context.Context) {
 	go x.runFullBackfillAfterRosterSync(sessCtx)
 	// Periodic MAM catch-up so messages sent from other clients appear within ~45s if carbons aren't used.
 	go x.runMAMCatchUpLoop(sessCtx)
+	// MUC occupant avatars: fresh occupant table per session (a rejoin re-sends every presence) and
+	// a single worker; presence handling on Serve only touches memory (xep0054_muc.go).
+	x.startMUCAvatars(sessCtx)
 }
 
 // endSessionLocked cancels the current session's background goroutine context. Requires x.mu held.
@@ -1261,6 +1266,8 @@ func (x *xmppClient) ensureMUCGhostDisplayName(ctx context.Context, occupantFull
 	if ghost == nil {
 		return
 	}
+	// Memory only: lets the MUC avatar worker consider this occupant (see xep0054_muc.go).
+	x.noteMUCGhost(occupantFull)
 	info, err := x.GetUserInfo(ctx, ghost)
 	if err != nil || info == nil || info.Name == nil {
 		return
@@ -1316,6 +1323,8 @@ func (x *xmppClient) getUserInfo(ctx context.Context, ghost *bridgev2.Ghost) (*b
 	isBot := false
 	// Inbound avatar (XEP-0054 vcard-temp) for 1:1 contacts only, not MUC occupants. This never
 	// blocks: it returns the cached avatar (if any) and refreshes stale avatars in the background.
+	// MUC occupants always get a nil Avatar here on purpose: the MUC avatar worker (xep0054_muc.go)
+	// is their sole avatar writer, and a stale Avatar from this path could revert or corrupt it.
 	var avatar *bridgev2.Avatar
 	if !isMUCOccupant {
 		meta, _ := ghost.Metadata.(*GhostMetadata)
@@ -1680,6 +1689,7 @@ func (x *xmppClient) leaveMUC(ctx context.Context, roomJIDStr string) error {
 		delete(x.mucOurOccupantJID, roomJIDStr)
 	}
 	x.mucOurOccupantJIDMu.Unlock()
+	x.mucAv.clearRoom(roomJID.Bare().String())
 	x.logFor(ctx).Info().
 		Str("room", roomJIDStr).
 		Str("nick", nick).
