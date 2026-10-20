@@ -15,6 +15,9 @@ type PortalMetadata struct {
 	// only used while the preferred nick still equals MUCAutoNickBase. Never set by the user.
 	MUCAutoNick     string `json:"muc_auto_nick,omitempty"`
 	MUCAutoNickBase string `json:"muc_auto_nick_base,omitempty"`
+	// MUCLeft is set by an explicit `leave` and cleared by the next join; a left room is not
+	// re-joined automatically on connect (muc_autorejoin.go).
+	MUCLeft bool `json:"muc_left,omitempty"`
 }
 
 // GhostMetadata stores ghost user metadata for profile refresh tracking.

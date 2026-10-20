@@ -87,7 +87,7 @@ func (r *nickRig) conflict(t *testing.T, nick string) {
 func TestMUCNickRetrySequenceThenSuccessNotifiesOnce(t *testing.T) {
 	r := newNickRig()
 	ctx := context.Background()
-	if err := r.x.joinMUC(ctx, nickRoom); err != nil {
+	if err := r.x.joinMUC(ctx, nickRoom, nil); err != nil {
 		t.Fatal(err)
 	}
 	r.wait(t) // not async: joinMUC sent synchronously (drain the signal)
@@ -125,7 +125,7 @@ func TestMUCNickRetrySequenceThenSuccessNotifiesOnce(t *testing.T) {
 
 func TestMUCNickAllTakenNotice(t *testing.T) {
 	r := newNickRig()
-	if err := r.x.joinMUC(context.Background(), nickRoom); err != nil {
+	if err := r.x.joinMUC(context.Background(), nickRoom, nil); err != nil {
 		t.Fatal(err)
 	}
 	r.wait(t)
@@ -157,7 +157,7 @@ func TestMUCNickAllTakenNotice(t *testing.T) {
 
 func TestMUCNickNoNoticeWhenPreferredSucceeds(t *testing.T) {
 	r := newNickRig()
-	if err := r.x.joinMUC(context.Background(), nickRoom); err != nil {
+	if err := r.x.joinMUC(context.Background(), nickRoom, nil); err != nil {
 		t.Fatal(err)
 	}
 	r.wait(t)
@@ -170,7 +170,7 @@ func TestMUCNickNoNoticeWhenPreferredSucceeds(t *testing.T) {
 
 func TestMUCNickStale409Ignored(t *testing.T) {
 	r := newNickRig()
-	if err := r.x.joinMUC(context.Background(), nickRoom); err != nil {
+	if err := r.x.joinMUC(context.Background(), nickRoom, nil); err != nil {
 		t.Fatal(err)
 	}
 	r.wait(t)
@@ -219,7 +219,7 @@ func TestRememberedNickUsedOnRejoin(t *testing.T) {
 	r.x.login = nil
 	base, nick := chooseMUCNick("", "", string(r.x.loginID), "alice_1", "alice")
 	r.x.startMUCJoinTrack(nickRoom, base, nick)
-	if err := r.x.sendMUCJoin(context.Background(), nickRoom, nick); err != nil {
+	if err := r.x.sendMUCJoin(context.Background(), nickRoom, nick, nil); err != nil {
 		t.Fatal(err)
 	}
 	r.wait(t)
@@ -241,7 +241,7 @@ func TestMUCNickNoticeNamesFirstTriedNick(t *testing.T) {
 	r := newNickRig()
 	base, nick := chooseMUCNick("", "", string(r.x.loginID), "alice_1", "alice")
 	r.x.startMUCJoinTrack(nickRoom, base, nick)
-	if err := r.x.sendMUCJoin(context.Background(), nickRoom, nick); err != nil {
+	if err := r.x.sendMUCJoin(context.Background(), nickRoom, nick, nil); err != nil {
 		t.Fatal(err)
 	}
 	r.wait(t)
@@ -261,7 +261,7 @@ func TestMUCNickNoticeNamesFirstTriedNick(t *testing.T) {
 
 func TestMUCJoinStateResetStopsStaleRetry(t *testing.T) {
 	r := newNickRig()
-	if err := r.x.joinMUC(context.Background(), nickRoom); err != nil {
+	if err := r.x.joinMUC(context.Background(), nickRoom, nil); err != nil {
 		t.Fatal(err)
 	}
 	r.wait(t)
@@ -286,7 +286,7 @@ func TestMUCJoinStateResetStopsStaleRetry(t *testing.T) {
 		t.Fatalf("stale notice: %v", r.notices)
 	}
 	// A chain in the new session works.
-	if err := r.x.joinMUC(context.Background(), nickRoom); err != nil {
+	if err := r.x.joinMUC(context.Background(), nickRoom, nil); err != nil {
 		t.Fatal(err)
 	}
 	r.wait(t)

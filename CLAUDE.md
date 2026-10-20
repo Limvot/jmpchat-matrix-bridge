@@ -65,6 +65,8 @@ All bridge logic lives in `pkg/connector/`. The bridgev2 framework handles Matri
 
 - **`pkg/connector/xmpp_carbons.go`** — XEP-0280 Message Carbons. Enables on connect, parses `<sent>`/`<received>` forwarded stanzas, queues as remote events.
 
+- **`pkg/connector/muc_autorejoin.go`** — MUC auto-rejoin: `Connect` starts `runMUCAutoRejoin(sessCtx)` (own root span, ends with the session context, 3 s initial delay, 500 ms stagger, max 200 rooms). `selectMUCRejoinCandidates` (pure) takes this login's `GetAllWithMXID` portals with a Matrix room that are MUCs (RoomType GroupDM; unset type -> `isMUC`; never DMs, Cheogram DM/group MMS, or `PortalMetadata.MUCLeft`). Joins go through `joinMUC(ctx, room, hist)`; the batch passes `mucRejoinHistory` (`<history since=newest bridged message, maxstanzas=100>`, since clamped to 7 days; `maxstanzas=20` without anchor), manual `JoinMUC` and 409 retries send no history element. `LeaveMUC` success sets `MUCLeft` (`setMUCLeft`), `JoinMUC` clears it.
+
 - **`pkg/connector/xmpp_mam.go`** — XEP-0313 Message Archive Management. Backfill-on-view (`FetchMessages`), periodic catch-up loop (~45s interval), deduplication against recent messages. Catch-up and full backfill skip Cheogram number JIDs (`cheogramE164`, in `cheogram.go`) that have no Matrix room and were not seen on this connection (`mamEligible`, `roomPortalIDs`: one `GetAllWithMXID` query per cycle), so bulk-imported numbers do not cause polling or portal creation.
 
 - **`pkg/connector/xep0363.go`** — XEP-0363 HTTP File Upload. Discovers upload service via common subdomains, requests upload slots, uploads via HTTP PUT.
