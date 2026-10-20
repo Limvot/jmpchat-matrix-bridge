@@ -110,19 +110,21 @@ All commands use the configured prefix (default `!jabber`):
 |---------|-------------|
 | `login password` | Log in with JID + password |
 | `pm <jid-or-phone>` | Start a DM (Cheogram: phone numbers resolved automatically) |
-| `join <room@conference.domain>` | Join a MUC room |
-| `leave <room@conference.domain>` | Leave a MUC room |
-| `sync-roster` | Re-fetch roster, update display/room names |
-| `add-to-roster <jid> <name>` | Add or rename a roster contact (inside a one-to-one chat, `add-to-roster <name>` works like `save-contact`) |
-| `save-contact <name>` | Inside a one-to-one chat room: save (or rename) that chat's contact in the roster; the room name updates. Works in every build |
-| `remove-from-roster [<jid-or-phone>]` | Remove a contact from the roster; with no argument, inside a one-to-one chat, removes that chat's contact. Names fall back to the JID/number. Works in every build |
+| `join [<login>] <room@conference.domain>` | Join a MUC room |
+| `leave [<login>] <room@conference.domain>` | Leave a MUC room |
+| `sync-roster [<login>]` | Re-fetch roster, update display/room names |
+| `add-to-roster [<login>] <jid> <name>` | Add or rename a roster contact (inside a one-to-one chat, `add-to-roster <name>` works like `save-contact`) |
+| `save-contact [<login>] <name>` | Inside a one-to-one chat room: save (or rename) that chat's contact in the roster; the room name updates. Works in every build |
+| `remove-from-roster [<login>] [<jid-or-phone>]` | Remove a contact from the roster; with no argument, inside a one-to-one chat, removes that chat's contact. Names fall back to the JID/number. Works in every build |
 | `carddav-login` | Set up the CardDAV account (management room, no arguments; prompts for URL, username, password, optional address book; validates before saving; needs `network.cheogram`) |
 | `carddav-sync` / `carddav-sync apply` | Preview / apply the import of CardDAV phone numbers into the roster (detached run, result as a later message) |
 | `carddav-status` / `carddav-logout` | Show the CardDAV account and last sync / remove the account |
 | `roster-only-calls on\|off\|status` | (`sipcalls` build) Ring for incoming SIP calls only from numbers in the roster; others get 480 plus a notice in the management room. Gates SIP calls only, not XEP-0353 call notifications |
-| `search-roster <query>` | Search roster by JID or name |
-| `muc-nick <room-jid> <nick>` | Set room-specific MUC nickname |
-| `muc-nick-default <nick>` | Set default MUC nickname for all rooms |
+| `search-roster [<login>] <query>` | Search roster by JID or name |
+| `muc-nick [<login>] <room-jid> <nick>` | Set room-specific MUC nickname |
+| `muc-nick-default [<login>] <nick>` | Set default MUC nickname for all rooms |
+
+Account selection: with several Jabber logins, the commands above taking `[<login>]` accept the login ID (lower-cased JID) as an optional first argument (`CommandLogin` in `pkg/connector/command_login.go`, same convention as bridgev2 `getClientForStartingChat`). Only the sender's own logins match, case-insensitively; the argument is not consumed if it would leave fewer arguments than the command needs (so `join me2@x.org` still means the room; to add your own other account to the roster write `add-to-roster me1@x.org me2@x.org Name`). Without it: the chat room's login inside a portal, else the default login (first by ID); outside a portal with several logins the success reply notes which account was used. carddav/sipcalls commands use `lookupCommandLogin` only (no explicit argument).
 
 ## Setup for Development / Testing
 

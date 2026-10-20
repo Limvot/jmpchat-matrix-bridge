@@ -482,9 +482,11 @@ Roster-only calls uses the bridge's Jabber roster as the list of known numbers (
 
 ## Multi-user chats (MUC)
 
-`!jabber join <room@service>` joins a MUC and creates its Matrix room. The room is always created as a group chat. Without the command (for example a room first seen through an inbound message), the bridge asks the server with disco#info, falling back to a name heuristic (`@conference.`, `@muc.`, `@groups.` for Snikket) when the server cannot be asked.
+`!jabber join [<login-jid>] <room@service>` joins a MUC and creates its Matrix room (the optional login JID picks the account when you have several; see below). The room is always created as a group chat. Without the command (for example a room first seen through an inbound message), the bridge asks the server with disco#info, falling back to a name heuristic (`@conference.`, `@muc.`, `@groups.` for Snikket) when the server cannot be asked.
 
 A room joined before this was fixed (for example on a Snikket `groups.` domain) may have been created as a one-to-one chat; its outgoing messages then fail. The bridge does not migrate these. Run bridgev2's `!jabber delete-portal` inside that Matrix room, then `!jabber join <room-jid>` again.
+
+**Choosing the account.** With several Jabber logins, these commands accept the login JID as an optional first argument: `sync-roster`, `add-to-roster`, `save-contact`, `remove-from-roster`, `search-roster`, `join`, `leave`, `muc-nick` and `muc-nick-default` (for example `!jabber join alice@jabber.org room@conference.example.com`). Only your own logins match, case-insensitively. Without it the command uses the account of the chat room you run it in, or else your default login (the first by ID); in the management room the reply then says which account was used. The argument is not taken as an account if it would leave the command without a needed argument, so a command like `add-to-roster me2@x.org Name` still means the contact `me2@x.org`; to add your own other account, name the login first: `add-to-roster me1@x.org me2@x.org Name`. `!jabber list-logins` shows your logins. Other commands (`carddav-*`, `sip-*`, `roster-only-calls`) always use the room's or the default login.
 
 ## Verifying
 
