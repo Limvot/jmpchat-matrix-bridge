@@ -105,6 +105,22 @@ func TestLogCorrelation(t *testing.T) {
 	zerolog.Ctx(rctx).Info().Msg("x")
 	assertFields(t, buf2.String(), sc.TraceID(), rsc.SpanID(), sc.SpanID())
 
+	// Lazy hooks (retractions): MutateContext starts no span; the pre-handler does.
+	var lazy simplevent.EventMeta
+	attachLazyTraceHooks(&lazy, sc)
+	lctx2 := lazy.MutateContextFunc(zerolog.New(&bytes.Buffer{}).WithContext(ctx))
+	if trace.SpanContextFromContext(lctx2).SpanID() == sc.SpanID() || trace.SpanContextFromContext(lctx2).IsValid() {
+		t.Error("lazy MutateContext must not start a span")
+	}
+	sctx := startLazyRemoteEvent(lctx2)
+	if g := trace.SpanContextFromContext(sctx); !g.IsValid() || g.TraceID() != sc.TraceID() || g.SpanID() == sc.SpanID() {
+		t.Errorf("startLazyRemoteEvent span context %v", g)
+	}
+	telemetry.EndRemoteEvent(sctx)
+	if startLazyRemoteEvent(ctx) != ctx {
+		t.Error("no stored parent: ctx must be unchanged")
+	}
+
 	// x.logFor under a span.
 	dbuf.Reset()
 	x.logFor(mctx).Info().Msg("x")

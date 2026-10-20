@@ -201,6 +201,7 @@ type retractionEnv interface {
 // retractionState is shared between the pre and post handler of one event.
 type retractionState struct {
 	parts []*database.Message // rows to tombstone after the framework removed them
+	hctx  context.Context     // ctx carrying the handling span started by the pre-handler (nil if it did not run)
 }
 
 // newRetractionEvent builds the remote event for a retraction. Its target is the raw reference until
@@ -226,6 +227,9 @@ func newRetractionEvent(env retractionEnv, portalKey networkid.PortalKey, r retr
 	}
 	evt.PostHandleFunc = func(ctx context.Context, portal *bridgev2.Portal) {
 		postHandleRetraction(ctx, env, st, portalKey, portal)
+		if st.hctx != nil {
+			ctx = st.hctx
+		}
 		telemetry.EndRemoteEvent(ctx)
 	}
 	return evt
@@ -245,8 +249,12 @@ func partsOfID(cands []*database.Message, id networkid.MessageID) []*database.Me
 // validated message ID. It returns nil to let bridgev2 redact (no reason), or a result when the event
 // is finished here: Ignored (unknown/invalid target), Failed, or Success after redacting with the
 // moderation reason ourselves. bridgev2 does not call PostHandle when a result is returned, so the
-// handling span is ended here.
+// handling span is ended here (it is started here too).
 func preHandleRetraction(ctx context.Context, env retractionEnv, evt *simplevent.MessageRemove, st *retractionState, r retraction, portal *bridgev2.Portal) *bridgev2.EventHandlingResult {
+	// The handling span starts here, not in MutateContext: bridgev2 ignores events of portals without
+	// a room before any handler runs, which would leak a span started earlier.
+	ctx = startLazyRemoteEvent(ctx)
+	st.hctx = ctx
 	rctx, span := telemetry.StartChild(ctx, "bridge.resolve_retract_target")
 	defer span.End()
 	done := func(res bridgev2.EventHandlingResult) *bridgev2.EventHandlingResult {
