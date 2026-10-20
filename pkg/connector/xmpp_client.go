@@ -60,6 +60,8 @@ type xmppClient struct {
 	mucSendJoinHook  func(roomBare, nick string) error
 	// mucJoinTracks follows 409 retry chains per room; guarded by mucPendingJoinMu.
 	mucJoinTracks map[string]*mucJoinTrack
+	// mucJoinGen counts sessions for join state (bumped by resetMUCJoinState); guarded by mucPendingJoinMu.
+	mucJoinGen uint64
 	mu          sync.Mutex
 	session     *xmpp.Session
 	// sessionCancel cancels the context shared by this session's background goroutines (roster
@@ -169,6 +171,8 @@ func (x *xmppClient) Connect(ctx context.Context) {
 	// exit or Disconnect) instead of leaking one set per reconnect.
 	sessCtx, cancelSess := context.WithCancel(context.Background())
 	x.sessionCancel = cancelSess
+	// Join state belongs to the previous session: forget it before anything of this one can join.
+	x.resetMUCJoinState()
 	span.SetAttributes(attribute.String("xmpp.connect.result", "connected"))
 
 	if x.login != nil {

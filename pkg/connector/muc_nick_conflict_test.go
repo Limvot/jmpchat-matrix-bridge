@@ -236,3 +236,63 @@ func TestRememberedNickUsedOnRejoin(t *testing.T) {
 		t.Fatalf("sent=%v", r.sent)
 	}
 }
+
+func TestMUCNickNoticeNamesFirstTriedNick(t *testing.T) {
+	r := newNickRig()
+	base, nick := chooseMUCNick("", "", string(r.x.loginID), "wreck_1", "wreck")
+	r.x.startMUCJoinTrack(nickRoom, base, nick)
+	if err := r.x.sendMUCJoin(context.Background(), nickRoom, nick); err != nil {
+		t.Fatal(err)
+	}
+	r.wait(t)
+	r.conflict(t, "wreck_1")
+	r.wait(t) // wreck_2 sent
+	presenceStanza(t, r.x, "", nickRoom+"/wreck_2", selfBody)
+	r.wait(t)
+	r.settle()
+	want := "`wreck_1` is taken in " + nickRoom + ", joined as `wreck_2`. Use `!jabber muc-nick " + nickRoom + " <nick>` to pick another."
+	if len(r.notices) != 1 || r.notices[0] != want {
+		t.Fatalf("notices = %q", r.notices)
+	}
+	if len(r.saved) != 1 || r.saved[0] != [2]string{"wreck", "wreck_2"} {
+		t.Fatalf("saved = %v", r.saved)
+	}
+}
+
+func TestMUCJoinStateResetStopsStaleRetry(t *testing.T) {
+	r := newNickRig()
+	if err := r.x.joinMUC(context.Background(), nickRoom); err != nil {
+		t.Fatal(err)
+	}
+	r.wait(t)
+	next, tried, gen, handled := r.x.onMUCJoinConflict(nickRoom, "wreck")
+	if !handled || next != "wreck_1" {
+		t.Fatalf("next=%q handled=%v", next, handled)
+	}
+	// New session before the retry goroutine runs.
+	r.x.resetMUCJoinState()
+	if len(r.x.mucPendingJoin) != 0 || len(r.x.mucJoinTracks) != 0 {
+		t.Fatal("reset must clear join state")
+	}
+	r.x.continueMUCJoinAfterConflict(nickRoom, next, tried, gen)
+	r.settle()
+	if len(r.sent) != 1 || len(r.notices) != 0 {
+		t.Fatalf("stale chain acted: sent=%v notices=%v", r.sent, r.notices)
+	}
+	// A stale all-taken notice is dropped too.
+	r.x.continueMUCJoinAfterConflict(nickRoom, "", []string{"wreck"}, gen)
+	r.settle()
+	if len(r.notices) != 0 {
+		t.Fatalf("stale notice: %v", r.notices)
+	}
+	// A chain in the new session works.
+	if err := r.x.joinMUC(context.Background(), nickRoom); err != nil {
+		t.Fatal(err)
+	}
+	r.wait(t)
+	r.conflict(t, "wreck")
+	r.wait(t)
+	if r.sent[len(r.sent)-1] != "wreck_1" {
+		t.Fatalf("sent=%v", r.sent)
+	}
+}
