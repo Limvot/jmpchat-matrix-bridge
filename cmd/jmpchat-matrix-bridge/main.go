@@ -118,7 +118,7 @@ func main() {
 			Func:          withSpan("add-to-roster", cmdAddToRoster),
 			Name:          "add-to-roster",
 			RequiresLogin: true,
-			Help:          commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Add or rename a contact in your Jabber roster. Usage: `%s add-to-roster [_login JID_] <jid> <name>`, or `%s add-to-roster [_login JID_] <name>` inside a one-to-one chat", prefix, prefix)},
+			Help:          commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Add or rename a contact in your Jabber roster. Usage: `%s add-to-roster [_login JID_] <jid> <name>`, or `%s add-to-roster <name>` inside a one-to-one chat", prefix, prefix)},
 		})
 		br.Bridge.Commands.(*commands.Processor).AddHandler(&commands.FullHandler{
 			Func:          withSpan("save-contact", connector.SaveContactCommand),
@@ -130,7 +130,7 @@ func main() {
 			Func:          withSpan("remove-from-roster", connector.RemoveContactCommand),
 			Name:          "remove-from-roster",
 			RequiresLogin: true,
-			Help:          commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Remove a contact from your Jabber roster. Usage: `%s remove-from-roster [_login JID_] <jid-or-phone>`, or `%s remove-from-roster [_login JID_]` inside a one-to-one chat", prefix, prefix)},
+			Help:          commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Remove a contact from your Jabber roster. Usage: `%s remove-from-roster [_login JID_] <jid-or-phone>`, or `%s remove-from-roster` inside a one-to-one chat", prefix, prefix)},
 		})
 		for _, c := range []struct {
 			name, desc string
@@ -233,13 +233,13 @@ func cmdSyncRoster(ce *commands.Event) {
 }
 
 func cmdAddToRoster(ce *commands.Event) {
-	// Inside a chat, `add-to-roster [<login>] <name>` (no JID) saves the chat's contact, like save-contact.
-	// An own login ID as the first argument selects the account unless too few arguments would remain.
-	minArgs := 2
-	if ce.Portal != nil {
-		minArgs = 1
+	// Inside a chat, `add-to-roster <name>` (no JID) saves the chat's contact, like save-contact.
+	// An own login ID as the first argument selects the account only in `add-to-roster <login> <jid> <name>`:
+	// a JID followed by a (possibly multi-word) name is always the contact, even if it is one of the user's logins.
+	login, args, explicit := connector.CommandLogin(ce, 2)
+	if explicit && !strings.Contains(args[0], "@") {
+		login, args, explicit = connector.CommandLogin(ce, len(ce.Args)) // never consumes
 	}
-	login, args, explicit := connector.CommandLogin(ce, minArgs)
 	if ce.Portal != nil && len(args) > 0 && !strings.Contains(args[0], "@") {
 		connector.SaveContactCommand(ce)
 		return
