@@ -8,6 +8,7 @@ package connector
 import (
 	"context"
 	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/xml"
@@ -273,7 +274,25 @@ func (x *xmppClient) doAvatarRefresh(bareJID string) {
 	if span.IsRecording() {
 		span.SetAttributes(attribute.Bool("xmpp.avatar.changed", avatar != nil))
 	}
-	applyGhostAvatar(ctx, realAvatarGhost{ghost}, avatar, hash, nil)
+	var after func(g *bridgev2.Ghost)
+	var prop *mucMXC
+	if avatar != nil && hash != "" {
+		sum := sha256.Sum256(data)
+		after = func(g *bridgev2.Ghost) {
+			// Only an MXC that provably holds these bytes can be shared with MUC occupant ghosts.
+			if g.AvatarMXC != "" && g.AvatarHash == sum {
+				prop = &mucMXC{realHash: hash, mxc: string(g.AvatarMXC), sha256: g.AvatarHash}
+			}
+		}
+	}
+	applyGhostAvatar(ctx, realAvatarGhost{ghost}, avatar, hash, after)
+	if avatar != nil && ghost.AvatarSet {
+		if hash == "" {
+			x.propagateContactAvatar(bareJID, nil) // removal
+		} else if prop != nil {
+			x.propagateContactAvatar(bareJID, prop)
+		}
+	}
 }
 
 // applyGhostAvatar applies avatar (nil = no change, UpdateInfo leaves name and other fields alone)

@@ -810,3 +810,167 @@ func TestMUCLiveOccupantsNotBlockedByHistory(t *testing.T) {
 		t.Fatal("cap must apply once only live entries remain")
 	}
 }
+
+// --- propagation from the 1:1 path ---
+
+const (
+	testReal  = "alice@example.com"
+	testOcc2  = "room@muc.example.com/alice2"
+	otherOcc  = "room@muc.example.com/bob"
+	otherRoom = "other@muc.example.com"
+)
+
+func realPresence(h, real string) presenceInfo {
+	p := hashPresence(h)
+	p.itemJID = real
+	return p
+}
+
+func propMXC(n int) *mucMXC {
+	return &mucMXC{realHash: hashN(n), mxc: "mxc://example.com/prop", sha256: [32]byte{byte(n)}}
+}
+
+func noFetch(t *testing.T, h *harness) {
+	h.fetchFn = func(string) ([]byte, string, error) { t.Fatal("propagation must not fetch"); return nil, "", nil }
+}
+
+func TestPropagateAppliesToMatchingOccupantsOnly(t *testing.T) {
+	h := newHarness()
+	noFetch(t, h)
+	occ2 := otherRoom + "/alice"
+	for _, o := range []string{testOcc, occ2, otherOcc} {
+		h.ghosts[o] = newFakeGhost(hashN(1), true)
+	}
+	queueOne(h, testOcc, realPresence(hashN(1), "Alice@Example.com")) // case-insensitive
+	queueOne(h, occ2, realPresence(hashN(1), testReal))
+	queueOne(h, otherOcc, realPresence(hashN(1), "bob@example.com"))
+	for h.s.runOnce(context.Background()) {
+	}
+	if n := h.s.propagateContact(testReal, propMXC(5)); n != 2 {
+		t.Fatalf("matched %d", n)
+	}
+	for h.s.runOnce(context.Background()) {
+	}
+	for _, o := range []string{testOcc, occ2} {
+		u := h.ghosts[o].updates
+		if len(u) != 1 || u[0].Avatar.MXC != "mxc://example.com/prop" || u[0].Avatar.Get != nil || string(u[0].Avatar.ID) != "sha1:"+hashN(5) {
+			t.Fatalf("%s: %+v", o, u)
+		}
+		if h.ghosts[o].g.Metadata.(*GhostMetadata).AvatarHash != hashN(5) {
+			t.Fatal("hash not stored")
+		}
+	}
+	if len(h.ghosts[otherOcc].updates) != 0 {
+		t.Fatal("non-matching occupant touched")
+	}
+	if len(h.calls) != 0 {
+		t.Fatal("fetch happened")
+	}
+}
+
+func TestPropagateNeedsRealJIDAndGhost(t *testing.T) {
+	h := newHarness()
+	noFetch(t, h)
+	h.ghosts[testOcc] = newFakeGhost(hashN(1), true)
+	queueOne(h, testOcc, hashPresence(hashN(1))) // no real JID
+	for h.s.runOnce(context.Background()) {
+	}
+	// Matching real JID but no ghost seen.
+	h.s.notePresence(otherOcc, testRoom, realPresence(hashN(1), testReal), false, false)
+	if n := h.s.propagateContact(testReal, propMXC(5)); n != 0 {
+		t.Fatalf("matched %d", n)
+	}
+	if n := h.s.propagateContact("", propMXC(5)); n != 0 || h.pendingLen() != 0 {
+		t.Fatal("empty jid must match nothing")
+	}
+}
+
+func TestPropagateStalePresenceDoesNotRevert(t *testing.T) {
+	h := newHarness()
+	noFetch(t, h)
+	h.ghosts[testOcc] = newFakeGhost(hashN(1), true)
+	queueOne(h, testOcc, realPresence(hashN(1), testReal))
+	h.s.runOnce(context.Background())
+	h.s.propagateContact(testReal, propMXC(5))
+	h.s.runOnce(context.Background())
+	g := h.ghosts[testOcc]
+	n := len(g.updates)
+	// The room keeps advertising the old hash, including past the 60 s interval.
+	h.now = h.now.Add(2 * time.Hour)
+	h.s.notePresence(testOcc, testRoom, realPresence(hashN(1), testReal), false, false)
+	h.s.noteGhost(testOcc)
+	if h.pendingLen() != 0 {
+		t.Fatal("stale advertised hash must not enqueue")
+	}
+	if len(g.updates) != n || g.g.Metadata.(*GhostMetadata).AvatarHash != hashN(5) {
+		t.Fatal("ghost reverted")
+	}
+	// A genuinely new advertised hash still works through the normal path.
+	h.fetchFn = func(string) ([]byte, string, error) { return pngBytes, hashN(7), nil }
+	h.s.notePresence(testOcc, testRoom, realPresence(hashN(7), testReal), false, false)
+	h.s.runOnce(context.Background())
+	if g.g.Metadata.(*GhostMetadata).AvatarHash != hashN(7) {
+		t.Fatal("new room hash must apply")
+	}
+}
+
+func TestPropagateIgnoresMinInterval(t *testing.T) {
+	h := newHarness()
+	noFetch(t, h)
+	h.ghosts[testOcc] = newFakeGhost("", true)
+	h.s.putMXC(*propMXC(1), hashN(1))
+	queueOne(h, testOcc, realPresence(hashN(1), testReal))
+	h.s.runOnce(context.Background()) // real work: lastWork stamped
+	h.s.propagateContact(testReal, propMXC(5))
+	if h.pendingLen() != 1 {
+		t.Fatal("propagation must bypass the minimum interval")
+	}
+	h.s.runOnce(context.Background())
+	if h.ghosts[testOcc].g.Metadata.(*GhostMetadata).AvatarHash != hashN(5) {
+		t.Fatal("not applied")
+	}
+}
+
+func TestPropagateRemoval(t *testing.T) {
+	h := newHarness()
+	noFetch(t, h)
+	h.ghosts[testOcc] = newFakeGhost(hashN(1), true)
+	h.ghosts[otherOcc] = newFakeGhost("", true)
+	queueOne(h, testOcc, realPresence(hashN(1), testReal))
+	none := presenceInfo{isMUC: true, photo: photoNone, itemJID: testReal}
+	queueOne(h, otherOcc, none)
+	for h.s.runOnce(context.Background()) {
+	}
+	h.s.propagateContact(testReal, nil)
+	for h.s.runOnce(context.Background()) {
+	}
+	u := h.ghosts[testOcc].updates
+	if len(u) != 1 || !u[0].Avatar.Remove || h.ghosts[testOcc].g.Metadata.(*GhostMetadata).AvatarHash != "" {
+		t.Fatalf("removal: %+v", u)
+	}
+	if len(h.ghosts[otherOcc].updates) != 0 {
+		t.Fatal("ghost without avatar must be left alone")
+	}
+}
+
+func TestPropagateRace(t *testing.T) {
+	h := newHarness()
+	noFetch(t, h)
+	h.ghosts[testOcc] = newFakeGhost(hashN(1), true)
+	queueOne(h, testOcc, realPresence(hashN(1), testReal))
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				h.s.propagateContact(testReal, propMXC(2+i))
+				h.s.notePresence(testOcc, testRoom, realPresence(hashN(1), testReal), false, false)
+			}
+		}(i)
+	}
+	for i := 0; i < 100; i++ {
+		h.s.runOnce(context.Background())
+	}
+	wg.Wait()
+}
