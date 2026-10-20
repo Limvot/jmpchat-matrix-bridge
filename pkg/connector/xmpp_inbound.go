@@ -820,14 +820,12 @@ func (x *xmppClient) handlePresence(t xmlstream.TokenReadEncoder, start *xml.Sta
 
 	if typeVal == "error" {
 		if hasConflict {
-			x.mucPendingJoinMu.Lock()
-			if x.mucPendingJoin == nil {
-				x.mucPendingJoin = make(map[string]string)
+			// State change only; the retry send and notices run in a goroutine with its own span.
+			next, tried, handled := x.onMUCJoinConflict(roomBare, ourNick)
+			if handled {
+				x.log.Info().Str("room", roomBare).Str("nick", ourNick).Msg("MUC join nick conflict (409), will retry with alternative nick")
+				go x.continueMUCJoinAfterConflict(roomBare, next, tried)
 			}
-			delete(x.mucPendingJoin, roomBare)
-			x.mucPendingJoinMu.Unlock()
-			x.log.Info().Str("room", roomBare).Str("nick", ourNick).Msg("MUC join nick conflict (409), will retry with alternative nick")
-			go x.retryMUCJoinAfterConflict(roomBare, ourNick)
 		}
 		return nil
 	}
@@ -845,6 +843,10 @@ func (x *xmppClient) handlePresence(t xmlstream.TokenReadEncoder, start *xml.Sta
 		x.mucOurOccupantJID[roomBare] = fromJID.String()
 		delete(x.mucPendingJoin, roomBare)
 		x.log.Debug().Str("room", roomBare).Str("occupant_jid", fromJID.String()).Msg("MUC join confirmed, stored our occupant JID")
+		// Confirmed with an alternative nick after a 409: remember it and tell the user (goroutine).
+		if track := x.takeMUCJoinTrackLocked(roomBare); track != nil && track.conflicted && ourNick != track.base {
+			go x.announceMUCNickChange(roomBare, track.base, ourNick)
+		}
 		// Queue ChatResync so the bridge re-fetches GetChatInfo (and can refresh room/ghost info after rejoin).
 		if x.login != nil {
 			x.queueRemoteEvent(context.Background(), &simplevent.ChatResync{

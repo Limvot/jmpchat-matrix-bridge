@@ -42,6 +42,8 @@ All bridge logic lives in `pkg/connector/`. The bridgev2 framework handles Matri
 
 - **`pkg/connector/xmpp_client.go`** — `xmppClient` (implements `bridgev2.NetworkAPI` and related interfaces). The largest file (~1800 lines). Handles: reconnect loop with exponential backoff, roster sync, MUC join/leave/nick, `HandleMatrixMessage` (text, media, replies, reactions → XMPP), `ResolveIdentifier` (JID/phone → portal key), `GetChatInfo`/`GetUserInfo`, portal type detection (`portalIsMUC` via disco#info or heuristic).
 
+- **`pkg/connector/muc_nick_conflict.go`** — MUC nick conflict handling: on 409 `onMUCJoinConflict` (Serve goroutine, state only) advances a per-room `mucJoinTrack` (`base_1`..`base_3`), `continueMUCJoinAfterConflict` sends the retry from a goroutine with its own span. Confirmation = the existing pending-nick match in `handlePresence` (our available presence from `room/nick`); then `announceMUCNickChange` stores `PortalMetadata.MUCAutoNick`/`MUCAutoNickBase` (auto, only valid while the preferred base is unchanged; `muc-nick` clears it, see `chooseMUCNick`) and posts an m.notice to the portal room and the management room. All-taken posts a failure notice.
+
 ### Message Handling
 
 - **`pkg/connector/xmpp_inbound.go`** — Inbound message routing. Dispatches incoming XMPP stanzas to DM or MUC handlers, extracts sender, determines portal key, queues `RemoteEvent` for the framework. Handles self-echo filtering for MUC.
