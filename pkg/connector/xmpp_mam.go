@@ -52,6 +52,10 @@ type mamResultItem struct {
 	Body      string
 	Timestamp time.Time
 	QueryID   string
+	// Retract is set when the archived message is a retraction/moderation (its fallback body is
+	// dropped); Retracted marks an archived original that the server tombstoned (<retracted>).
+	Retract   *retractInfo
+	Retracted bool
 }
 
 // stableIDs returns the stanza-id/origin-id to persist for an archived message: the archive id of a
@@ -150,8 +154,8 @@ func (x *xmppClient) handleMAMResult(t xmlstream.TokenReadEncoder, start *xml.St
 		switch v := tok.(type) {
 		case xml.StartElement:
 			depth++
-			if msgDepth > 0 && depth == msgDepth+1 {
-				ids.observe(v)
+			if msgDepth > 0 {
+				ids.track(v, depth, msgDepth+1)
 			}
 			if v.Name.Local == "message" && msgDepth == 0 {
 				msgDepth = depth
@@ -181,9 +185,20 @@ func (x *xmppClient) handleMAMResult(t xmlstream.TokenReadEncoder, start *xml.St
 					}
 				}
 			}
+		case xml.CharData:
+			if msgDepth > 0 {
+				ids.trackChars(v)
+			}
 		case xml.EndElement:
 			depth--
+			if msgDepth > 0 {
+				ids.trackEnd(depth + 1)
+			}
 		}
+	}
+	ids.finish()
+	if ids.Retract != nil {
+		body = "" // XEP-0424 fallback text; never bridge it
 	}
 	if timestamp.IsZero() {
 		timestamp = time.Now()
@@ -198,6 +213,7 @@ func (x *xmppClient) handleMAMResult(t xmlstream.TokenReadEncoder, start *xml.St
 	x.mam.deliverMessage(queryID, mamResultItem{
 		From: from, To: to, Type: msgType, StanzaID: stanzaID, ArchiveID: archiveID, OriginID: ids.OriginID,
 		Body: body, Timestamp: timestamp, QueryID: queryID,
+		Retract: ids.Retract, Retracted: ids.Tombstone,
 	})
 	return nil
 }
@@ -391,6 +407,9 @@ func (x *xmppClient) FetchMessages(ctx context.Context, params bridgev2.FetchMes
 
 	// Convert to BackfillMessage; respect count (we may have requested count+1 to detect hasMore).
 	hasMore := len(items) > count
+	// Retractions are newer than their originals and the first thing truncation drops, so collect
+	// them from everything fetched.
+	batchRetracted := collectBatchRetractions(items)
 	if len(items) > count {
 		items = items[:count]
 	}
@@ -399,6 +418,7 @@ func (x *xmppClient) FetchMessages(ctx context.Context, params bridgev2.FetchMes
 		sort.Slice(items, func(i, j int) bool { return items[i].Timestamp.Before(items[j].Timestamp) })
 	}
 
+	portalKey := params.Portal.PortalKey
 	messages := make([]*bridgev2.BackfillMessage, 0, len(items))
 	for _, item := range items {
 		fromBare := item.From
@@ -407,6 +427,12 @@ func (x *xmppClient) FetchMessages(ctx context.Context, params bridgev2.FetchMes
 		}
 		// Skip groupchat for now if we ever get MUC MAM
 		if item.Type == "groupchat" {
+			continue
+		}
+		// Retractions themselves (their fallback text is gone), server tombstones of retracted
+		// originals and body-less items (chat states) are never backfilled, nor are originals that a
+		// retraction in this batch or an earlier one removed.
+		if !mamItemBackfillable(item, batchRetracted) || x.mamItemRetracted(ctx, portalKey, item) {
 			continue
 		}
 		sender := x.makeEventSender(fromBare)
@@ -645,8 +671,15 @@ func (x *xmppClient) mamCatchUpForPortal(ctx, cycleCtx context.Context, bareJID 
 			)
 		}
 	}()
+	batchRetracted := collectBatchRetractions(items)
 	for _, item := range items {
 		if item.Type == "groupchat" {
+			continue
+		}
+		if x.queueMAMRetraction(pctx, portalKey, item) {
+			continue
+		}
+		if item.Retracted || batchRetracted.hides(item) || x.mamItemRetracted(ctx, portalKey, item) {
 			continue
 		}
 		msgID := networkid.MessageID(item.StanzaID)
@@ -819,6 +852,9 @@ func (x *xmppClient) doMAMBackfillOnView(ctx context.Context, span trace.Span, p
 	if len(items) > 1 {
 		sort.Slice(items, func(i, j int) bool { return items[i].Timestamp.Before(items[j].Timestamp) })
 	}
+	// Retractions are newer than their originals and the first thing truncation drops, so collect
+	// them from everything fetched.
+	batchRetracted := collectBatchRetractions(items)
 	if len(items) > maxMsgs {
 		items = items[:maxMsgs]
 	}
@@ -828,7 +864,13 @@ func (x *xmppClient) doMAMBackfillOnView(ctx context.Context, span trace.Span, p
 		if item.Type == "groupchat" {
 			continue
 		}
-		if item.Body == "" {
+		if x.queueMAMRetraction(ctx, portalKey, item) {
+			continue
+		}
+		if item.Body == "" || item.Retracted {
+			continue
+		}
+		if batchRetracted.hides(item) || x.mamItemRetracted(ctx, portalKey, item) {
 			continue
 		}
 		msgID := networkid.MessageID(item.StanzaID)

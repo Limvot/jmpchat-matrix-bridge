@@ -57,8 +57,8 @@ func parseInnerMessageFromCarbon(t xmlstream.TokenReadEncoder) (from, to, typeAt
 		switch v := tok.(type) {
 		case xml.StartElement:
 			depth++
-			if msgDepth > 0 && depth == msgDepth+1 {
-				ids.observe(v)
+			if msgDepth > 0 {
+				ids.track(v, depth, msgDepth+1)
 			}
 			jmi = detectJingleMessage(jmi, v)
 			if v.Name.Local == "message" && msgDepth == 0 {
@@ -79,9 +79,20 @@ func parseInnerMessageFromCarbon(t xmlstream.TokenReadEncoder) (from, to, typeAt
 					body = strings.TrimSpace(string(cd))
 				}
 			}
+		case xml.CharData:
+			if msgDepth > 0 {
+				ids.trackChars(v)
+			}
 		case xml.EndElement:
 			depth--
+			if msgDepth > 0 {
+				ids.trackEnd(depth + 1)
+			}
 			if depth == 0 {
+				ids.finish()
+				if ids.Retract != nil {
+					body = "" // XEP-0424 fallback text; never bridge it
+				}
 				return from, to, typeAttr, id, body, jmi, ids, nil
 			}
 		}
@@ -108,10 +119,19 @@ func (x *xmppClient) handleCarbonSent(t xmlstream.TokenReadEncoder, outer *xml.S
 		consumeUntilEndElement(t, "sent")
 		return nil
 	}
-	from, to, _, id, body, jmi, ids, err := parseInnerMessageFromCarbon(t)
+	from, to, typeAttr, id, body, jmi, ids, err := parseInnerMessageFromCarbon(t)
 	consumeUntilEndElement(t, "sent")
 	if err != nil {
 		x.log.Debug().Err(err).Msg("Failed to parse carbon <sent> inner message")
+		return nil
+	}
+	// A retraction made from another of our clients (outer from was validated above).
+	if ids.Retract != nil {
+		if toBare := strings.ToLower(bareJID(to)); toBare != "" && typeAttr != "groupchat" {
+			x.handleInboundRetraction(retraction{
+				info: *ids.Retract, channel: retractChanCarbonSent, msgType: typeAttr, fromFull: from,
+			}, networkid.PortalKey{ID: networkid.PortalID(toBare), Receiver: x.loginID}, id, ids, string(x.loginID))
+		}
 		return nil
 	}
 	// XEP-0353 action we performed from another of our devices (accept/reject/proceed).
@@ -173,10 +193,19 @@ func (x *xmppClient) handleCarbonReceived(t xmlstream.TokenReadEncoder, outer *x
 		consumeUntilEndElement(t, "received")
 		return nil
 	}
-	from, _, _, id, body, jmi, ids, err := parseInnerMessageFromCarbon(t)
+	from, _, typeAttr, id, body, jmi, ids, err := parseInnerMessageFromCarbon(t)
 	consumeUntilEndElement(t, "received")
 	if err != nil {
 		x.log.Debug().Err(err).Msg("Failed to parse carbon <received> inner message")
+		return nil
+	}
+	// A retraction received on another of our clients (outer from was validated above).
+	if ids.Retract != nil {
+		if fromBare := strings.ToLower(bareJID(from)); fromBare != "" && typeAttr != "groupchat" {
+			x.handleInboundRetraction(retraction{
+				info: *ids.Retract, channel: retractChanCarbonReceived, msgType: typeAttr, fromFull: from,
+			}, networkid.PortalKey{ID: networkid.PortalID(fromBare), Receiver: x.loginID}, id, ids, string(x.loginID))
+		}
 		return nil
 	}
 	// XEP-0353 call signalling received on another device (e.g. propose/retract from the caller).

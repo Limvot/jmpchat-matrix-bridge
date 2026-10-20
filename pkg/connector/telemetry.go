@@ -39,10 +39,17 @@ func (x *xmppClient) queueRemoteEvent(ctx context.Context, evt bridgev2.RemoteEv
 			attachTraceHooks(&e.EventMeta, sc)
 		case *simplevent.PreConvertedMessage:
 			attachTraceHooks(&e.EventMeta, sc)
+		case *simplevent.MessageRemove:
+			attachTraceHooks(&e.EventMeta, sc)
 		}
 		span.SetAttributes(attribute.String("xmpp.peer.jid", string(evt.GetPortalKey().ID)))
 	}
-	res := x.login.QueueRemoteEvent(evt)
+	var res bridgev2.EventHandlingResult
+	if x.queueHook != nil {
+		res = x.queueHook(evt)
+	} else {
+		res = x.login.QueueRemoteEvent(evt)
+	}
 	if res.Error != nil {
 		telemetry.Fail(span, res.Error)
 	}

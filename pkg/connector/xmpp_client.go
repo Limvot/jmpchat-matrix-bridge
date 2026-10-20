@@ -49,6 +49,8 @@ type xmppClient struct {
 	log         zerolog.Logger
 	login       *bridgev2.UserLogin
 	conn        *JabberConnector
+	// queueHook, when set (tests only), receives remote events instead of the bridgev2 queue.
+	queueHook func(bridgev2.RemoteEvent) bridgev2.EventHandlingResult
 	mu          sync.Mutex
 	session     *xmpp.Session
 	// sessionCancel cancels the context shared by this session's background goroutines (roster
