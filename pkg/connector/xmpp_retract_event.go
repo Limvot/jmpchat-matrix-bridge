@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -300,53 +301,99 @@ func postHandleRetraction(ctx context.Context, env retractionEnv, st *retraction
 
 // ---- tombstones (retracted refs) ----
 
-// retractedKey is the KV key of one retracted reference. Format:
-// jabber_retracted:<login id>:<lower-cased portal id>:<ref>. The value is the unix time it was
-// recorded. Entries are never garbage collected (one tiny row per ref of a retracted message).
-func retractedKey(login networkid.UserLoginID, portal networkid.PortalID, ref string) database.Key {
-	return database.Key(retractedKeyPrefix + string(login) + ":" + strings.ToLower(string(portal)) + ":" + ref)
+// Tombstone scopes. A tombstone is only valid for the sender of the retracted message, otherwise an
+// occupant could pick the id attribute of a message to suppress that message (or a counter-id
+// client's later ones) on replay.
+const retractScopeStanza = "stanza" // room/archive-assigned stanza-id: unique and unspoofable, any sender
+
+// retractedRef is one tombstone: a scope (retractScopeStanza, or a sender scope) and a reference.
+type retractedRef struct{ Scope, Ref string }
+
+// senderScopes returns the sender scopes of a message: always `snd=<lower-cased sender id as stored>`
+// (bare JID for 1:1, room/nick for MUC) and, when present, `occ=<occupant-id>` (XEP-0421). Values are
+// query-escaped so that the ':' separators of a key stay unambiguous.
+func senderScopes(senderID, occupantID string) []string {
+	out := []string{"snd=" + url.QueryEscape(strings.ToLower(senderID))}
+	if occupantID != "" {
+		out = append(out, "occ="+url.QueryEscape(occupantID))
+	}
+	return out
 }
 
-// retractedRefsOf returns every XMPP reference of the message rows (their IDs and the id aliases in
-// metadata), without duplicates and without the synthetic matrix:/empty ones.
-func retractedRefsOf(parts []*database.Message) []string {
-	seen := map[string]struct{}{}
-	var out []string
-	add := func(ref string) {
+// retractedKey is the KV key of one tombstone. Format:
+// jabber_retracted:<login id>:<lower-cased portal id>:<scope>:<ref> with scope one of `stanza`,
+// `snd=<escaped lower-cased sender id>` or `occ=<escaped occupant-id>`. The value is the unix time it
+// was recorded. Entries are never garbage collected (a few tiny rows per retracted message).
+func retractedKey(login networkid.UserLoginID, portal networkid.PortalID, scope, ref string) database.Key {
+	return database.Key(retractedKeyPrefix + string(login) + ":" + strings.ToLower(string(portal)) + ":" + scope + ":" + ref)
+}
+
+// retractedRefsOf returns the tombstones of the message rows: every XMPP reference (their IDs and the
+// id aliases in metadata, without the synthetic matrix:/empty ones) under each sender scope of the
+// row, plus the room/archive-assigned stanza-id under the sender-independent stanza scope.
+func retractedRefsOf(parts []*database.Message) []retractedRef {
+	seen := map[retractedRef]struct{}{}
+	var out []retractedRef
+	add := func(scope, ref string) {
 		if ref == "" || strings.HasPrefix(ref, "matrix:") {
 			return
 		}
-		if _, ok := seen[ref]; ok {
+		r := retractedRef{scope, ref}
+		if _, ok := seen[r]; ok {
 			return
 		}
-		seen[ref] = struct{}{}
-		out = append(out, ref)
+		seen[r] = struct{}{}
+		out = append(out, r)
 	}
 	for _, p := range parts {
-		add(string(p.ID))
-		if meta := targetMeta(p); meta != nil {
-			add(meta.XMPPMessageID)
-			add(meta.StanzaID)
-			add(meta.OriginID)
+		meta := targetMeta(p)
+		occ := ""
+		if meta != nil {
+			occ = meta.OccupantID
+		}
+		scopes := senderScopes(string(p.SenderID), occ)
+		addAll := func(ref string) {
+			for _, sc := range scopes {
+				add(sc, ref)
+			}
+		}
+		addAll(string(p.ID))
+		if meta != nil {
+			addAll(meta.XMPPMessageID)
+			addAll(meta.StanzaID)
+			addAll(meta.OriginID)
+			add(retractScopeStanza, meta.StanzaID)
 		}
 	}
 	return out
 }
 
-func markRetractedRefs(ctx context.Context, kv *database.KVQuery, login networkid.UserLoginID, portal networkid.PortalID, refs []string) {
+func markRetractedRefs(ctx context.Context, kv *database.KVQuery, login networkid.UserLoginID, portal networkid.PortalID, refs []retractedRef) {
 	now := strconv.FormatInt(time.Now().Unix(), 10)
-	for _, ref := range refs {
-		kv.Set(ctx, retractedKey(login, portal, ref), now)
+	for _, r := range refs {
+		kv.Set(ctx, retractedKey(login, portal, r.Scope, r.Ref), now)
 	}
 }
 
-func anyRetractedRef(ctx context.Context, kv *database.KVQuery, login networkid.UserLoginID, portal networkid.PortalID, refs ...string) bool {
-	for _, ref := range refs {
-		if ref == "" {
-			continue
-		}
-		if kv.Get(ctx, retractedKey(login, portal, ref)) != "" {
-			return true
+// retractedSender identifies the sender of an incoming message for tombstone checks.
+type retractedSender struct {
+	senderID   string // as it would be stored in the message row
+	occupantID string
+	stanzaID   string // trusted room/archive stanza-id, "" if none
+}
+
+func anyRetractedRef(ctx context.Context, kv *database.KVQuery, login networkid.UserLoginID, portal networkid.PortalID, who retractedSender, refs ...string) bool {
+	if who.stanzaID != "" && kv.Get(ctx, retractedKey(login, portal, retractScopeStanza, who.stanzaID)) != "" {
+		return true
+	}
+	for _, sc := range senderScopes(who.senderID, who.occupantID) {
+		for _, ref := range refs {
+			if ref == "" {
+				continue
+			}
+			if kv.Get(ctx, retractedKey(login, portal, sc, ref)) != "" {
+				return true
+			}
 		}
 	}
 	return false
@@ -359,14 +406,15 @@ func (x *xmppClient) kv() *database.KVQuery {
 	return x.conn.br.DB.KV
 }
 
-// isRetracted reports whether any of refs was recorded as retracted in the portal. It does DB
+// isRetracted reports whether the stanza-id of who, or any of refs under the sender's scopes, was
+// recorded as retracted in the portal. It does DB
 // lookups: never call it on the Serve goroutine.
-func (x *xmppClient) isRetracted(ctx context.Context, portal networkid.PortalID, refs ...string) bool {
+func (x *xmppClient) isRetracted(ctx context.Context, portal networkid.PortalID, who retractedSender, refs ...string) bool {
 	kv := x.kv()
 	if kv == nil {
 		return false
 	}
-	return anyRetractedRef(ctx, kv, x.loginID, portal, refs...)
+	return anyRetractedRef(ctx, kv, x.loginID, portal, who, refs...)
 }
 
 // ---- real environment ----
@@ -561,7 +609,33 @@ func (b batchRetractions) hides(item mamResultItem) bool {
 // mamItemRetracted reports whether a retraction that was already processed covers the item (see
 // retractedRefsOf). DB lookups: not for the Serve goroutine.
 func (x *xmppClient) mamItemRetracted(ctx context.Context, portalKey networkid.PortalKey, item mamResultItem) bool {
-	return x.isRetracted(ctx, portalKey.ID, item.StanzaID, item.ArchiveID, item.OriginID)
+	who := retractedSender{senderID: bareJID(item.From), stanzaID: item.ArchiveID}
+	return x.isRetracted(ctx, portalKey.ID, who, item.StanzaID, item.ArchiveID, item.OriginID)
+}
+
+// mamItemHidden reports whether the item must not be bridged because a retraction in the same batch
+// or an earlier one covers it. An original hidden by the batch is tombstoned (its sender already
+// matched the retraction's), so a later page without the retraction cannot resurrect it. Runs in the
+// catch-up/backfill goroutines (DB writes), never on the Serve goroutine.
+func (x *xmppClient) mamItemHidden(ctx context.Context, portalKey networkid.PortalKey, item mamResultItem, b batchRetractions) bool {
+	if b.hides(item) {
+		if kv := x.kv(); kv != nil {
+			var refs []retractedRef
+			for _, sc := range senderScopes(bareJID(item.From), "") {
+				for _, ref := range []string{item.StanzaID, item.ArchiveID, item.OriginID} {
+					if ref != "" {
+						refs = append(refs, retractedRef{sc, ref})
+					}
+				}
+			}
+			if item.ArchiveID != "" {
+				refs = append(refs, retractedRef{retractScopeStanza, item.ArchiveID})
+			}
+			markRetractedRefs(ctx, kv, x.loginID, portalKey.ID, refs)
+		}
+		return true
+	}
+	return x.mamItemRetracted(ctx, portalKey, item)
 }
 
 // queueMAMRetraction queues the retraction event of an archived retraction item (validated like a

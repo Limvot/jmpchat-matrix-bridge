@@ -432,7 +432,7 @@ func (x *xmppClient) FetchMessages(ctx context.Context, params bridgev2.FetchMes
 		// Retractions themselves (their fallback text is gone), server tombstones of retracted
 		// originals and body-less items (chat states) are never backfilled, nor are originals that a
 		// retraction in this batch or an earlier one removed.
-		if !mamItemBackfillable(item, batchRetracted) || x.mamItemRetracted(ctx, portalKey, item) {
+		if !mamItemBackfillable(item, nil) || x.mamItemHidden(ctx, portalKey, item, batchRetracted) {
 			continue
 		}
 		sender := x.makeEventSender(fromBare)
@@ -679,7 +679,7 @@ func (x *xmppClient) mamCatchUpForPortal(ctx, cycleCtx context.Context, bareJID 
 		if x.queueMAMRetraction(pctx, portalKey, item) {
 			continue
 		}
-		if item.Retracted || batchRetracted.hides(item) || x.mamItemRetracted(ctx, portalKey, item) {
+		if item.Retracted || x.mamItemHidden(ctx, portalKey, item, batchRetracted) {
 			continue
 		}
 		msgID := networkid.MessageID(item.StanzaID)
@@ -870,7 +870,7 @@ func (x *xmppClient) doMAMBackfillOnView(ctx context.Context, span trace.Span, p
 		if item.Body == "" || item.Retracted {
 			continue
 		}
-		if batchRetracted.hides(item) || x.mamItemRetracted(ctx, portalKey, item) {
+		if x.mamItemHidden(ctx, portalKey, item, batchRetracted) {
 			continue
 		}
 		msgID := networkid.MessageID(item.StanzaID)
