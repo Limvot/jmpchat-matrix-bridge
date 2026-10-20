@@ -52,6 +52,11 @@ All bridge logic lives in `pkg/connector/`. The bridgev2 framework handles Matri
 
 - **`pkg/connector/xmpp_retract_parse.go`** — `retractScan`: XEP-0424/0425 (`:1`) and legacy `:0` detection by resolved namespace on direct children of `<message>` (never the XEP-0353 jingle `<retract>`); the parsers (`parseMessageBodyOOBIDs`, carbons, MAM) fill `messageIDs.Retract`/`Tombstone` and drop the fallback body whenever a retract element is present.
 - **`pkg/connector/xmpp_retract.go`** — room-scoped `findMessagesByXMPPRef` (per-kind lookup order). **`xmpp_retract_event.go`** — `retraction`, `validateRetraction` (all sender rules), `newRetractionEvent` (`simplevent.MessageRemove` + `PreHandleWithResultFunc`/`PostHandleFunc`, `retractionEnv` seam), reason path (`removeWithReason`: connector redacts with `Reason` and returns Success; no reason uses the bridgev2 path), the `jabber_retracted:<login>:<lower portal>:<scope>:<ref>` KV tombstones (scope `snd=<sender id>`, `occ=<occupant-id>` or the sender-independent `stanza` for room/archive stanza-ids; hidden MAM originals are tombstoned too) (checked in `jabberRemoteMessage.ConvertMessage` and the MAM paths) and the MAM batch filter.
+### Redactions (Matrix -> XMPP)
+
+- **`pkg/connector/xmpp_retract_out.go`** — `HandleMatrixMessageRemove` (`RedactionHandlingNetworkAPI`): own messages only (`isOwnMessage`), Cheogram JIDs (`IsCheogramDMJID`, incl. group MMS) are refused with an `m.notice` and a nil return (redaction stands), DM ref via `xmppIDForMessage` (origin-id, else id; `matrix:` rows use `XMPPMessageID`), MUC ref = room stanza-id only (`resolveRetractRef`), then tombstones via `markRetractedRefs`. Stanza builders `retractionPayload`/`sendXMPPRetraction` are in `xmpp_message.go`.
+- **`pkg/connector/xmpp_muc_echo.go`** — `mucEchoTable`: rendezvous between the room's echo of our MUC message (Serve goroutine, `handleOwnMUCEcho`, exact origin-id/id match, memory only) and the row insert (`MatrixMessageResponse.PostSave`); stores `StanzaID`/`OccupantID` on the row; redactions wait up to `mucEchoWait` (3 s). `handleMatrixMessage` registers the id before sending. Issue #11 (own-nick messages from other clients) should reuse `matchEcho`.
+
 - Retraction events never create portals and go through `queueRemoteEvent` (`x.queueHook` is a test seam).
 
 ### Protocol Extensions

@@ -51,6 +51,8 @@ type xmppClient struct {
 	conn        *JabberConnector
 	// queueHook, when set (tests only), receives remote events instead of the bridgev2 queue.
 	queueHook func(bridgev2.RemoteEvent) bridgev2.EventHandlingResult
+	// noticeHook, when set (tests only), receives portal notices instead of the bridge bot.
+	noticeHook func(portal *bridgev2.Portal, text string)
 	mu          sync.Mutex
 	session     *xmpp.Session
 	// sessionCancel cancels the context shared by this session's background goroutines (roster
@@ -73,6 +75,8 @@ type xmppClient struct {
 	// mucOurOccupantJID maps MUC room JID (bare) to our full occupant JID (room@service/nick) for self-echo filtering.
 	mucOurOccupantJID   map[string]string
 	mucOurOccupantJIDMu sync.RWMutex
+	// mucEcho pairs our sent MUC messages with the room's echo (room stanza-id, occupant-id); see xmpp_muc_echo.go.
+	mucEcho mucEchoTable
 	// mucPendingJoin maps MUC room JID to the nick we used when sending join presence; cleared when we get our presence or error.
 	mucPendingJoin   map[string]string
 	mucPendingJoinMu sync.Mutex
@@ -2150,8 +2154,20 @@ func (x *xmppClient) handleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 
 	// Use groupchat for MUC portals; use chat for 1:1 DMs (matches Cheogram and standard 1:1).
 	msgType := stanza.ChatMessage
-	if x.portalIsMUC(ctx, msg.Portal) {
+	isMUCPortal := x.portalIsMUC(ctx, msg.Portal)
+	if isMUCPortal {
 		msgType = stanza.MessageType("groupchat")
+	}
+	// MUC: pick the stanza id and register it for the echo rendezvous BEFORE sending, so a fast echo
+	// from the room cannot be missed (xmpp_muc_echo.go).
+	var preID string
+	if isMUCPortal {
+		var idErr error
+		preID, idErr = generateXMPPMessageID()
+		if idErr != nil {
+			return nil, bridgev2.WrapErrorInStatus(idErr).WithSendNotice(true)
+		}
+		x.mucEcho.register(toJIDStr, preID)
 	}
 	log.Debug().
 		Str("final_message_body", messageBody).
@@ -2164,8 +2180,11 @@ func (x *xmppClient) handleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 		Str("msg_type", string(msgType)).
 		Msg("DEBUG: About to call sendXMPPMessageWithOOB")
 	
-	xmppMsgID, err := sendXMPPMessageWithOOB(ctx, sess, toJID, messageBody, oobURL, replyID, replyToJID, msgType)
+	xmppMsgID, err := sendXMPPMessageWithOOBID(ctx, sess, toJID, messageBody, oobURL, replyID, replyToJID, msgType, preID)
 	if err != nil {
+		if preID != "" {
+			x.mucEcho.discard(toJIDStr, preID)
+		}
 		return nil, bridgev2.WrapErrorInStatus(fmt.Errorf("failed to send XMPP message: %w", err)).WithSendNotice(true)
 	}
 	
@@ -2195,7 +2214,7 @@ func (x *xmppClient) handleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 		}
 	}
 
-	return &bridgev2.MatrixMessageResponse{
+	resp := &bridgev2.MatrixMessageResponse{
 		DB: &database.Message{
 			Room:       msg.Portal.PortalKey,
 			SenderID:   networkid.UserID(x.loginID),
@@ -2204,7 +2223,11 @@ func (x *xmppClient) handleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 			SendTxnID:  msg.InputTransactionID,
 			Metadata:   msgMeta,
 		},
-	}, nil
+	}
+	if preID != "" {
+		resp.PostSave = x.mucEchoPostSave(toJIDStr, preID)
+	}
+	return resp, nil
 }
 
 // PreHandleMatrixReaction prepares the reaction for sending to XMPP.
