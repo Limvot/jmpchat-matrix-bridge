@@ -836,7 +836,7 @@ func (x *xmppClient) handlePresence(t xmlstream.TokenReadEncoder, start *xml.Sta
 	}
 	x.mucPendingJoinMu.Lock()
 	pendingNick, pending := x.mucPendingJoin[roomBare]
-	if pending && pendingNick == ourNick {
+	if pending && pendingNick == ourNick && typeVal != "unavailable" {
 		if x.mucOurOccupantJID == nil {
 			x.mucOurOccupantJID = make(map[string]string)
 		}
