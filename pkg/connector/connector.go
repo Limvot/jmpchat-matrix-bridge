@@ -288,7 +288,7 @@ func (c *JabberConnector) CreateLogin(ctx context.Context, user *bridgev2.User, 
 
 // GetBridgeInfoVersion returns versions for bridge info and room capabilities.
 func (c *JabberConnector) GetBridgeInfoVersion() (info, capabilities int) {
-	return 1, 1
+	return 1, 2
 }
 
 // jabberLoginProcess implements LoginProcess and LoginProcessUserInput for JID+password auth.

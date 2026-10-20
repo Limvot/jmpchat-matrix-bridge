@@ -156,6 +156,12 @@ func generateXMPPMessageID() (string, error) {
 // to indicate this is a reply to a previous message (XEP-0461).
 // Returns the XMPP message ID that was assigned to the message (for storage in MessageMetadata).
 func sendXMPPMessageWithOOB(ctx context.Context, sess *xmpp.Session, to jid.JID, body string, oobURL string, replyID string, replyToJID string, msgType stanza.MessageType) (string, error) {
+	return sendXMPPMessageWithOOBID(ctx, sess, to, body, oobURL, replyID, replyToJID, msgType, "")
+}
+
+// sendXMPPMessageWithOOBID is sendXMPPMessageWithOOB with a caller-chosen stanza id (empty: generate).
+// MUC sends pass an id they registered in the echo table before the send.
+func sendXMPPMessageWithOOBID(ctx context.Context, sess *xmpp.Session, to jid.JID, body string, oobURL string, replyID string, replyToJID string, msgType stanza.MessageType, xmppMsgID string) (string, error) {
 	ctx, span := telemetry.StartChild(ctx, "xmpp.send_message", trace.WithSpanKind(trace.SpanKindProducer))
 	defer span.End()
 	if span.IsRecording() {
@@ -196,10 +202,13 @@ func sendXMPPMessageWithOOB(ctx context.Context, sess *xmpp.Session, to jid.JID,
 	}
 	
 	// Generate XMPP message ID for this message (required for XEP-0461 replies)
-	xmppMsgID, err := generateXMPPMessageID()
-	if err != nil {
-		telemetry.Fail(span, err)
-		return "", fmt.Errorf("failed to generate XMPP message ID: %w", err)
+	var err error
+	if xmppMsgID == "" {
+		xmppMsgID, err = generateXMPPMessageID()
+		if err != nil {
+			telemetry.Fail(span, err)
+			return "", fmt.Errorf("failed to generate XMPP message ID: %w", err)
+		}
 	}
 	if span.IsRecording() {
 		span.SetAttributes(attribute.String("xmpp.stanza.id", xmppMsgID))
@@ -313,4 +322,70 @@ func sendXMPPReactions(ctx context.Context, sess *xmpp.Session, to jid.JID, targ
 	}
 	log.Debug().Str("xmpp_msg_id", xmppMsgID).Msg("DEBUG: sendXMPPReactions send succeeded")
 	return xmppMsgID, nil
+}
+
+// retractionFallbackBody is the generic XEP-0428 fallback text of an outgoing retraction. It never
+// contains the original text.
+const retractionFallbackBody = "A previous message was retracted by its sender."
+
+// retractReader returns <retract xmlns='urn:xmpp:message-retract:1' id='...'/> (XEP-0424).
+func retractReader(targetRef string) xml.TokenReader {
+	start := xml.StartElement{
+		Name: xml.Name{Space: retractNS1, Local: "retract"},
+		Attr: []xml.Attr{{Name: xml.Name{Local: "xmlns"}, Value: retractNS1}, {Name: xml.Name{Local: "id"}, Value: targetRef}},
+	}
+	return xmlstream.MultiReader(xmlstream.Token(start), xmlstream.Token(xml.EndElement{Name: start.Name}))
+}
+
+// fallbackReader returns <fallback xmlns='urn:xmpp:fallback:0' for='ns'/> (XEP-0428).
+func fallbackReader(forNS string) xml.TokenReader {
+	start := xml.StartElement{
+		Name: xml.Name{Space: fallbackNS, Local: "fallback"},
+		Attr: []xml.Attr{{Name: xml.Name{Local: "xmlns"}, Value: fallbackNS}, {Name: xml.Name{Local: "for"}, Value: forNS}},
+	}
+	return xmlstream.MultiReader(xmlstream.Token(start), xmlstream.Token(xml.EndElement{Name: start.Name}))
+}
+
+// retractionPayload is the child content of an outgoing retraction message: the retract element, the
+// XEP-0428 fallback marker with its generic body, the store hint and the stanza's own origin-id.
+func retractionPayload(targetRef, stanzaID string) xml.TokenReader {
+	return xmlstream.MultiReader(
+		retractReader(targetRef),
+		fallbackReader(retractNS1),
+		bodyReader(retractionFallbackBody),
+		storeHintReader(),
+		originIDReader(stanzaID),
+	)
+}
+
+// sendXMPPRetraction sends an XEP-0424 retraction of targetRef (1:1: the original's origin-id/id;
+// groupchat: the room-assigned stanza-id) and returns the retraction stanza's own id. Span attribute
+// xmpp.retraction=true; ids only, never message content.
+func sendXMPPRetraction(ctx context.Context, sess *xmpp.Session, to jid.JID, targetRef string, msgType stanza.MessageType) (string, error) {
+	ctx, span := telemetry.StartChild(ctx, "xmpp.send_message", trace.WithSpanKind(trace.SpanKindProducer))
+	defer span.End()
+	if span.IsRecording() {
+		span.SetAttributes(
+			attribute.String("xmpp.peer.jid", to.String()),
+			attribute.String("xmpp.message.type", string(msgType)),
+			attribute.Bool("xmpp.retraction", true),
+		)
+	}
+	stanzaID, err := generateXMPPMessageID()
+	if err != nil {
+		telemetry.Fail(span, err)
+		return "", err
+	}
+	if span.IsRecording() {
+		span.SetAttributes(attribute.String("xmpp.stanza.id", stanzaID))
+	}
+	if msgType == "" {
+		msgType = stanza.NormalMessage
+	}
+	msg := stanza.Message{To: to, Type: msgType, ID: stanzaID}
+	if err := sess.Send(ctx, msg.Wrap(retractionPayload(targetRef, stanzaID))); err != nil {
+		telemetry.Fail(span, err)
+		return "", err
+	}
+	return stanzaID, nil
 }

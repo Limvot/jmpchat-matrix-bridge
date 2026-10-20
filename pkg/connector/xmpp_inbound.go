@@ -483,6 +483,12 @@ func (x *xmppClient) handleGroupchatWithOOB(t xmlstream.TokenReadEncoder, start 
 	if roomJID == "" {
 		return nil
 	}
+	// Echo of a message this bridge sent: capture the room stanza-id/occupant-id (needed to retract it
+	// later) and never bridge it back. Exact-id match only; other messages from our nick are not
+	// handled here (see xmpp_muc_echo.go).
+	if x.handleOwnMUCEcho(roomJID, occupantFull, attrValue(start.Attr, "id"), ids) {
+		return nil
+	}
 	// Skip bridging our own messages (self-echo): same check as handleIncomingGroupchat (wrapper handles groupchat so mux path is not used).
 	if occupantFull == x.getMUCOurOccupantJID(roomJID) {
 		x.log.Debug().Str("room", roomJID).Str("occupant", occupantFull).Msg("Skipping MUC self-echo (our own message)")
