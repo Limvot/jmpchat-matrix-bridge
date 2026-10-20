@@ -680,15 +680,21 @@ func (s *mucAvatarState) propagateContact(realBare string, mxc *mucMXC) (matched
 			p.mxc = *mxc
 		}
 		rec.prop = p
-		rec.doneHash = rec.adv()
 		s.enqueueLocked(key)
+		if _, ok := s.pending[key]; !ok {
+			rec.prop = nil // queue full: do not leave a stale propagation behind
+			continue
+		}
+		rec.doneHash = rec.adv()
 		matched++
 	}
 	return matched
 }
 
-// processProp applies a propagation job: no IQ, no fetch, no upload.
+// processProp applies a propagation job: no IQ, no fetch, no upload. A room presence with a new
+// advertised state that coalesced into this job is requeued for the normal path afterwards.
 func (s *mucAvatarState) processProp(ctx context.Context, key string, snap mucOccSnapshot) {
+	defer s.requeueIfChanged(key)
 	log := s.log(ctx)
 	ghost, err := s.getGhost(ctx, key)
 	if err != nil {
@@ -729,6 +735,15 @@ func (s *mucAvatarState) processProp(ctx context.Context, key string, snap mucOc
 	applyGhostAvatar(ctx, ghost, avatar, p.mxc.realHash, nil)
 	s.bump(func(st *mucAvatarStats) { st.applied++ })
 	log.Debug().Str("occupant", key).Str("photo_hash", p.mxc.realHash).Msg("Applied cached MUC avatar (propagated from contact)")
+}
+
+// requeueIfChanged enqueues key when its advertised state differs from the handled one.
+func (s *mucAvatarState) requeueIfChanged(key string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if rec := s.occ[key]; rec != nil && rec.prop == nil && s.shouldEnqueueLocked(rec) {
+		s.enqueueLocked(key)
+	}
 }
 
 func (s *mucAvatarState) fetchAndApply(ctx context.Context, key string, snap mucOccSnapshot, adv string, ghost avatarGhost, ghostHash string, setOutcome func(source, outcome string)) {

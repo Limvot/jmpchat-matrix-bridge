@@ -974,3 +974,23 @@ func TestPropagateRace(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+func TestPropagateCoalescedNewRoomHashStillHandled(t *testing.T) {
+	h := newHarness()
+	noFetch(t, h)
+	h.ghosts[testOcc] = newFakeGhost(hashN(1), true)
+	queueOne(h, testOcc, realPresence(hashN(1), testReal))
+	h.s.runOnce(context.Background())
+	h.s.propagateContact(testReal, propMXC(5))
+	// A genuinely new room hash arrives before the worker picks up the propagation job.
+	h.s.notePresence(testOcc, testRoom, realPresence(hashN(7), testReal), false, false)
+	h.s.runOnce(context.Background()) // propagation
+	if h.pendingLen() != 1 {
+		t.Fatal("new advertised hash must be requeued after the propagation job")
+	}
+	h.fetchFn = func(string) ([]byte, string, error) { return pngBytes, hashN(7), nil }
+	h.s.runOnce(context.Background())
+	if h.ghosts[testOcc].g.Metadata.(*GhostMetadata).AvatarHash != hashN(7) {
+		t.Fatal("new room hash must apply")
+	}
+}
