@@ -11,7 +11,7 @@
   pkg-config,
   olm,
   opus,
-  version ? "0.6.0",
+  version ? "0.7.1",
   jmpchatSrc ? lib.cleanSourceWith {
     src = lib.cleanSource ./.;
     filter = name: type: type != "symlink" || baseNameOf name != "result";
