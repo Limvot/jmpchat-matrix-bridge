@@ -10,6 +10,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 	"maunium.net/go/mautrix/bridgev2/commands"
+	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/bridgev2/matrix/mxmain"
 	"maunium.net/go/mautrix/bridgev2/networkid"
 )
@@ -335,6 +336,8 @@ func cmdMUCJoin(ce *commands.Event) {
 		return
 	}
 	if portal.MXID == "" {
+		// The user asked to join a MUC: never let type detection (disco/heuristic) turn this into a DM.
+		portal.RoomType = database.RoomTypeGroupDM
 		info, err := login.Client.GetChatInfo(ce.Ctx, portal)
 		if err != nil || info == nil {
 			ce.Reply("Joined **%s** on Jabber. Opening Matrix room failed: %v", roomJID, err)
