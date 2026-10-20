@@ -49,6 +49,7 @@ type retractScan struct {
 	cur         *retractInfo // retract/apply-to element we are inside (nil outside)
 	curDepth    int
 	reasonDepth int // depth of an open <reason> inside cur (0 = none)
+	modDepth    int // depth of an open legacy <moderated> inside cur (0 = none); :0 puts <reason> in it
 	reasonBuf   strings.Builder
 	fallback    bool
 	tombstone   bool
@@ -78,7 +79,16 @@ func (s *retractScan) start(se xml.StartElement, depth, childDepth int) {
 		}
 		return
 	}
-	if s.cur == nil || depth != s.curDepth+1 {
+	if s.cur == nil {
+		return
+	}
+	if s.modDepth > 0 && depth == s.modDepth+1 && se.Name.Local == "reason" && s.reasonDepth == 0 && !s.cur.HasReason {
+		s.cur.HasReason = true
+		s.reasonDepth = depth
+		s.reasonBuf.Reset()
+		return
+	}
+	if depth != s.curDepth+1 {
 		return
 	}
 	legacy := s.cur == s.v0
@@ -94,6 +104,7 @@ func (s *retractScan) start(se xml.StartElement, depth, childDepth int) {
 		s.cur.Moderated = true
 		s.cur.ModeratedByPresent = attrValue(se.Attr, "by") != ""
 		s.v0Confirmed = true
+		s.modDepth = depth
 	case legacy && se.Name.Space == retractNS0 && se.Name.Local == "retract":
 		s.v0Confirmed = true
 	}
@@ -113,6 +124,9 @@ func (s *retractScan) end(depth int) {
 		if s.cur != nil {
 			s.cur.Reason = capReason(s.reasonBuf.String())
 		}
+	}
+	if s.modDepth > 0 && depth == s.modDepth {
+		s.modDepth = 0
 	}
 	if s.cur != nil && depth == s.curDepth {
 		s.cur = nil
