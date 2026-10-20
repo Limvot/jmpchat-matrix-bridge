@@ -17,6 +17,31 @@ import (
 
 const carbonsNS = "urn:xmpp:carbons:2"
 
+// isOwnAccountFrom reports whether the `from` of an outer stanza is acceptable as coming from our
+// own account: empty (the server stamps it, RFC 6120) or a JID whose bare part equals ours
+// (case-insensitive). XEP-0280 section 11 and XEP-0313 require carbons and archive results to come
+// from the account's bare JID; anything else (a contact, a MUC occupant) is a forgery attempt.
+func isOwnAccountFrom(from string, loginID networkid.UserLoginID) bool {
+	if from == "" {
+		return true
+	}
+	return strings.EqualFold(bareJID(from), bareJID(string(loginID)))
+}
+
+// carbonOuterFromOK validates the outer <message from> of a carbon copy and logs (no content) when
+// it is dropped.
+func (x *xmppClient) carbonOuterFromOK(outer *xml.StartElement, kind string) bool {
+	from := ""
+	if outer != nil {
+		from = attrValue(outer.Attr, "from")
+	}
+	if isOwnAccountFrom(from, x.loginID) {
+		return true
+	}
+	x.log.Debug().Str("carbon", kind).Str("outer_from", from).Msg("Dropping carbon with outer from that is not our own account")
+	return false
+}
+
 // parseInnerMessageFromCarbon reads the inner <message> from a carbon copy and returns
 // from, to, type, id, body. Per XEP-0280/0297, the stream is <received><forwarded><message>...,
 // so we capture from/to/id from the first <message> element we encounter (at any depth).
@@ -70,8 +95,8 @@ func consumeUntilEndElement(t xmlstream.TokenReadEncoder, localName string) {
 
 // handleCarbonSent processes a <sent> carbon: message we sent from another client.
 // Inner message: from=our JID, to=contact. We queue it so it appears in the portal as "from me".
-func (x *xmppClient) handleCarbonSent(t xmlstream.TokenReadEncoder) error {
-	if x.login == nil {
+func (x *xmppClient) handleCarbonSent(t xmlstream.TokenReadEncoder, outer *xml.StartElement) error {
+	if x.login == nil || !x.carbonOuterFromOK(outer, "sent") {
 		consumeUntilEndElement(t, "sent")
 		return nil
 	}
@@ -133,8 +158,8 @@ func (x *xmppClient) handleCarbonSent(t xmlstream.TokenReadEncoder) error {
 
 // handleCarbonReceived processes a <received> carbon: message we received on another client.
 // Inner message: from=contact, to=our JID. Queue so it appears in the portal (may dedupe if we already got it).
-func (x *xmppClient) handleCarbonReceived(t xmlstream.TokenReadEncoder) error {
-	if x.login == nil {
+func (x *xmppClient) handleCarbonReceived(t xmlstream.TokenReadEncoder, outer *xml.StartElement) error {
+	if x.login == nil || !x.carbonOuterFromOK(outer, "received") {
 		consumeUntilEndElement(t, "received")
 		return nil
 	}

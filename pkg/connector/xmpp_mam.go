@@ -106,9 +106,21 @@ func (h mamFinHandler) HandleIQ(iq stanza.IQ, _ xmlstream.TokenReadEncoder, _ *x
 
 // handleMAMResult is called when the message handler sees a MAM result wrapper.
 // It parses the forwarded message and delivers it to the pending MAM collector.
-func (x *xmppClient) handleMAMResult(t xmlstream.TokenReadEncoder, start *xml.StartElement) error {
+//
+// outer is the enclosing <message>; results are only accepted when its `from` is empty or our own
+// bare JID (the user archive answers from the account), so a contact cannot inject forged history.
+func (x *xmppClient) handleMAMResult(t xmlstream.TokenReadEncoder, start *xml.StartElement, outer *xml.StartElement) error {
 	queryID := attrValue(start.Attr, "queryid")
 	if queryID == "" {
+		return nil
+	}
+	outerFrom := ""
+	if outer != nil {
+		outerFrom = attrValue(outer.Attr, "from")
+	}
+	if !isOwnAccountFrom(outerFrom, x.loginID) {
+		x.log.Debug().Str("outer_from", outerFrom).Msg("Dropping MAM result with outer from that is not our own account")
+		consumeMAMResult(t)
 		return nil
 	}
 	// Parse <forwarded xmlns='urn:xmpp:forward:0'><message .../><delay .../></forwarded>
@@ -162,6 +174,22 @@ func (x *xmppClient) handleMAMResult(t xmlstream.TokenReadEncoder, start *xml.St
 		From: from, To: to, Type: msgType, StanzaID: stanzaID, Body: body, Timestamp: timestamp, QueryID: queryID,
 	})
 	return nil
+}
+
+// consumeMAMResult discards the remainder of a <result> element (we are already inside it).
+func consumeMAMResult(t xmlstream.TokenReadEncoder) {
+	for depth := 1; depth > 0; {
+		tok, err := t.Token()
+		if err != nil {
+			return
+		}
+		switch tok.(type) {
+		case xml.StartElement:
+			depth++
+		case xml.EndElement:
+			depth--
+		}
+	}
 }
 
 // mamQueryPayload returns a TokenReader for the MAM query element (XEP-0313).

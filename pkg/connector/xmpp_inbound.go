@@ -246,15 +246,15 @@ func (x *xmppClient) handleMessageWithOOB(t xmlstream.TokenReadEncoder, start *x
 		return err
 	}
 	if se, ok := tok.(xml.StartElement); ok && se.Name.Space == mamNS && se.Name.Local == "result" {
-		return x.handleMAMResult(t, &se)
+		return x.handleMAMResult(t, &se, start)
 	}
 	// XEP-0280 Message Carbons: <sent> or <received> wrapper around inner message.
 	if se, ok := tok.(xml.StartElement); ok && se.Name.Space == carbonsNS {
 		if se.Name.Local == "sent" {
-			return x.handleCarbonSent(t)
+			return x.handleCarbonSent(t, start)
 		}
 		if se.Name.Local == "received" {
-			return x.handleCarbonReceived(t)
+			return x.handleCarbonReceived(t, start)
 		}
 	}
 	// Not a MAM result or carbon; parse as normal message (re-inject the token we read).
