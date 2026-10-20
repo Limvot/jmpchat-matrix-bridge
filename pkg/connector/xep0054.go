@@ -11,7 +11,9 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/xml"
+	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -60,21 +62,56 @@ func stripWhitespace(s string) string {
 	}, s)
 }
 
+// maxAvatarBytes caps a vCard photo (decoded size). Avatars are small and Matrix clients thumbnail
+// anyway; the limit protects the media upload and memory from oversized or hostile vCards.
+const maxAvatarBytes = 1 << 20 // 1 MiB
+
+// errAvatarRejected marks a vCard photo that was fetched fine but refused (too large or not an
+// image). It is not transient: callers must not retry the same photo in a loop.
+var errAvatarRejected = errors.New("vcard photo rejected")
+
+// avatarBase64TooLarge reports whether a base64 payload would decode to more than maxAvatarBytes.
+// It is checked on the encoded length before decoding so a huge BINVAL is never decoded.
+func avatarBase64TooLarge(binval string) bool {
+	return base64.StdEncoding.DecodedLen(len(binval)) > maxAvatarBytes
+}
+
+// validateAvatarBytes checks decoded photo bytes: within maxAvatarBytes and sniffed as image/*
+// (png, jpeg, gif, webp; SVG sniffs as text and is rejected on purpose). The error message holds
+// only the size and the detected type, never bytes.
+func validateAvatarBytes(b []byte) error {
+	if len(b) > maxAvatarBytes {
+		return fmt.Errorf("%w: %d bytes exceeds %d", errAvatarRejected, len(b), maxAvatarBytes)
+	}
+	if ct := http.DetectContentType(b); !strings.HasPrefix(ct, "image/") {
+		return fmt.Errorf("%w: type %s", errAvatarRejected, ct)
+	}
+	return nil
+}
+
 // fetchContactAvatar issues a XEP-0054 vCard IQ get to the contact's bare JID and returns the
 // decoded photo bytes, its MIME type, and its SHA-1 hex (XEP-0153 photo hash). A contact with
 // no photo returns ("", "", "") with a nil error — that is not a failure.
 func (x *xmppClient) fetchContactAvatar(ctx context.Context, bareJIDStr string) (data []byte, mimeType, sha1Hex string, err error) {
+	to, perr := jid.Parse(bareJIDStr)
+	if perr != nil {
+		return nil, "", "", fmt.Errorf("parse jid %q: %w", bareJIDStr, perr)
+	}
+	to = to.Bare()
+	return x.fetchVCardPhoto(ctx, to, to.String())
+}
+
+// fetchVCardPhoto sends a vcard-temp get to the given JID (a bare JID, or a MUC occupant JID) and
+// returns the decoded photo, its MIME type and SHA-1 hex. No photo returns ("", "", "", nil). A
+// photo over maxAvatarBytes or not an image returns an error wrapping errAvatarRejected.
+// spanPeer is the value recorded as xmpp.peer.jid on the IQ span (callers keep real JIDs off spans).
+func (x *xmppClient) fetchVCardPhoto(ctx context.Context, to jid.JID, spanPeer string) (data []byte, mimeType, sha1Hex string, err error) {
 	x.mu.Lock()
 	sess := x.session
 	x.mu.Unlock()
 	if sess == nil {
 		return nil, "", "", nil
 	}
-	to, perr := jid.Parse(bareJIDStr)
-	if perr != nil {
-		return nil, "", "", fmt.Errorf("parse jid %q: %w", bareJIDStr, perr)
-	}
-	to = to.Bare()
 
 	fetchCtx, cancel := context.WithTimeout(ctx, avatarFetchTimeout)
 	defer cancel()
@@ -87,7 +124,7 @@ func (x *xmppClient) fetchContactAvatar(ctx context.Context, bareJIDStr string) 
 	if span.IsRecording() {
 		span.SetAttributes(
 			attribute.String("xmpp.iq.namespace", vcardTempNS),
-			attribute.String("xmpp.peer.jid", to.String()),
+			attribute.String("xmpp.peer.jid", spanPeer),
 		)
 	}
 	if err := sess.UnmarshalIQElement(ctx, payload, iq, &res); err != nil {
@@ -98,12 +135,18 @@ func (x *xmppClient) fetchContactAvatar(ctx context.Context, bareJIDStr string) 
 	if binval == "" {
 		return nil, "", "", nil // no photo is not an error
 	}
+	if avatarBase64TooLarge(binval) {
+		return nil, "", "", fmt.Errorf("%w: encoded size %d bytes exceeds limit", errAvatarRejected, len(binval))
+	}
 	decoded, derr := base64.StdEncoding.DecodeString(binval)
 	if derr != nil {
 		return nil, "", "", fmt.Errorf("decode vcard photo base64 for %s: %w", to, derr)
 	}
 	if len(decoded) == 0 {
 		return nil, "", "", nil
+	}
+	if verr := validateAvatarBytes(decoded); verr != nil {
+		return nil, "", "", verr
 	}
 	sum := sha1.Sum(decoded)
 	return decoded, strings.TrimSpace(res.Photo.Type), hex.EncodeToString(sum[:]), nil
@@ -174,6 +217,27 @@ func (x *xmppClient) doAvatarRefresh(bareJID string) {
 		span.SetAttributes(attribute.String("xmpp.peer.jid", bareJID))
 	}
 	data, _, hash, err := x.fetchContactAvatar(ctx, bareJID)
+	if errors.Is(err, errAvatarRejected) {
+		// Oversized or non-image photo: keep the current avatar and stamp the attempt so the
+		// 24 h refresh gate (not every GetUserInfo) decides when to look again.
+		log.Debug().Err(err).Str("jid", bareJID).Msg("Contact vCard avatar rejected")
+		if span.IsRecording() {
+			span.SetAttributes(attribute.Bool("xmpp.avatar.changed", false), attribute.Bool("xmpp.avatar.rejected", true))
+		}
+		if ghost, gerr := x.conn.br.GetExistingGhostByID(ctx, networkid.UserID(bareJID)); gerr == nil && ghost != nil {
+			ghost.UpdateInfo(ctx, &bridgev2.UserInfo{
+				ExtraUpdates: func(ctx context.Context, g *bridgev2.Ghost) bool {
+					m, ok := g.Metadata.(*GhostMetadata)
+					if !ok || m == nil {
+						return false
+					}
+					m.AvatarFetchedAt.Time = time.Now()
+					return true
+				},
+			})
+		}
+		return
+	}
 	if err != nil {
 		telemetry.Fail(span, err)
 		log.Debug().Err(err).Str("jid", bareJID).Msg("Failed to fetch contact avatar (vCard)")
