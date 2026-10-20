@@ -12,6 +12,7 @@ package connector
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"sync"
 	"time"
@@ -128,6 +129,7 @@ type mucAvatarState struct {
 	fetch    func(ctx context.Context, to jid.JID, spanPeer string) (data []byte, sha1Hex string, err error)
 	getGhost func(ctx context.Context, occupant string) (avatarGhost, error)
 	pace     func(ctx context.Context) error
+	paceC    <-chan time.Time // current session's pacing ticker (production pace), guarded by mu
 	sleep    func(ctx context.Context, d time.Duration) error
 	logger   func(ctx context.Context) *zerolog.Logger
 }
@@ -505,6 +507,7 @@ func (s *mucAvatarState) process(ctx context.Context, key string, snap mucOccSna
 	}
 	if ghost == nil {
 		s.clearHasGhost(key)
+		log.Debug().Str("occupant", key).Msg("MUC avatar: no ghost for occupant, skipped")
 		return
 	}
 	ghostHash := ghost.StoredAvatarHash()
@@ -520,6 +523,9 @@ func (s *mucAvatarState) process(ctx context.Context, key string, snap mucOccSna
 		return
 	case mucActDone:
 		s.markDone(key, adv)
+		// Unchanged since an earlier session or job: no IQ and no span, but say so, otherwise a
+		// processed job is indistinguishable from a stuck worker in the logs.
+		log.Debug().Str("occupant", key).Str("photo", snap.photo.String()).Msg("MUC avatar unchanged, nothing to do")
 		return
 	}
 	if act == mucActFetch {
@@ -603,6 +609,9 @@ func (s *mucAvatarState) fetchAndApply(ctx context.Context, key string, snap muc
 			err = err2
 		}
 	}
+	if err != nil && ctx.Err() != nil {
+		return // session ended mid-fetch: not the occupant's fault, record nothing
+	}
 	if err != nil {
 		if errors.Is(err, errAvatarRejected) {
 			s.bump(func(st *mucAvatarStats) { st.rejected++ })
@@ -669,9 +678,14 @@ func (s *mucAvatarState) fetchAndApply(ctx context.Context, key string, snap muc
 		ID:  avatarIDFromHash(hash),
 		Get: func(context.Context) ([]byte, error) { return avatarData, nil },
 	}
+	dataSHA256 := sha256.Sum256(data)
 	applyGhostAvatar(ctx, ghost, avatar, hash, func(g *bridgev2.Ghost) {
-		if g.AvatarMXC != "" {
-			s.putMXC(mucMXC{realHash: hash, mxc: string(g.AvatarMXC), sha256: g.AvatarHash}, snap.hash, hash)
+		// Cache only an MXC that provably holds these bytes (a failed upload leaves the previous
+		// AvatarMXC/AvatarHash in place), and only under the hash we computed ourselves: keying by
+		// the advertised hash would let an occupant advertise someone else's hash while serving its
+		// own photo, poisoning the cache for that other occupant.
+		if g.AvatarMXC != "" && g.AvatarHash == dataSHA256 {
+			s.putMXC(mucMXC{realHash: hash, mxc: string(g.AvatarMXC), sha256: g.AvatarHash}, hash)
 		}
 	})
 	s.bump(func(st *mucAvatarStats) { st.applied++ })
@@ -709,15 +723,22 @@ func (x *xmppClient) startMUCAvatars(sessCtx context.Context) {
 			return realAvatarGhost{g}, nil
 		}
 	}
-	// The pacing ticker belongs to this session's worker, so it is always replaced.
+	// The pacing ticker belongs to this session, so it is always replaced; the pace closure reads
+	// it under s.mu (a previous session's worker may still be finishing a job).
 	ticker := time.NewTicker(mucAvatarPace)
 	go func() { <-sessCtx.Done(); ticker.Stop() }()
-	s.pace = func(ctx context.Context) error {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-ticker.C:
-			return nil
+	s.paceC = ticker.C
+	if s.pace == nil {
+		s.pace = func(ctx context.Context) error {
+			s.mu.Lock()
+			c := s.paceC
+			s.mu.Unlock()
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-c:
+				return nil
+			}
 		}
 	}
 	if s.logger == nil {

@@ -2,6 +2,7 @@ package connector
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"sync"
@@ -29,10 +30,10 @@ func hashPresence(h string) presenceInfo {
 // fakeGhost implements avatarGhost on top of a real bridgev2.Ghost struct so ExtraUpdates
 // closures can run against real GhostMetadata.
 type fakeGhost struct {
-	g         *bridgev2.Ghost
-	updates   []*bridgev2.UserInfo
-	setOnLoad bool // AvatarSet value after an update with an avatar
-	failSet   bool
+	g          *bridgev2.Ghost
+	updates    []*bridgev2.UserInfo
+	failSet    bool // SetAvatarURL fails: AvatarSet stays false
+	failUpload bool // the upload fails: AvatarMXC/AvatarHash keep their previous values
 }
 
 func newFakeGhost(storedHash string, applied bool) *fakeGhost {
@@ -46,12 +47,13 @@ func newFakeGhost(storedHash string, applied bool) *fakeGhost {
 
 func (f *fakeGhost) UpdateInfo(ctx context.Context, info *bridgev2.UserInfo) {
 	f.updates = append(f.updates, info)
-	if info.Avatar != nil && !info.Avatar.Remove && info.Avatar.MXC == "" {
+	if info.Avatar != nil && !info.Avatar.Remove && info.Avatar.MXC == "" && !f.failUpload {
+		data, _ := info.Avatar.Get(ctx)
 		f.g.AvatarMXC = id.ContentURIString("mxc://example.com/" + string(info.Avatar.ID))
-		f.g.AvatarHash = [32]byte{1}
+		f.g.AvatarHash = sha256.Sum256(data)
 	}
 	if info.Avatar != nil {
-		f.g.AvatarSet = !f.failSet
+		f.g.AvatarSet = !f.failSet && !f.failUpload
 	}
 	if info.ExtraUpdates != nil {
 		info.ExtraUpdates(ctx, f.g)
@@ -351,10 +353,10 @@ func TestWorkerFetchApply(t *testing.T) {
 	if m.AvatarHash != real || m.AvatarFetchedAt.Time.IsZero() {
 		t.Fatalf("metadata %+v", m)
 	}
-	if e, ok := h.s.lookupMXC(adv); !ok || e.realHash != real {
-		t.Fatalf("mxc cache missing advertised key: %+v", e)
+	if _, ok := h.s.lookupMXC(adv); ok {
+		t.Fatal("mxc cache must not be keyed by an unverified advertised hash")
 	}
-	if _, ok := h.s.lookupMXC(real); !ok {
+	if e, ok := h.s.lookupMXC(real); !ok || e.sha256 != sha256.Sum256(pngBytes) {
 		t.Fatal("mxc cache missing real key")
 	}
 	// Mismatch does not loop: same advertised hash again enqueues nothing.
@@ -584,5 +586,155 @@ func TestGetUserInfoMUCOccupantHasNoAvatar(t *testing.T) {
 	}
 	if info.Avatar != nil {
 		t.Fatal("MUC occupants must keep a nil Avatar (the worker is the sole writer)")
+	}
+}
+
+// An occupant advertising another occupant's hash while serving its own photo must not make the
+// other occupant's ghost show that photo through the MXC cache.
+func TestWorkerMXCCachePoisoning(t *testing.T) {
+	h := newHarness()
+	victimHash := hashN(42)
+	attacker := "room@muc.example.com/mallory"
+	victim := "room@muc.example.com/bob"
+	h.ghosts[attacker] = newFakeGhost("", true)
+	h.ghosts[victim] = newFakeGhost("", true)
+	h.fetchFn = func(to string) ([]byte, string, error) {
+		if to == attacker {
+			return pngBytes, hashN(7), nil
+		}
+		return []byte("\x89PNG\r\n\x1a\nvictim"), victimHash, nil
+	}
+	queueOne(h, attacker, hashPresence(victimHash))
+	h.s.runOnce(context.Background())
+	queueOne(h, victim, hashPresence(victimHash))
+	h.s.runOnce(context.Background())
+	u := h.ghosts[victim].updates
+	if len(u) != 1 || u[0].Avatar.MXC != "" || string(u[0].Avatar.ID) != "sha1:"+victimHash {
+		t.Fatalf("victim must get its own fetched photo, got %+v", u)
+	}
+	if len(h.calls) != 2 || h.calls[1].to != victim {
+		t.Fatalf("victim must be fetched, calls %+v", h.calls)
+	}
+}
+
+// A failed upload leaves the ghost's previous MXC in place; it must not be cached for the new hash.
+func TestWorkerFailedUploadNotCached(t *testing.T) {
+	h := newHarness()
+	g := newFakeGhost(hashN(1), true)
+	g.g.AvatarMXC = "mxc://example.com/old"
+	g.g.AvatarHash = [32]byte{9}
+	g.failUpload = true
+	h.ghosts[testOcc] = g
+	h.fetchFn = func(string) ([]byte, string, error) { return pngBytes, hashN(2), nil }
+	queueOne(h, testOcc, hashPresence(hashN(2)))
+	h.s.runOnce(context.Background())
+	if _, ok := h.s.lookupMXC(hashN(2)); ok {
+		t.Fatal("failed upload must not populate the MXC cache")
+	}
+	if h.rec(testOcc).doneHash != "" {
+		t.Fatal("failed upload must not mark done")
+	}
+}
+
+// A fetch error caused by the session ending is not recorded as the occupant's failure.
+func TestWorkerSessionEndNotFailure(t *testing.T) {
+	h := newHarness()
+	h.ghosts[testOcc] = newFakeGhost("", true)
+	ctx, cancel := context.WithCancel(context.Background())
+	h.fetchFn = func(string) ([]byte, string, error) { cancel(); return nil, "", context.Canceled }
+	queueOne(h, testOcc, hashPresence(hashN(3)))
+	h.s.runOnce(ctx)
+	if r := h.rec(testOcc); r.failHash != "" {
+		t.Fatal("session end must not mark the occupant as failed")
+	}
+}
+
+// workerHarness runs the real worker loop and reports each fetch on a channel.
+func workerHarness(t *testing.T) (*harness, chan string) {
+	t.Helper()
+	h := newHarness()
+	fetched := make(chan string, 8)
+	var mu sync.Mutex
+	h.s.fetch = func(ctx context.Context, to jid.JID, spanPeer string) ([]byte, string, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		fetched <- to.String()
+		return pngBytes, hashN(1), nil
+	}
+	ghosts := map[string]*fakeGhost{}
+	var gmu sync.Mutex
+	h.s.getGhost = func(ctx context.Context, occ string) (avatarGhost, error) {
+		gmu.Lock()
+		defer gmu.Unlock()
+		if g, ok := ghosts[occ]; ok {
+			return g, nil
+		}
+		g := newFakeGhost("", true)
+		ghosts[occ] = g
+		return g, nil
+	}
+	return h, fetched
+}
+
+func waitFetch(t *testing.T, ch chan string, want string) {
+	t.Helper()
+	select {
+	case got := <-ch:
+		if got != want {
+			t.Fatalf("fetched %s, want %s", got, want)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("worker did not fetch %s", want)
+	}
+}
+
+func TestWorkerLoopEnqueueAfterStart(t *testing.T) {
+	h, fetched := workerHarness(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go h.s.runWorker(ctx)
+	time.Sleep(20 * time.Millisecond) // let the worker park on the wake channel
+	queueOne(h, testOcc, hashPresence(hashN(1)))
+	waitFetch(t, fetched, testOcc)
+}
+
+func TestWorkerLoopEnqueueBeforeStart(t *testing.T) {
+	h, fetched := workerHarness(t)
+	queueOne(h, testOcc, hashPresence(hashN(1)))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go h.s.runWorker(ctx)
+	waitFetch(t, fetched, testOcc)
+}
+
+// A session reset drops the old queue; the next session's worker processes new jobs, and the old
+// worker exits with its context.
+func TestWorkerLoopAcrossReset(t *testing.T) {
+	h, fetched := workerHarness(t)
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	done1 := make(chan struct{})
+	go func() { h.s.runWorker(ctx1); close(done1) }()
+	queueOne(h, testOcc, hashPresence(hashN(1)))
+	waitFetch(t, fetched, testOcc)
+
+	cancel1()
+	select {
+	case <-done1:
+	case <-time.After(2 * time.Second):
+		t.Fatal("old worker did not exit")
+	}
+	stale := "room@muc.example.com/stale"
+	queueOne(h, stale, hashPresence(hashN(1))) // queued in the old session, dropped by reset
+	h.s.reset()
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	defer cancel2()
+	go h.s.runWorker(ctx2)
+	other := "room@muc.example.com/bob"
+	queueOne(h, other, hashPresence(hashN(2))) // hashN(1) would be an MXC cache hit (no fetch)
+	waitFetch(t, fetched, other)
+	select {
+	case got := <-fetched:
+		t.Fatalf("unexpected fetch %s after reset", got)
+	case <-time.After(50 * time.Millisecond):
 	}
 }
