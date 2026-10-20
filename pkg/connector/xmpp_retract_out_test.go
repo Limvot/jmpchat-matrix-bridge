@@ -377,3 +377,21 @@ func TestRetractionCapabilities(t *testing.T) {
 	}
 	var _ bridgev2.RedactionHandlingNetworkAPI = (*xmppClient)(nil)
 }
+
+func TestRelayedRedactionOnlyOwn(t *testing.T) {
+	x := &xmppClient{loginID: outLogin}
+	portal := &bridgev2.Portal{Portal: &database.Portal{PortalKey: networkid.PortalKey{ID: "bob@example.com", Receiver: outLogin}, RoomType: database.RoomTypeDM}}
+	row := matrixRow("x1", "")
+	row.SenderMXID = "@alice:example.org"
+	msg := &bridgev2.MatrixMessageRemove{TargetMessage: row}
+	msg.Portal = portal
+	msg.OrigSender = &bridgev2.OrigSender{}
+	msg.Event = &event.Event{Sender: "@mallory:example.org"}
+	if err := x.handleMatrixMessageRemove(context.Background(), msg); !errors.Is(err, errRetractNotOwn) {
+		t.Fatalf("other relayed user: err = %v", err)
+	}
+	msg.Event = &event.Event{Sender: "@alice:example.org"}
+	if err := x.handleMatrixMessageRemove(context.Background(), msg); !errors.Is(err, errRetractNotConnected) {
+		t.Fatalf("own relayed message should pass the ownership check: err = %v", err)
+	}
+}

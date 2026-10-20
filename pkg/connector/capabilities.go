@@ -8,7 +8,8 @@ import (
 )
 
 // jabberCapID is a stored/compared capability ID, not a project name: it deliberately keeps the
-// pre-rename value (changing it would make bridgev2 re-send room features for every room).
+// pre-rename prefix. Bump only the date suffix (with the capabilities version in
+// GetBridgeInfoVersion) when the features change: bridgev2 then re-sends room features everywhere.
 const jabberCapID = "github.com/mautrix/jabber.capabilities.2026_10"
 
 // jabberCaps declares which message types the bridge is allowed to send to the connector.
