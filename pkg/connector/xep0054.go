@@ -273,21 +273,31 @@ func (x *xmppClient) doAvatarRefresh(bareJID string) {
 	if span.IsRecording() {
 		span.SetAttributes(attribute.Bool("xmpp.avatar.changed", avatar != nil))
 	}
-	info := &bridgev2.UserInfo{
-		Avatar: avatar, // nil = no change; UpdateInfo leaves name/other fields untouched
+	applyGhostAvatar(ctx, realAvatarGhost{ghost}, avatar, hash, nil)
+}
+
+// applyGhostAvatar applies avatar (nil = no change, UpdateInfo leaves name and other fields alone)
+// to the ghost and stamps AvatarFetchedAt and AvatarHash=newHash ("" clears it when the photo was
+// removed). after, if set, runs in ExtraUpdates under the ghost lock after the avatar was prepared,
+// so it sees the final AvatarMXC/AvatarHash.
+func applyGhostAvatar(ctx context.Context, ghost avatarGhost, avatar *bridgev2.Avatar, newHash string, after func(g *bridgev2.Ghost)) {
+	ghost.UpdateInfo(ctx, &bridgev2.UserInfo{
+		Avatar: avatar,
 		ExtraUpdates: func(ctx context.Context, g *bridgev2.Ghost) (changed bool) {
 			m, ok := g.Metadata.(*GhostMetadata)
 			if !ok || m == nil {
 				return false
 			}
 			m.AvatarFetchedAt.Time = time.Now()
-			if m.AvatarHash != hash {
-				m.AvatarHash = hash // "" clears it when the photo was removed
+			if m.AvatarHash != newHash {
+				m.AvatarHash = newHash
+			}
+			if after != nil {
+				after(g)
 			}
 			return true // always persist the stamped fetch time
 		},
-	}
-	ghost.UpdateInfo(ctx, info)
+	})
 }
 
 // refreshContactAvatarFromPresence is triggered by an XEP-0153 vcard-temp:x:update presence hash.

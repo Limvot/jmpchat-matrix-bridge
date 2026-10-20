@@ -802,61 +802,20 @@ func (x *xmppClient) handlePresence(t xmlstream.TokenReadEncoder, start *xml.Sta
 	roomBare := fromJID.Bare().String()
 	ourNick := fromJID.Resourcepart()
 
-	// Consume the rest of the presence stanza and detect error/conflict (409).
-	// Also capture the XEP-0153 vcard-temp:x:update photo hash (avatar change signal), and
-	// note whether this is MUC presence so we don't treat occupant presence as a 1:1 contact.
-	depth := 1
-	var hasConflict bool
-	var sawMUCUser, sawVCardUpdate, inVCardUpdate, inPhoto bool
-	var photoHash strings.Builder
-	for depth > 0 {
-		tok, err := t.Token()
-		if err != nil {
-			break
-		}
-		switch v := tok.(type) {
-		case xml.StartElement:
-			depth++
-			if v.Name.Local == "error" {
-				for _, a := range v.Attr {
-					if a.Name.Local == "code" && a.Value == "409" {
-						hasConflict = true
-						break
-					}
-				}
-			}
-			if v.Name.Local == "conflict" {
-				hasConflict = true
-			}
-			if v.Name.Space == mucUserNS {
-				sawMUCUser = true
-			}
-			if v.Name.Local == "x" && v.Name.Space == vcardUpdateNS {
-				sawVCardUpdate = true
-				inVCardUpdate = true
-			}
-			if inVCardUpdate && v.Name.Local == "photo" {
-				inPhoto = true
-			}
-		case xml.CharData:
-			if inPhoto {
-				photoHash.Write(v)
-			}
-		case xml.EndElement:
-			depth--
-			if v.Name.Local == "photo" {
-				inPhoto = false
-			}
-			if v.Name.Local == "x" && v.Name.Space == vcardUpdateNS {
-				inVCardUpdate = false
-			}
-		}
-	}
+	// Consume the rest of the presence stanza in one pass: error/conflict (409), the XEP-0153
+	// vcard-temp:x:update photo hash (avatar change signal), and the MUC occupant signals.
+	info := parsePresence(t)
+	hasConflict := info.conflict
+	sawVCardUpdate := info.sawVCardUpdate
+	sawMUCUser := info.isMUC
 
 	// XEP-0153: a 1:1 contact advertised (or cleared) their avatar hash. Refresh the ghost avatar
-	// out-of-band. Skip MUC presence (occupant ghosts are keyed by full JID, not bare).
+	// out-of-band. MUC occupant presence goes to the occupant avatar table instead (memory only).
 	if sawVCardUpdate && typeVal != "error" && !sawMUCUser {
-		go x.refreshContactAvatarFromPresence(fromJID.Bare().String(), strings.TrimSpace(photoHash.String()))
+		go x.refreshContactAvatarFromPresence(fromJID.Bare().String(), info.rawPhoto)
+	}
+	if sawMUCUser && typeVal != "error" && ourNick != "" {
+		x.noteMUCPresence(fromJID.String(), roomBare, typeVal, info)
 	}
 
 	if typeVal == "error" {
@@ -898,15 +857,6 @@ func (x *xmppClient) handlePresence(t xmlstream.TokenReadEncoder, start *xml.Sta
 		}
 	}
 	x.mucPendingJoinMu.Unlock()
-
-	// Consume any remaining tokens if we exited early (shouldn't happen).
-	for depth > 0 {
-		tok, _ := t.Token()
-		if e, ok := tok.(xml.EndElement); ok {
-			depth--
-			_ = e
-		}
-	}
 	return nil
 }
 
