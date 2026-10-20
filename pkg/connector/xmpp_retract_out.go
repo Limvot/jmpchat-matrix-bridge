@@ -140,11 +140,19 @@ func (x *xmppClient) handleMatrixMessageRemove(ctx context.Context, msg *bridgev
 	if !isOwnMessage(target, x.loginID) {
 		return bridgev2.WrapErrorInStatus(errRetractNotOwn).WithSendNotice(true)
 	}
+	// Relay mode: every relayed message is stored under the relay login, so a relayed Matrix user may
+	// only retract a message that they sent themselves.
+	if msg.OrigSender != nil && (msg.Event == nil || target.SenderMXID == "" || target.SenderMXID != msg.Event.Sender) {
+		return bridgev2.WrapErrorInStatus(errRetractNotOwn).WithSendNotice(true)
+	}
 	// SMS/MMS cannot be unsent. Not an error: the Matrix redaction stands (bridgev2 then deletes the
 	// row and reports success), the notice explains that the recipient still has it. Nothing is sent
-	// to the gateway.
+	// to the gateway. The refs are tombstoned so MAM catch-up cannot re-bridge the deleted row.
 	if IsCheogramDMJID(portalID) {
 		log.Debug().Msg("Not retracting a Cheogram SMS/MMS message; notifying the room")
+		if kv := x.kv(); kv != nil {
+			markRetractedRefs(ctx, kv, x.loginID, portal.ID, retractedRefsOf([]*database.Message{target}))
+		}
 		x.sendPortalNotice(ctx, portal, smsCannotUnsendNotice)
 		return nil
 	}
