@@ -30,9 +30,11 @@ import (
 )
 
 const (
-	mucOccupantCap       = 20000 // global cap on occupant table entries
-	mucAvatarMaxPending  = 1024  // cap on queued jobs
-	mucAvatarMXCCap      = 512   // cap on the advertised/real hash -> MXC cache
+	mucOccupantCap       = 20000            // global cap on occupant table entries
+	mucHistoryCap        = 1024             // cap on history-only entries (ghost seen, no presence seen)
+	mucAvatarMinInterval = 60 * time.Second // minimum time between jobs doing work for one occupant
+	mucAvatarMaxPending  = 1024             // cap on queued jobs
+	mucAvatarMXCCap      = 512              // cap on the advertised/real hash -> MXC cache
 	mucAvatarPace        = 250 * time.Millisecond
 	mucAvatarWaitPause   = 60 * time.Second
 	mucAvatarFailRetry   = 6 * time.Hour
@@ -44,11 +46,13 @@ const (
 type mucOccupant struct {
 	room     string
 	photo    photoKind
-	hash     string // advertised (presence) hash, lowercased
-	realJID  string // bare, optional, never logged at info
-	hasGhost bool   // a ghost for this occupant was seen this session
-	doneHash string // advertised state ("none" or hash) last fully handled
-	failHash string // advertised state whose fetch failed
+	hash     string    // advertised (presence) hash, lowercased
+	realJID  string    // bare, optional, never logged at info
+	hasGhost bool      // a ghost for this occupant was seen this session
+	live     bool      // a presence for this occupant was seen this session (else history-only)
+	lastWork time.Time // when the worker last started real work (fetch/apply/remove) for it
+	doneHash string    // advertised state ("none" or hash) last fully handled
+	failHash string    // advertised state whose fetch failed
 	failAt   time.Time
 }
 
@@ -120,6 +124,8 @@ type mucAvatarState struct {
 	mxcByHash      map[string]mucMXC // kept across sessions
 	pausedUntil    time.Time
 	capLogged      bool
+	histOrder      []string // keys of history-only entries, oldest first (may hold stale keys)
+	histN          int      // number of live table entries that are history-only
 	stats          mucAvatarStats
 	lastStats      mucAvatarStats
 	lastStatsAt    time.Time
@@ -177,6 +183,8 @@ func (s *mucAvatarState) reset() {
 	s.roomCancelErrs = nil
 	s.pausedUntil = time.Time{}
 	s.capLogged = false
+	s.histOrder = nil
+	s.histN = 0
 	s.initLocked()
 }
 
@@ -188,6 +196,9 @@ func (s *mucAvatarState) shouldEnqueueLocked(rec *mucOccupant) bool {
 	adv := rec.adv()
 	if adv == rec.doneHash {
 		return false
+	}
+	if !rec.lastWork.IsZero() && s.nowT().Sub(rec.lastWork) < mucAvatarMinInterval {
+		return false // a later presence or message after the interval re-triggers
 	}
 	if adv == rec.failHash && s.nowT().Sub(rec.failAt) < mucAvatarFailRetry {
 		return false
@@ -223,6 +234,29 @@ func (s *mucAvatarState) enqueueLocked(key string) {
 	}
 }
 
+// deleteOccLocked removes an occupant record and its pending job. Requires s.mu.
+func (s *mucAvatarState) deleteOccLocked(key string) {
+	if rec := s.occ[key]; rec != nil && !rec.live {
+		s.histN--
+	}
+	delete(s.occ, key)
+	delete(s.pending, key)
+}
+
+// evictHistoryLocked drops the oldest history-only entry (a sender that spoke without a presence
+// we saw, e.g. MAM/history replay). It reports whether one was dropped. Requires s.mu.
+func (s *mucAvatarState) evictHistoryLocked() bool {
+	for len(s.histOrder) > 0 {
+		k := s.histOrder[0]
+		s.histOrder = s.histOrder[1:]
+		if rec := s.occ[k]; rec != nil && !rec.live {
+			s.deleteOccLocked(k)
+			return true
+		}
+	}
+	return false
+}
+
 // notePresence records an occupant's MUC presence. unavailable covers leave, kick, ban and
 // nick change (303): the record and its pending job are dropped. own is our own occupant.
 // Returns true when the occupant table is full and the entry was ignored for the first time.
@@ -237,19 +271,22 @@ func (s *mucAvatarState) notePresence(occ, room string, info presenceInfo, unava
 		return false
 	}
 	if unavailable {
-		delete(s.occ, occ)
-		delete(s.pending, occ)
+		s.deleteOccLocked(occ)
 		return false
 	}
 	rec := s.occ[occ]
 	if rec == nil {
-		if len(s.occ) >= mucOccupantCap {
+		// Live occupants win over history-only entries when the table is full.
+		if len(s.occ) >= mucOccupantCap && !s.evictHistoryLocked() {
 			first := !s.capLogged
 			s.capLogged = true
 			return first
 		}
-		rec = &mucOccupant{room: room}
+		rec = &mucOccupant{room: room, live: true}
 		s.occ[occ] = rec
+	} else if !rec.live {
+		rec.live = true
+		s.histN--
 	}
 	// A presence without a usable photo element (unknown) says nothing: keep what we knew.
 	if info.photo != photoUnknown {
@@ -273,13 +310,28 @@ func (s *mucAvatarState) noteGhost(occ string) (capReached bool) {
 	s.initLocked()
 	rec := s.occ[occ]
 	if rec == nil {
-		if len(s.occ) >= mucOccupantCap {
+		// History-only entries are bounded: evict the oldest one instead of growing.
+		if s.histN >= mucHistoryCap {
+			s.evictHistoryLocked()
+		}
+		if len(s.occ) >= mucOccupantCap && !s.evictHistoryLocked() {
 			first := !s.capLogged
 			s.capLogged = true
 			return first
 		}
 		rec = &mucOccupant{room: bareOf(occ)}
 		s.occ[occ] = rec
+		s.histN++
+		if len(s.histOrder) >= 4*mucHistoryCap { // drop stale keys
+			q := s.histOrder[:0]
+			for _, k := range s.histOrder {
+				if r := s.occ[k]; r != nil && !r.live {
+					q = append(q, k)
+				}
+			}
+			s.histOrder = q
+		}
+		s.histOrder = append(s.histOrder, occ)
 	}
 	if rec.hasGhost {
 		return false
@@ -301,8 +353,7 @@ func (s *mucAvatarState) clearRoom(room string) {
 func (s *mucAvatarState) clearRoomLocked(room string) {
 	for k, rec := range s.occ {
 		if rec.room == room {
-			delete(s.occ, k)
-			delete(s.pending, k)
+			s.deleteOccLocked(k)
 		}
 	}
 }
@@ -331,6 +382,15 @@ func (s *mucAvatarState) markDone(key, adv string) {
 	s.mu.Lock()
 	if rec := s.occ[key]; rec != nil {
 		rec.doneHash = adv
+	}
+	s.mu.Unlock()
+}
+
+// markWork stamps the start of real work (fetch/apply/remove) for the per-occupant minimum interval.
+func (s *mucAvatarState) markWork(key string) {
+	s.mu.Lock()
+	if rec := s.occ[key]; rec != nil {
+		rec.lastWork = s.nowT()
 	}
 	s.mu.Unlock()
 }
@@ -528,6 +588,7 @@ func (s *mucAvatarState) process(ctx context.Context, key string, snap mucOccSna
 		log.Debug().Str("occupant", key).Str("photo", snap.photo.String()).Msg("MUC avatar unchanged, nothing to do")
 		return
 	}
+	s.markWork(key)
 	if act == mucActFetch {
 		s.mu.Lock()
 		disabled := s.roomDisabled[snap.room]
@@ -750,16 +811,6 @@ func (x *xmppClient) startMUCAvatars(sessCtx context.Context) {
 
 // noteMUCPresence is called on the Serve goroutine for MUC occupant presence (memory only).
 func (x *xmppClient) noteMUCPresence(occupantFull, room, typ string, info presenceInfo) {
-	// Phase 0 (temporary): metadata only, answers whether the room presence carries an XEP-0153
-	// hash, whether item JIDs are visible (non-anonymous) and whether occupant-id is present.
-	x.log.Debug().
-		Str("room", room).
-		Str("occupant", occupantFull).
-		Str("photo", info.photo.String()).
-		Bool("has_item_jid", info.itemJID != "").
-		Bool("has_occupant_id", info.hasOccupantID).
-		Strs("status_codes", info.statusCodes).
-		Msg("MUC presence avatar signals (phase 0, temporary)")
 	own := info.hasStatus("110") || x.getMUCOurOccupantJID(room) == occupantFull
 	if x.mucAv.notePresence(occupantFull, room, info, typ == "unavailable", own) {
 		x.log.Debug().Int("cap", mucOccupantCap).Msg("MUC avatar occupant table full, ignoring new occupants this session")

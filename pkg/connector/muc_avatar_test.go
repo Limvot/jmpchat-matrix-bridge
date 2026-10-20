@@ -738,3 +738,75 @@ func TestWorkerLoopAcrossReset(t *testing.T) {
 	case <-time.After(50 * time.Millisecond):
 	}
 }
+
+func TestMUCMinFetchInterval(t *testing.T) {
+	h := newHarness()
+	h.ghosts[testOcc] = newFakeGhost("", true)
+	h.fetchFn = func(string) ([]byte, string, error) { return pngBytes, hashN(1), nil }
+	queueOne(h, testOcc, hashPresence(hashN(1)))
+	if !h.s.runOnce(context.Background()) {
+		t.Fatal("no job")
+	}
+	// A different hash right after the fetch must not enqueue, regardless of the change.
+	h.now = h.now.Add(10 * time.Second)
+	h.s.notePresence(testOcc, testRoom, hashPresence(hashN(2)), false, false)
+	if h.pendingLen() != 0 {
+		t.Fatal("changed hash inside the minimum interval must not enqueue")
+	}
+	// After the interval the next presence re-triggers.
+	h.now = h.now.Add(mucAvatarMinInterval)
+	h.s.notePresence(testOcc, testRoom, hashPresence(hashN(2)), false, false)
+	if h.pendingLen() != 1 {
+		t.Fatal("must enqueue once the interval passed")
+	}
+}
+
+func TestMUCHistoryEntriesBounded(t *testing.T) {
+	h := newHarness()
+	s := h.s
+	for i := 0; i < mucHistoryCap+500; i++ {
+		s.noteGhost(fmt.Sprintf("room@muc.example.com/h%d", i))
+	}
+	s.mu.Lock()
+	n, hn := len(s.occ), s.histN
+	s.mu.Unlock()
+	if n != mucHistoryCap || hn != mucHistoryCap {
+		t.Fatalf("history entries %d (histN %d), want %d", n, hn, mucHistoryCap)
+	}
+	if h.rec("room@muc.example.com/h0") != nil || h.rec(fmt.Sprintf("room@muc.example.com/h%d", mucHistoryCap+499)) == nil {
+		t.Fatal("oldest must be evicted, newest kept")
+	}
+	// A presence turns an entry into a live one that is no longer evictable.
+	live := fmt.Sprintf("room@muc.example.com/h%d", mucHistoryCap+499)
+	s.notePresence(live, testRoom, presenceInfo{photo: photoNone}, false, false)
+	for i := 0; i < mucHistoryCap+10; i++ {
+		s.noteGhost(fmt.Sprintf("room@muc.example.com/x%d", i))
+	}
+	if h.rec(live) == nil {
+		t.Fatal("live occupant evicted")
+	}
+}
+
+func TestMUCLiveOccupantsNotBlockedByHistory(t *testing.T) {
+	h := newHarness()
+	s := h.s
+	// Fill the table: all live except a few history entries.
+	for i := 0; i < mucOccupantCap-3; i++ {
+		s.notePresence(fmt.Sprintf("room@muc.example.com/n%d", i), testRoom, presenceInfo{photo: photoNone}, false, false)
+	}
+	for i := 0; i < 3; i++ {
+		s.noteGhost(fmt.Sprintf("room@muc.example.com/h%d", i))
+	}
+	for i := 0; i < 3; i++ {
+		if s.notePresence(fmt.Sprintf("room@muc.example.com/new%d", i), testRoom, presenceInfo{photo: photoNone}, false, false) {
+			t.Fatal("cap reported while history entries were evictable")
+		}
+		if h.rec(fmt.Sprintf("room@muc.example.com/new%d", i)) == nil {
+			t.Fatal("new live occupant ignored")
+		}
+	}
+	// No history entries left: now the cap applies.
+	if !s.notePresence("room@muc.example.com/over", testRoom, presenceInfo{photo: photoNone}, false, false) {
+		t.Fatal("cap must apply once only live entries remain")
+	}
+}
