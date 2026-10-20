@@ -331,8 +331,8 @@ OTEL_EXPORTER_OTLP_ENDPOINT=http://datadog-agent:4318
 OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
 
 DD_SERVICE=jmpchat-matrix-bridge   # optional
-DD_ENV=prod                 # optional
-DD_VERSION=0.1.8            # optional
+DD_ENV=prod                        # optional
+DD_VERSION=0.1.8                   # optional
 ```
 
 ### docker-compose example (bridge + Datadog Agent)
