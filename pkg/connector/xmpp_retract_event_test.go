@@ -269,6 +269,22 @@ func TestRetractionPreHandlerIgnoresUnknownAndInvalid(t *testing.T) {
 
 // With a reason the connector redacts itself and returns success so the framework skips its own
 // redaction; without one the framework path is used.
+// A legacy :0 moderation whose reason sits inside <moderated> reaches the reason path.
+func TestRetractionLegacyModerationReasonEndToEnd(t *testing.T) {
+	_, _, ids := parseFull(t, `<message type="groupchat" from="room@muc.example.com"><apply-to xmlns="urn:xmpp:fasten:0" id="S1"><moderated xmlns="urn:xmpp:message-moderate:0" by="room@muc.example.com/mod"><retract xmlns="urn:xmpp:message-retract:0"/><reason>off topic</reason></moderated></apply-to></message>`)
+	if ids.Retract == nil {
+		t.Fatal("no retraction parsed")
+	}
+	room := mucPortal()
+	victim := row(room, "m1", "room@muc.example.com/alice", &MessageMetadata{StanzaID: "S1"})
+	env := &fakeRetractEnv{cands: []*database.Message{victim}, pf: portalFacts{key: room, loginID: retractTestLogin, isMUC: true}, removeRes: bridgev2.EventHandlingResultSuccess}
+	r := retraction{info: *ids.Retract, channel: retractChanLive, groupchat: true, msgType: "groupchat", fromFull: "room@muc.example.com"}
+	res := newRetractionEvent(env, room, r, time.Time{}).PreHandleWithResult(context.Background(), nil)
+	if res == nil || !res.Success || env.reason != "off topic" || !env.moderated {
+		t.Errorf("res=%+v reason=%q moderated=%v", res, env.reason, env.moderated)
+	}
+}
+
 func TestRetractionReasonPathSelection(t *testing.T) {
 	room := mucPortal()
 	victim := row(room, "m1", "room@muc.example.com/alice", &MessageMetadata{StanzaID: "S1"})
