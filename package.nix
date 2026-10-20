@@ -12,14 +12,15 @@
   olm,
   opus,
   version ? "0.6.0",
-  src ? lib.cleanSourceWith {
+  jmpchatSrc ? lib.cleanSourceWith {
     src = lib.cleanSource ./.;
     filter = name: type: type != "symlink" || baseNameOf name != "result";
   },
 }:
 buildGo126Module rec {
   pname = "jmpchat-matrix-bridge";
-  inherit version src;
+  inherit version;
+  src = jmpchatSrc;
 
   subPackages = ["cmd/jmpchat-matrix-bridge"];
   tags = ["sipcalls" "nolibopusfile"];

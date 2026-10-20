@@ -13,7 +13,7 @@
       inherit system;
       config.permittedInsecurePackages = ["olm-3.2.16"];
     };
-    jmpchat-matrix-bridge = pkgs.callPackage ./package.nix {src = self;};
+    jmpchat-matrix-bridge = pkgs.callPackage ./package.nix {jmpchatSrc = self;};
   in {
     packages.${system} = {
       jmpchat-matrix-bridge = jmpchat-matrix-bridge;
@@ -24,7 +24,7 @@
     # libolm is currently marked insecure upstream: allow "olm-3.2.16" in your
     # nixpkgs config (the NixOS module below does this for you).
     overlays.default = final: prev: {
-      jmpchat-matrix-bridge = final.callPackage ./package.nix {src = self;};
+      jmpchat-matrix-bridge = final.callPackage ./package.nix {jmpchatSrc = self;};
     };
 
     # NixOS module: services.jmpchat-matrix-bridge.enable = true; (see README "Nix")
