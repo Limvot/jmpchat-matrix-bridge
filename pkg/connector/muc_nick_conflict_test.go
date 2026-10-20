@@ -218,7 +218,7 @@ func TestRememberedNickUsedOnRejoin(t *testing.T) {
 	r := newNickRig()
 	r.x.login = nil
 	base, nick := chooseMUCNick("", "", string(r.x.loginID), "wreck_1", "wreck")
-	r.x.startMUCJoinTrack(nickRoom, base, nick)
+	r.x.startMUCJoinTrack(nickRoom, base, nick, nil)
 	if err := r.x.sendMUCJoin(context.Background(), nickRoom, nick, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -229,7 +229,7 @@ func TestRememberedNickUsedOnRejoin(t *testing.T) {
 		t.Fatalf("sent=%v notices=%v", r.sent, r.notices)
 	}
 	// If the remembered nick now conflicts, the next try is wreck_2 (wreck_1 counts as tried).
-	r.x.startMUCJoinTrack(nickRoom, base, nick)
+	r.x.startMUCJoinTrack(nickRoom, base, nick, nil)
 	r.conflict(t, "wreck_1")
 	r.wait(t)
 	if r.sent[len(r.sent)-1] != "wreck_2" {
@@ -240,7 +240,7 @@ func TestRememberedNickUsedOnRejoin(t *testing.T) {
 func TestMUCNickNoticeNamesFirstTriedNick(t *testing.T) {
 	r := newNickRig()
 	base, nick := chooseMUCNick("", "", string(r.x.loginID), "wreck_1", "wreck")
-	r.x.startMUCJoinTrack(nickRoom, base, nick)
+	r.x.startMUCJoinTrack(nickRoom, base, nick, nil)
 	if err := r.x.sendMUCJoin(context.Background(), nickRoom, nick, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -294,5 +294,32 @@ func TestMUCJoinStateResetStopsStaleRetry(t *testing.T) {
 	r.wait(t)
 	if r.sent[len(r.sent)-1] != "wreck_1" {
 		t.Fatalf("sent=%v", r.sent)
+	}
+}
+
+// A 409 retry repeats the history request of the join that started the chain (auto-rejoin since=).
+func TestMUCJoinRetryKeepsHistory(t *testing.T) {
+	r := newNickRig()
+	var hists []*mucHistory
+	r.x.mucJoinHistHook = func(_ string, h *mucHistory) {
+		r.mu.Lock()
+		hists = append(hists, h)
+		r.mu.Unlock()
+	}
+	want := &mucHistory{Since: time.Now().Add(-time.Hour), MaxStanzas: mucRejoinMaxStanzas}
+	if err := r.x.joinMUC(context.Background(), nickRoom, want); err != nil {
+		t.Fatal(err)
+	}
+	r.wait(t)
+	next, tried, gen, handled := r.x.onMUCJoinConflict(nickRoom, "wreck")
+	if !handled || next != "wreck_1" {
+		t.Fatalf("next=%q handled=%v", next, handled)
+	}
+	r.x.continueMUCJoinAfterConflict(nickRoom, next, tried, gen)
+	r.wait(t)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(hists) != 2 || hists[0] != want || hists[1] != want {
+		t.Fatalf("history requests = %v, want the first join's on both", hists)
 	}
 }

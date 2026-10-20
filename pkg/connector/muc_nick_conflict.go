@@ -21,9 +21,10 @@ const mucMaxNickAlternatives = 3
 
 // mucJoinTrack follows one join attempt chain for a room (guarded by xmppClient.mucPendingJoinMu).
 type mucJoinTrack struct {
-	base       string   // preferred nick for this room when the chain started
-	tried      []string // nicks that were answered with 409 in this chain
-	conflicted bool     // at least one 409 happened (so a confirmed join is announced)
+	base       string      // preferred nick for this room when the chain started
+	tried      []string    // nicks that were answered with 409 in this chain
+	conflicted bool        // at least one 409 happened (so a confirmed join is announced)
+	hist       *mucHistory // history request of the first join, repeated by the 409 retries
 }
 
 // chooseMUCNick picks the base (preferred) nick and the nick to actually join with. explicit is the
@@ -78,8 +79,9 @@ func (x *xmppClient) mucNickChoice(ctx context.Context, roomJIDStr string) (base
 	return chooseMUCNick(explicit, def, string(x.loginID), autoNick, autoBase)
 }
 
-// startMUCJoinTrack registers a fresh join chain and marks nick as pending.
-func (x *xmppClient) startMUCJoinTrack(roomBare, base, nick string) {
+// startMUCJoinTrack registers a fresh join chain and marks nick as pending. hist is the history
+// request of the join (nil = none); 409 retries of the chain send the same one.
+func (x *xmppClient) startMUCJoinTrack(roomBare, base, nick string, hist *mucHistory) {
 	x.mucPendingJoinMu.Lock()
 	defer x.mucPendingJoinMu.Unlock()
 	if x.mucPendingJoin == nil {
@@ -89,7 +91,7 @@ func (x *xmppClient) startMUCJoinTrack(roomBare, base, nick string) {
 		x.mucJoinTracks = make(map[string]*mucJoinTrack)
 	}
 	x.mucPendingJoin[roomBare] = nick
-	x.mucJoinTracks[roomBare] = &mucJoinTrack{base: base}
+	x.mucJoinTracks[roomBare] = &mucJoinTrack{base: base, hist: hist}
 }
 
 // resetMUCJoinState drops every pending join and retry chain and starts a new generation. Called
@@ -106,12 +108,25 @@ func (x *xmppClient) resetMUCJoinState() {
 // mucJoinChainCurrent reports whether a retry chain started in generation gen is still the one in
 // flight: same session, and (when next is set) next is still the pending nick for the room.
 func (x *xmppClient) mucJoinChainCurrent(roomBare, next string, gen uint64) bool {
+	_, ok := x.mucJoinChainHist(roomBare, next, gen)
+	return ok
+}
+
+// mucJoinChainHist is mucJoinChainCurrent that also returns the chain's history request.
+func (x *xmppClient) mucJoinChainHist(roomBare, next string, gen uint64) (*mucHistory, bool) {
 	x.mucPendingJoinMu.Lock()
 	defer x.mucPendingJoinMu.Unlock()
 	if x.mucJoinGen != gen {
-		return false
+		return nil, false
 	}
-	return next == "" || x.mucPendingJoin[roomBare] == next
+	if next != "" && x.mucPendingJoin[roomBare] != next {
+		return nil, false
+	}
+	var hist *mucHistory
+	if t := x.mucJoinTracks[roomBare]; t != nil {
+		hist = t.hist
+	}
+	return hist, true
 }
 
 // dropMUCJoinTrack forgets the pending join and chain for a room.
@@ -173,7 +188,8 @@ func (x *xmppClient) continueMUCJoinAfterConflict(roomBare, next string, tried [
 	if span.IsRecording() {
 		span.SetAttributes(attribute.String("xmpp.room.jid", roomBare), attribute.Int("xmpp.muc.nick_attempts", len(tried)))
 	}
-	if !x.mucJoinChainCurrent(roomBare, next, gen) {
+	hist, current := x.mucJoinChainHist(roomBare, next, gen)
+	if !current {
 		log.Debug().Str("room", roomBare).Msg("MUC 409 retry: session changed or chain superseded, dropped")
 		return
 	}
@@ -182,7 +198,7 @@ func (x *xmppClient) continueMUCJoinAfterConflict(roomBare, next string, tried [
 		x.notifyMUC(ctx, roomBare, mucAllTakenNotice(x.mucCmdPrefix(), roomBare, tried))
 		return
 	}
-	if err := x.sendMUCJoin(ctx, roomBare, next, nil); err != nil {
+	if err := x.sendMUCJoin(ctx, roomBare, next, hist); err != nil {
 		x.dropMUCJoinTrack(roomBare)
 		telemetry.Fail(span, err)
 		log.Warn().Err(err).Str("room", roomBare).Str("nick", next).Msg("MUC 409 retry: send failed")
