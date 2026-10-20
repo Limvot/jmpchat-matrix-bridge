@@ -89,6 +89,8 @@ func TestValidateRetraction(t *testing.T) {
 		{"muc self equal occupant-id (nick changed)", gc("room@muc.example.com/alice2", "OCC-A"), muc, aliceMUCOcc, true},
 		{"muc self different occupant-id, same nick", gc("room@muc.example.com/alice", "OCC-EVIL"), muc, aliceMUCOcc, false},
 		{"muc self missing occupant-id while target has one, same nick", gc("room@muc.example.com/alice", ""), muc, aliceMUCOcc, false},
+		{"muc self nick match with occupant-id, target has none (nick reuse)", gc("room@muc.example.com/alice", "OCC-M"), muc, aliceMUC, false},
+		{"muc self our nick with occupant-id, our target has none", gc("room@muc.example.com/me", "OCC-M"), muc, ourMUC, false},
 		{"muc self our other client with our nick", gc("room@muc.example.com/me", ""), muc, ourMUC, true},
 		{"muc self someone else's nick on our message", gc("room@muc.example.com/alice", ""), muc, ourMUC, false},
 		{"muc self in wrong room", gc("evil@muc.example.com/alice", ""), muc, aliceMUC, false},
