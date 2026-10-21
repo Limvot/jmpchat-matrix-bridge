@@ -27,6 +27,7 @@ type bmRig struct {
 	fetches    int
 	publishes  []bookmarkConf
 	fetchErr   error
+	fetchInfo  bookmarkFetchInfo
 	publishErr error
 
 	sentJoins []string // "room|nick"
@@ -52,14 +53,14 @@ func newBMRig(t *testing.T, write bool, server ...bookmarkConf) *bmRig {
 	r.x = x
 	x.bm.reset()
 	x.bm.discoHook = func(context.Context) (disco.Info, error) { return pepDisco(write), nil }
-	x.bm.fetchHook = func(context.Context) ([]bookmarkConf, int, error) {
+	x.bm.fetchHook = func(context.Context) ([]bookmarkConf, bookmarkFetchInfo, error) {
 		r.mu.Lock()
 		defer r.mu.Unlock()
 		r.fetches++
 		if r.fetchErr != nil {
-			return nil, 0, r.fetchErr
+			return nil, bookmarkFetchInfo{}, r.fetchErr
 		}
-		return append([]bookmarkConf(nil), r.server...), 0, nil
+		return append([]bookmarkConf(nil), r.server...), r.fetchInfo, nil
 	}
 	x.bm.publishHook = func(_ context.Context, c bookmarkConf) error {
 		r.mu.Lock()

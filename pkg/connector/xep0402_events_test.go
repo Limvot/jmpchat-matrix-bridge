@@ -205,7 +205,10 @@ func TestEventWorkerAppliesQueuedEventsAndStopsWithSession(t *testing.T) {
 func TestEventHandlerOnServeDoesNoIO(t *testing.T) {
 	r := eventRig(t)
 	fail := func(what string) { t.Errorf("Serve path did IO: %s", what) }
-	r.x.bm.fetchHook = func(context.Context) ([]bookmarkConf, int, error) { fail("fetch"); return nil, 0, nil }
+	r.x.bm.fetchHook = func(context.Context) ([]bookmarkConf, bookmarkFetchInfo, error) {
+		fail("fetch")
+		return nil, bookmarkFetchInfo{}, nil
+	}
 	r.x.bm.publishHook = func(context.Context, bookmarkConf) error { fail("publish"); return nil }
 	r.x.mucSendJoinHook = func(string, string) error { fail("join"); return nil }
 	r.x.mucLeaveHook = func(string) error { fail("leave"); return nil }

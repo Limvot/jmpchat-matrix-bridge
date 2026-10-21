@@ -176,7 +176,6 @@ func sendXMPPMessageWithOOBID(ctx context.Context, sess *xmpp.Session, to jid.JI
 	log := zerolog.Ctx(ctx)
 	log.Debug().
 		Str("input_body_len", fmt.Sprintf("%d", len(body))).
-		Str("input_oob_url", oobURL).
 		Str("input_oob_url_len", fmt.Sprintf("%d", len(oobURL))).
 		Str("to_jid", to.String()).
 		Str("msg_type", string(msgType)).
@@ -227,7 +226,6 @@ func sendXMPPMessageWithOOBID(ctx context.Context, sess *xmpp.Session, to jid.JI
 	if oobURL != "" {
 		log.Debug().
 			Str("final_body_len", fmt.Sprintf("%d", len(finalBody))).
-			Str("final_oob_url", oobURL).
 			Msg("DEBUG: Adding OOB payload")
 		readers = append(readers, oobReader(oobURL))
 	}

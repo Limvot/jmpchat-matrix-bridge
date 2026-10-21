@@ -1572,7 +1572,14 @@ func (x *xmppClient) joinMUCForPortal(ctx context.Context, roomJIDStr string) er
 	if span.IsRecording() {
 		span.SetAttributes(attribute.String("xmpp.room.jid", roomJIDStr))
 	}
-	err := x.joinMUCOpts(ctx, roomJIDStr, nil, false)
+	// Already in the room: re-send the join presence (it heals a silent drop by the room) with the nick we
+	// currently hold, never the configured one, so a shared nick that another client of the account
+	// renamed is not renamed back on every send or view. Only the join command re-applies the nick choice.
+	nickOverride := ""
+	if occ := x.getMUCOurOccupantJID(roomJIDStr); occ != "" {
+		nickOverride = resourceOf(occ)
+	}
+	err := x.joinMUCNick(ctx, roomJIDStr, nil, false, nickOverride)
 	telemetry.Fail(span, err)
 	return err
 }
@@ -1585,11 +1592,20 @@ func (x *xmppClient) joinMUC(ctx context.Context, roomJIDStr string, hist *mucHi
 
 // joinMUCOpts is joinMUC; writeBookmark marks the join chain so that its confirmation writes the bookmark.
 func (x *xmppClient) joinMUCOpts(ctx context.Context, roomJIDStr string, hist *mucHistory, writeBookmark bool) error {
+	return x.joinMUCNick(ctx, roomJIDStr, hist, writeBookmark, "")
+}
+
+// joinMUCNick is joinMUCOpts; a non-empty nickOverride is joined with instead of the nick choice (the
+// base for 409 alternatives still comes from the nick choice).
+func (x *xmppClient) joinMUCNick(ctx context.Context, roomJIDStr string, hist *mucHistory, writeBookmark bool, nickOverride string) error {
 	roomJID, err := jid.Parse(roomJIDStr)
 	if err != nil {
 		return fmt.Errorf("invalid MUC JID %q: %w", roomJIDStr, err)
 	}
 	base, nick := x.mucNickChoice(ctx, roomJIDStr)
+	if nickOverride != "" {
+		nick = nickOverride
+	}
 	if _, err := roomJID.WithResource(nick); err != nil {
 		return fmt.Errorf("MUC JID with resource: %w", err)
 	}
@@ -1722,6 +1738,8 @@ func (x *xmppClient) leaveMUC(ctx context.Context, roomJIDStr string) error {
 		delete(x.mucOurOccupantJID, roomJIDStr)
 	}
 	x.mucOurOccupantJIDMu.Unlock()
+	// A join still pending must not record an occupant JID (or write a bookmark) after this leave.
+	x.dropMUCJoinTrack(roomJIDStr)
 	x.mucAv.clearRoom(roomJID.Bare().String())
 	x.logFor(ctx).Info().
 		Str("room", roomJIDStr).
@@ -1905,9 +1923,7 @@ func (x *xmppClient) handleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 	log.Debug().
 		Str("content_body_len", fmt.Sprintf("%d", len(msg.Content.Body))).
 		Str("content_formatted_body_len", fmt.Sprintf("%d", len(msg.Content.FormattedBody))).
-		Str("content_filename", msg.Content.FileName).
 		Str("content_msgtype", string(msg.Content.MsgType)).
-		Str("content_url", string(msg.Content.URL)).
 		Bool("has_file", msg.Content.File != nil).
 		Msg("DEBUG: HandleMatrixMessage - initial Matrix content values")
 
@@ -1937,7 +1953,7 @@ func (x *xmppClient) handleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 			// Fill FileName from raw event if Content.FileName is empty
 			if msg.Content.FileName == "" && mc.FileName != "" {
 				msg.Content.FileName = mc.FileName
-				log.Debug().Str("event_filename", mc.FileName).Msg("DEBUG: Got filename from event content")
+				log.Debug().Msg("DEBUG: Got filename from event content")
 			}
 		}
 	}
@@ -1976,8 +1992,6 @@ func (x *xmppClient) handleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 			Str("msg_type", string(msg.Content.MsgType)).
 			Str("media_label", mediaLabel).
 			Str("body_len", fmt.Sprintf("%d", len(body))).
-			Str("content_filename", msg.Content.FileName).
-			Str("content_url", string(msg.Content.URL)).
 			Bool("has_file", msg.Content.File != nil).
 			Msg("DEBUG: Processing media message - initial values")
 		
@@ -1989,7 +2003,6 @@ func (x *xmppClient) handleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 		if mediaURL == "" {
 			return nil, bridgev2.WrapErrorInStatus(fmt.Errorf("%w: %s has no URL", bridgev2.ErrUnsupportedMessageType, msg.Content.MsgType)).WithSendNotice(true)
 		}
-		log.Debug().Str("media_url", string(mediaURL)).Msg("DEBUG: Resolved media URL")
 		
 		// Extract user-provided caption (if any). For OOB messages, we only include actual user text.
 		// Matrix often includes the filename in body for media messages; if body equals filename, treat as no caption.
@@ -2004,8 +2017,6 @@ func (x *xmppClient) handleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 		}
 		
 		log.Debug().
-			Str("content_filename", msg.Content.FileName).
-			Str("resolved_filename", filename).
 			Bool("body_equals_filename", userCaption == filename).
 			Msg("DEBUG: After trimming body, before filename comparison")
 		
@@ -2073,7 +2084,7 @@ func (x *xmppClient) handleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 					log.Warn().Str("domain", origin.Domain().String()).Msg("Could not discover upload service; sending MXC link")
 					messageBody = fallbackCaption + " " + string(mediaURL)
 				} else {
-					log.Debug().Str("upload_jid", uploadJID.String()).Str("filename", filename).Int("size", len(data)).Str("content_type", contentType).Msg("Requesting XEP-0363 upload slot")
+					log.Debug().Str("upload_jid", uploadJID.String()).Int("size", len(data)).Str("content_type", contentType).Msg("Requesting XEP-0363 upload slot")
 					slotCtx, slotSpan := telemetry.StartChild(ctx, "xmpp.iq.upload_slot", trace.WithSpanKind(trace.SpanKindClient))
 					if slotSpan.IsRecording() {
 						slotSpan.SetAttributes(
@@ -2089,7 +2100,7 @@ func (x *xmppClient) handleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 						log.Warn().Err(upErr).Str("upload_jid", uploadJID.String()).Str("mxc", string(mediaURL)).Msg("XEP-0363 slot request failed; sending MXC link anyway")
 						messageBody = fallbackCaption + " " + string(mediaURL)
 					} else {
-						log.Debug().Str("put_url", slot.PutURL.String()).Str("get_url", slot.GetURL.String()).Msg("Got XEP-0363 slot, uploading file")
+						log.Debug().Msg("Got XEP-0363 slot, uploading file")
 						putReq, putErr := slot.Put(ctx, bytes.NewReader(data))
 						if putErr != nil {
 							log.Warn().Err(putErr).Str("mxc", string(mediaURL)).Msg("XEP-0363 PUT build failed; sending MXC link anyway")
@@ -2104,18 +2115,18 @@ func (x *xmppClient) handleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 							}
 							resp, doErr := client.Do(putReq)
 							if doErr != nil {
-								telemetry.Fail(putSpan, doErr)
+								telemetry.Fail(putSpan, redactURLError(doErr))
 							} else if putSpan.IsRecording() {
 								putSpan.SetAttributes(attribute.Int("http.response.status_code", resp.StatusCode))
 							}
 							putSpan.End()
 							if doErr != nil {
-								log.Warn().Err(doErr).Str("put_url", slot.PutURL.String()).Str("mxc", string(mediaURL)).Msg("XEP-0363 upload PUT failed; sending MXC link anyway")
+								log.Warn().Err(redactURLError(doErr)).Str("mxc", string(mediaURL)).Msg("XEP-0363 upload PUT failed; sending MXC link anyway")
 								messageBody = fallbackCaption + " " + string(mediaURL)
 							} else {
 								resp.Body.Close()
 								if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-									log.Warn().Int("status", resp.StatusCode).Str("put_url", slot.PutURL.String()).Str("mxc", string(mediaURL)).Msg("XEP-0363 upload returned error status; sending MXC link anyway")
+									log.Warn().Int("status", resp.StatusCode).Str("mxc", string(mediaURL)).Msg("XEP-0363 upload returned error status; sending MXC link anyway")
 									messageBody = fallbackCaption + " " + string(mediaURL)
 								} else {
 									getURLStr := slot.GetURL.String()
@@ -2123,11 +2134,8 @@ func (x *xmppClient) handleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 									messageBody = userCaption
 									oobURL = getURLStr
 									log.Info().
-										Str("get_url", getURLStr).
-										Str("filename", filename).
 										Str("user_caption_len", fmt.Sprintf("%d", len(userCaption))).
 										Str("message_body_len", fmt.Sprintf("%d", len(messageBody))).
-										Str("oob_url", oobURL).
 										Msg("DEBUG: XEP-0363 upload successful, final values before sending")
 								}
 							}
@@ -2179,7 +2187,6 @@ func (x *xmppClient) handleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 	}
 	log.Debug().
 		Str("final_message_body_len", fmt.Sprintf("%d", len(messageBody))).
-		Str("final_oob_url", oobURL).
 		Str("final_oob_url_len", fmt.Sprintf("%d", len(oobURL))).
 		Str("reply_id", replyID).
 		Str("reply_to_jid", replyToJID).

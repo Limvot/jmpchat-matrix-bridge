@@ -7,7 +7,7 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// Issue #12: message content (bodies, captions, reaction emoji) must not appear in log output, at any
+// Issue #12: message content (bodies, captions, reaction emoji, media URLs) must not appear in log output, at any
 // level; only lengths and ids.
 func TestInboundMessageContentNotLogged(t *testing.T) {
 	const secret = "TOPSECRETBODY"
@@ -30,7 +30,7 @@ func TestInboundMessageContentNotLogged(t *testing.T) {
 	if out == "" {
 		t.Fatal("nothing was logged; the test proves nothing")
 	}
-	for _, leaked := range []string{secret, "🦄"} {
+	for _, leaked := range []string{secret, "🦄", "example.com/f.png"} {
 		if strings.Contains(out, leaked) {
 			t.Errorf("logs leak message content %q:\n%s", leaked, out)
 		}

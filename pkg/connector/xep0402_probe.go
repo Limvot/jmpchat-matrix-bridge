@@ -88,7 +88,19 @@ func (x *xmppClient) handlePubSubEvent(msg stanza.Message, r xmlstream.TokenRead
 // fetchBookmarks reads the whole bookmarks node with our own codec (15s cap, child span). A node that
 // does not exist is an empty list, not an error. Items with a missing id or an undecodable payload are
 // counted in skipped and never stop the loop. Never log or trace the returned content.
-func (x *xmppClient) fetchBookmarks(ctx context.Context, sess *xmpp.Session) (bms []bookmarkConf, skipped int, err error) {
+// bookmarkFetchInfo describes what a fetch could not return: items that were skipped (undecodable or
+// without an id) and whether the item cap cut the list. A write must never create an item that may
+// exist but is missing from the list (it would overwrite another client's bookmark): see mayHide.
+type bookmarkFetchInfo struct {
+	Skipped   int
+	Opaque    map[string]bool // bookmarkKey of items that exist but could not be decoded
+	Truncated bool            // bookmarkFetchMaxItems reached: anything may be missing
+}
+
+// mayHide reports whether the room's item could exist on the server although the fetch did not return it.
+func (f bookmarkFetchInfo) mayHide(key string) bool { return f.Truncated || f.Opaque[key] }
+
+func (x *xmppClient) fetchBookmarks(ctx context.Context, sess *xmpp.Session) (bms []bookmarkConf, info bookmarkFetchInfo, err error) {
 	ctx, span := telemetry.StartChild(ctx, "xmpp.iq.bookmarks_fetch", trace.WithSpanKind(trace.SpanKindClient))
 	defer span.End()
 	ctx, cancel := context.WithTimeout(ctx, bookmarkFetchTimeout)
@@ -96,17 +108,22 @@ func (x *xmppClient) fetchBookmarks(ctx context.Context, sess *xmpp.Session) (bm
 	it := pubsub.Fetch(ctx, sess, pubsub.Query{Node: bookmarks.NS})
 	defer it.Close()
 	for it.Next() {
-		if len(bms)+skipped >= bookmarkFetchMaxItems {
+		if len(bms)+info.Skipped >= bookmarkFetchMaxItems {
+			info.Truncated = true
 			break
 		}
 		id, r := it.Item()
 		if id == "" || r == nil {
-			skipped++
+			info.Skipped++
 			continue
 		}
 		c, derr := decodeBookmarkConf(id, r)
 		if derr != nil {
-			skipped++
+			info.Skipped++
+			if info.Opaque == nil {
+				info.Opaque = map[string]bool{}
+			}
+			info.Opaque[bookmarkKey(id)] = true
 			continue
 		}
 		bms = append(bms, c)
@@ -118,13 +135,13 @@ func (x *xmppClient) fetchBookmarks(ctx context.Context, sess *xmpp.Session) (bm
 		} else {
 			err = ierr
 			telemetry.Fail(span, ierr)
-			return nil, skipped, ierr
+			return nil, info, ierr
 		}
 	}
 	if span.IsRecording() {
-		span.SetAttributes(attribute.Int("xmpp.bookmarks.count", len(bms)), attribute.Int("xmpp.bookmarks.skipped", skipped))
+		span.SetAttributes(attribute.Int("xmpp.bookmarks.count", len(bms)), attribute.Int("xmpp.bookmarks.skipped", info.Skipped), attribute.Bool("xmpp.bookmarks.truncated", info.Truncated))
 	}
-	return bms, skipped, err
+	return bms, info, err
 }
 
 // logBookmarkGate logs the single info line of the capability decision.

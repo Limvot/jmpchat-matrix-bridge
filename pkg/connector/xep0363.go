@@ -9,8 +9,10 @@ import (
 	"encoding/hex"
 	"encoding/xml"
 	"fmt"
+	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"sync"
 	"time"
@@ -150,7 +152,7 @@ func UploadFile(ctx context.Context, sess *xmpp.Session, pending *pendingSlots, 
 		client := &http.Client{Timeout: uploadHTTPTimeout}
 		resp, err := client.Do(putReq)
 		if err != nil {
-			return "", fmt.Errorf("upload PUT: %w", err)
+			return "", fmt.Errorf("upload PUT: %w", redactURLError(err))
 		}
 		defer resp.Body.Close()
 		_, _ = io.Copy(io.Discard, resp.Body)
@@ -237,4 +239,14 @@ func ParseSlotFromStream(t xml.TokenReader, start *xml.StartElement) (*slotResul
 		}
 	}
 	return res, nil
+}
+
+// redactURLError drops the request URL from an HTTP client error (*url.Error prints it, and upload/OOB
+// URLs are capability URLs that must not reach logs or spans); other errors are returned unchanged.
+func redactURLError(err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) && ue.Err != nil {
+		return fmt.Errorf("%s request: %w", ue.Op, ue.Err)
+	}
+	return err
 }

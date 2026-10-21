@@ -97,6 +97,11 @@ func (x *xmppClient) startMUCJoinTrack(roomBare, base, nick string, hist *mucHis
 	if x.mucJoinTracks == nil {
 		x.mucJoinTracks = make(map[string]*mucJoinTrack)
 	}
+	// A join command whose join is still unconfirmed keeps its bookmark write when a send or view
+	// re-sends the join presence before the confirmation arrives.
+	if old := x.mucJoinTracks[roomBare]; old != nil && old.writeBookmark {
+		writeBookmark = true
+	}
 	x.mucPendingJoin[roomBare] = nick
 	x.mucJoinTracks[roomBare] = &mucJoinTrack{base: base, hist: hist, writeBookmark: writeBookmark}
 }
@@ -110,6 +115,11 @@ func (x *xmppClient) resetMUCJoinState() {
 	x.mucJoinTracks = nil
 	x.mucJoinGen++
 	x.mucPendingJoinMu.Unlock()
+	// A new c2s session is in no room: the occupant JIDs of the previous session are stale (the rooms
+	// dropped us with the old session). Joins of this session record them again on confirmation.
+	x.mucOurOccupantJIDMu.Lock()
+	x.mucOurOccupantJID = nil
+	x.mucOurOccupantJIDMu.Unlock()
 }
 
 // mucJoinChainCurrent reports whether a retry chain started in generation gen is still the one in

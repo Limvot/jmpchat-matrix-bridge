@@ -461,7 +461,6 @@ func (x *xmppClient) handleMessageWithOOB(t xmlstream.TokenReadEncoder, start *x
 			Str("type", attrValue(start.Attr, "type")).
 			Str("id", msgID).
 			Int("body_len", len(body)).
-			Str("oob_url", oobURL).
 			Str("reply_id", replyID).
 			Str("reaction_target", reactionTarget).
 			Msg("XMPP message received with OOB URL, queued for bridge")
@@ -1245,7 +1244,7 @@ func (m *jabberRemoteMessage) convertMessage(ctx context.Context, portal *bridge
 	// Prefer XEP-0066 OOB URL when present (Jabber client sent media with OOB).
 	if m.oobURL != "" {
 		// Use a logger from context if available, otherwise create a basic one
-		log := zerolog.Ctx(ctx).With().Str("oob_url", m.oobURL).Logger()
+		log := zerolog.Ctx(ctx).With().Logger()
 		log.Debug().Msg("Processing Jabber message with OOB URL")
 		content, mimeType, fileName, msgType, err := downloadHTTPSMedia(ctx, m.oobURL)
 		if err != nil {
@@ -1253,15 +1252,13 @@ func (m *jabberRemoteMessage) convertMessage(ctx context.Context, portal *bridge
 		} else if len(content) == 0 {
 			log.Warn().Msg("OOB media download returned empty content; falling back to text")
 		} else {
-			log.Debug().Str("mime_type", mimeType).Str("file_name", fileName).Int("size", len(content)).Msg("Downloaded OOB media, uploading to Matrix")
+			log.Debug().Str("mime_type", mimeType).Int("size", len(content)).Msg("Downloaded OOB media, uploading to Matrix")
 			mxcURL, file, upErr := intent.UploadMedia(ctx, portal.MXID, content, fileName, mimeType)
 			if upErr != nil {
 				log.Warn().Err(upErr).Msg("Failed to upload OOB media to Matrix; falling back to text")
 			} else {
 				log.Info().
-					Str("mxc", string(mxcURL)).
 					Bool("has_file", file != nil).
-					Str("file_name", fileName).
 					Str("msg_type", string(msgType)).
 					Str("mime_type", mimeType).
 					Int("size", len(content)).
@@ -1273,8 +1270,6 @@ func (m *jabberRemoteMessage) convertMessage(ctx context.Context, portal *bridge
 				result := makeMediaPart(fileName, msgType, mxcURL, file, mimeType, len(content), string(m.id), caption)
 				log.Debug().
 					Str("content_msg_type", string(result.Parts[0].Content.MsgType)).
-					Str("content_filename", result.Parts[0].Content.FileName).
-					Str("content_url", string(result.Parts[0].Content.URL)).
 					Bool("content_has_file", result.Parts[0].Content.File != nil).
 					Bool("content_has_info", result.Parts[0].Content.Info != nil).
 					Str("content_info_mime", func() string {
@@ -1421,6 +1416,7 @@ func downloadHTTPSMedia(ctx context.Context, url string) ([]byte, string, string
 	defer span.End()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
+		err = redactURLError(err)
 		telemetry.Fail(span, err)
 		return nil, "", "", event.MsgFile, err
 	}
@@ -1430,6 +1426,7 @@ func downloadHTTPSMedia(ctx context.Context, url string) ([]byte, string, string
 	client := &http.Client{Timeout: jabberMediaDownloadTimeout}
 	resp, err := client.Do(req)
 	if err != nil {
+		err = redactURLError(err)
 		telemetry.Fail(span, err)
 		return nil, "", "", event.MsgFile, err
 	}

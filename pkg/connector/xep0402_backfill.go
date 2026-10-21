@@ -92,7 +92,7 @@ func (x *xmppClient) runBookmarkBackfill(ctx context.Context, rooms []string, fo
 	x.bm.writeMu.Lock()
 	defer x.bm.writeMu.Unlock()
 	fctx, cancel := context.WithTimeout(ctx, bookmarkWriteTimeout)
-	bms, _, err := x.bookmarkFetch(fctx)
+	bms, info, err := x.bookmarkFetch(fctx)
 	cancel()
 	if err != nil {
 		log.Warn().Err(err).Msg("Bookmarks: fetch before backfill failed; backfill postponed")
@@ -102,7 +102,8 @@ func (x *xmppClient) runBookmarkBackfill(ctx context.Context, rooms []string, fo
 	res.Ran = true
 	aborted := false
 	for i, room := range rooms {
-		if bookmarkStoredFor(bms, room) != nil {
+		if bookmarkStoredFor(bms, room) != nil || info.mayHide(room) {
+			// Has a bookmark (or may have one we could not read): never touched by the backfill.
 			res.AlreadyHad++
 			continue
 		}
@@ -111,10 +112,12 @@ func (x *xmppClient) runBookmarkBackfill(ctx context.Context, rooms []string, fo
 			break
 		}
 		merged, _ := mergeBookmark(nil, room, true, x.backfillNick(ctx, room))
+		x.bm.cacheSet(room, merged) // before the publish: its PEP echo must compare equal (see publishBookmarkFor)
 		pctx, pcancel := context.WithTimeout(ctx, bookmarkWriteTimeout)
 		err := x.publishBookmarkIQ(pctx, merged)
 		pcancel()
 		if err != nil {
+			x.bm.cacheDelete(room)
 			res.Failed++
 			if publishErrorDisablesWrites(err) {
 				if x.bm.disableWrites() {
@@ -125,7 +128,6 @@ func (x *xmppClient) runBookmarkBackfill(ctx context.Context, rooms []string, fo
 			log.Warn().Err(err).Str("room", room).Msg("Bookmarks: backfill publish failed")
 			continue
 		}
-		x.bm.cacheSet(room, merged)
 		res.Created++
 	}
 	if span.IsRecording() {

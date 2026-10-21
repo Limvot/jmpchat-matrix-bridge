@@ -38,7 +38,7 @@ type bookmarkState struct {
 
 	// Tests only.
 	discoHook   func(ctx context.Context) (disco.Info, error)
-	fetchHook   func(ctx context.Context) ([]bookmarkConf, int, error)
+	fetchHook   func(ctx context.Context) ([]bookmarkConf, bookmarkFetchInfo, error)
 	publishHook func(ctx context.Context, c bookmarkConf) error
 }
 
@@ -126,6 +126,15 @@ func (s *bookmarkState) cacheSet(key string, c bookmarkConf) {
 	s.cache[key] = c
 }
 
+// cacheRestore puts back the item a failed publish had replaced (nil: there was none).
+func (s *bookmarkState) cacheRestore(key string, prev *bookmarkConf) {
+	if prev == nil {
+		s.cacheDelete(key)
+		return
+	}
+	s.cacheSet(key, *prev)
+}
+
 func (s *bookmarkState) cacheDelete(key string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -204,7 +213,7 @@ func (x *xmppClient) bookmarkDisco(ctx context.Context) (disco.Info, error) {
 }
 
 // bookmarkFetch reads the whole bookmarks node (see fetchBookmarks).
-func (x *xmppClient) bookmarkFetch(ctx context.Context) ([]bookmarkConf, int, error) {
+func (x *xmppClient) bookmarkFetch(ctx context.Context) ([]bookmarkConf, bookmarkFetchInfo, error) {
 	if x.bm.fetchHook != nil {
 		return x.bm.fetchHook(ctx)
 	}
@@ -212,7 +221,7 @@ func (x *xmppClient) bookmarkFetch(ctx context.Context) ([]bookmarkConf, int, er
 	sess := x.session
 	x.mu.Unlock()
 	if sess == nil {
-		return nil, 0, errBookmarksNotConnected
+		return nil, bookmarkFetchInfo{}, errBookmarksNotConnected
 	}
 	return x.fetchBookmarks(ctx, sess)
 }
@@ -255,14 +264,14 @@ func (x *xmppClient) bookmarkStartup(ctx context.Context) (bms []bookmarkConf, f
 	if !ok || !s.Read {
 		return nil, false
 	}
-	bms, skipped, err := x.bookmarkFetch(ctx)
+	bms, info, err := x.bookmarkFetch(ctx)
 	if err != nil {
 		x.logFor(ctx).Warn().Err(err).Msg("Bookmarks: fetch failed; bookmarks are not applied this session")
 		return nil, false
 	}
 	x.bm.setCache(bms)
 	log := x.logFor(ctx)
-	log.Debug().Int("count", len(bms)).Int("skipped", skipped).Msg("Bookmarks: fetched")
+	log.Debug().Int("count", len(bms)).Int("skipped", info.Skipped).Bool("truncated", info.Truncated).Msg("Bookmarks: fetched")
 	for _, b := range bms {
 		// Room JID, autojoin and nick only: never the password, name or extensions.
 		log.Debug().Str("room", b.ID).Bool("autojoin", b.Autojoin).Str("nick", b.Nick).Msg("Bookmark")

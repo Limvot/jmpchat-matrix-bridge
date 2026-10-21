@@ -146,7 +146,7 @@ func (x *xmppClient) publishBookmarkFor(ctx context.Context, room string, autojo
 		}
 	}
 	// The cache is never the base of a write: a fresh fetch is.
-	bms, _, err := x.bookmarkFetch(ctx)
+	bms, info, err := x.bookmarkFetch(ctx)
 	if err != nil {
 		log.Warn().Err(err).Str("room", key).Msg("Bookmarks: fetch before write failed; not writing")
 		return bmFailed
@@ -155,6 +155,11 @@ func (x *xmppClient) publishBookmarkFor(ctx context.Context, room string, autojo
 	existing := bookmarkStoredFor(bms, key)
 	if existing == nil && !create {
 		return bmNoop
+	}
+	if existing == nil && info.mayHide(key) {
+		// The item may exist but was undecodable or cut off: creating one would overwrite it.
+		log.Warn().Str("room", key).Msg("Bookmarks: the room's bookmark could not be read; not writing")
+		return bmFailed
 	}
 	merged, changed := mergeBookmark(existing, key, autojoin, nick)
 	if !changed {
@@ -165,7 +170,11 @@ func (x *xmppClient) publishBookmarkFor(ctx context.Context, room string, autojo
 	if span.IsRecording() {
 		span.SetAttributes(attribute.Bool("xmpp.bookmarks.autojoin", autojoin), attribute.Bool("xmpp.bookmarks.created", existing == nil))
 	}
+	// Cache first, so the PEP echo of this publish (which can arrive before the IQ result) compares
+	// equal and is ignored by the event worker; restored when the publish fails.
+	x.bm.cacheSet(key, merged)
 	if err := x.publishBookmarkIQ(ictx, merged); err != nil {
+		x.bm.cacheRestore(key, existing)
 		telemetry.Fail(span, err)
 		if publishErrorDisablesWrites(err) {
 			if x.bm.disableWrites() {
@@ -176,7 +185,6 @@ func (x *xmppClient) publishBookmarkFor(ctx context.Context, room string, autojo
 		}
 		return bmFailed
 	}
-	x.bm.cacheSet(key, merged)
 	log.Info().Str("room", key).Bool("autojoin", autojoin).Bool("created", existing == nil).Msg("Bookmarks: published")
 	return bmWritten
 }
