@@ -189,7 +189,9 @@ func (x *xmppClient) Connect(ctx context.Context) {
 
 	// Send initial presence so the server delivers messages to this resource.
 	// Without this, many servers (including Snikket/Prosody) do not push messages to the client.
-	if err := sess.Send(ctx, stanza.Presence{}.Wrap(nil)); err != nil {
+	// It carries the XEP-0115 caps (<c/>) so our server delivers PEP +notify events (bookmarks) and
+	// peers can disco the bridge; MUC join presences deliberately carry none.
+	if err := sess.Send(ctx, stanza.Presence{}.Wrap(bridgeCaps().TokenReader())); err != nil {
 		log.Warn().Err(err).Msg("Failed to send initial presence; message delivery may not work")
 	} else {
 		span.AddEvent("initial_presence_sent")
@@ -244,6 +246,8 @@ func (x *xmppClient) Connect(ctx context.Context) {
 	x.startMUCAvatars(sessCtx)
 	// Re-join every bridged MUC of this login (own root span, staggered, ends with sessCtx).
 	go x.runMUCAutoRejoin(sessCtx)
+	// Bookmark capability gate + one read-only fetch (own root span, logs only).
+	go x.runBookmarkProbe(sessCtx)
 }
 
 // endSessionLocked cancels the current session's background goroutine context. Requires x.mu held.

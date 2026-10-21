@@ -639,6 +639,26 @@ func (x *xmppClient) handleGroupchatWithOOB(t xmlstream.TokenReadEncoder, start 
 	return nil
 }
 
+// newServeHandler builds the stanza handler of the Serve loop: the logging/routing wrapper around the mux.
+func (x *xmppClient) newServeHandler() xmpp.Handler {
+	bodyPayload := xml.Name{Local: "body"}
+	chatType := stanza.MessageType("chat")
+	groupchatType := stanza.MessageType("groupchat")
+	mamFinPayload := xml.Name{Space: mamNS, Local: "fin"}
+	m := mux.New(jabberClientNS,
+		roster.Handle(roster.Handler{Push: x.handleRosterPush}),
+		mux.MessageFunc(stanza.NormalMessage, bodyPayload, x.handleIncomingMessage),
+		mux.MessageFunc(chatType, bodyPayload, x.handleIncomingMessage),
+		mux.MessageFunc(groupchatType, bodyPayload, x.handleIncomingGroupchat),
+		mux.IQ(stanza.ResultIQ, mamFinPayload, mamFinHandler{x: x}),
+		// XEP-0115: answer disco#info (bare and node#ver) from memory, see xep0402_probe.go.
+		mux.IQ(stanza.GetIQ, xml.Name{Space: "http://jabber.org/protocol/disco#info", Local: "query"}, capsDiscoHandler{x: x}),
+		// PEP notifications are body-less headline messages (XEP-0402 bookmarks via +notify).
+		mux.MessageFunc(stanza.HeadlineMessage, xml.Name{Space: pubsubEventNS, Local: "event"}, x.handlePubSubEvent),
+	)
+	return &messageLoggingHandler{inner: m, log: &x.log, x: x}
+}
+
 // serveMessages runs the XMPP session's Serve loop to handle incoming messages.
 // It runs in a goroutine and blocks until the session is closed.
 // mellium mux requires MessageFunc for message stanzas (Handle/HandleFunc panic for IQ/Message/Presence).
@@ -660,18 +680,7 @@ func (x *xmppClient) serveMessages() {
 		warnIfDebugIdentifiers(&x.log)
 		x.log.Debug().Str("login_id", string(x.loginID)).Msg("XMPP message receiver (Serve) started")
 	}
-	bodyPayload := xml.Name{Local: "body"}
-	chatType := stanza.MessageType("chat")
-	groupchatType := stanza.MessageType("groupchat")
-	mamFinPayload := xml.Name{Space: mamNS, Local: "fin"}
-	m := mux.New(jabberClientNS,
-		roster.Handle(roster.Handler{Push: x.handleRosterPush}),
-		mux.MessageFunc(stanza.NormalMessage, bodyPayload, x.handleIncomingMessage),
-		mux.MessageFunc(chatType, bodyPayload, x.handleIncomingMessage),
-		mux.MessageFunc(groupchatType, bodyPayload, x.handleIncomingGroupchat),
-		mux.IQ(stanza.ResultIQ, mamFinPayload, mamFinHandler{x: x}),
-	)
-	wrapper := &messageLoggingHandler{inner: m, log: &x.log, x: x}
+	wrapper := x.newServeHandler()
 	serveStart := time.Now()
 	serveErr := sess.Serve(wrapper)
 	if serveErr != nil && x.login != nil {
