@@ -179,6 +179,12 @@ func main() {
 			Help:          commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Set preferred MUC nickname for a room. Usage: `%s muc-nick [_login JID_] <room-jid> <nick>`", prefix)},
 		})
 		br.Bridge.Commands.(*commands.Processor).AddHandler(&commands.FullHandler{
+			Func:          withSpan("avatar-probe", connector.CmdAvatarProbe),
+			Name:          "avatar-probe",
+			RequiresLogin: true,
+			Help:          commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Diagnostic: ask a JID for its avatar (vcard-temp, XEP-0084 metadata/data, disco#info) and report what came back. Sends only IQ get queries, never messages or presence. Usage: `%s avatar-probe [_login JID_] <room@service/nick | jid>`", prefix)},
+		})
+		br.Bridge.Commands.(*commands.Processor).AddHandler(&commands.FullHandler{
 			Func:          withSpan("muc-nick-default", cmdMUCNickDefault),
 			Name:          "muc-nick-default",
 			RequiresLogin: true,
