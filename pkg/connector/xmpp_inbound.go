@@ -381,9 +381,22 @@ func (x *xmppClient) handleMessageWithOOB(t xmlstream.TokenReadEncoder, start *x
 		}
 		return nil
 	}
-	// Skip XEP-0085 chat state notifications (composing, paused, etc.) - messages with no body, no OOB, and no reactions.
+	// XEP-0085 chat states, XEP-0333 displayed markers and XEP-0184 receipts: bridged as typing and
+	// read/delivery receipts (memory and queueing only here).
+	if ids.Extras.hasInboundSignal() {
+		x.handleInboundSignals(inboundSignal{
+			key:      networkid.PortalKey{ID: networkid.PortalID(fromBare), Receiver: x.loginID},
+			channel:  retractChanLive,
+			fromFull: from,
+			sender:   x.makeEventSender(fromBare),
+			fromMe:   strings.EqualFold(fromBare, bareJID(string(x.loginID))),
+			hasBody:  body != "" || oobURL != "" || reactionTarget != "",
+			extras:   ids.Extras,
+		})
+	}
+	// Nothing left to bridge for messages with no body, no OOB, and no reactions (chat states, markers, receipts).
 	if body == "" && oobURL == "" && reactionTarget == "" {
-		x.log.Debug().Str("from", attrValue(start.Attr, "from")).Msg("Skipping chat state notification (no body, no OOB, no reactions)")
+		x.log.Debug().Str("from", attrValue(start.Attr, "from")).Msg("Skipping message without body, OOB or reactions (chat state, marker or receipt)")
 		return nil
 	}
 	msgID := attrValue(start.Attr, "id")
@@ -467,6 +480,7 @@ func (x *xmppClient) handleMessageWithOOB(t xmlstream.TokenReadEncoder, start *x
 			originID:       ids.OriginID,
 			timestamp:      time.Now(),
 			markable:       ids.Extras.Markable,
+			receipt:        x.receiptFor(ids.Extras, attrValue(start.Attr, "type"), attrValue(start.Attr, "id"), from),
 			x:              x, // Store reference to xmppClient for database access
 		})
 	}
@@ -537,8 +551,10 @@ func (x *xmppClient) handleGroupchatWithOOB(t xmlstream.TokenReadEncoder, start 
 			attrValue(start.Attr, "id"), ids, room)
 		return nil
 	}
-	// Skip only if no body, no OOB, and no reactions (e.g. chat state).
-	if body == "" && oobURL == "" && reactionTarget == "" {
+	// Body-less stanzas are only of interest for chat markers (below, after the echo check); everything
+	// else without a body, OOB or reactions (e.g. chat state) is skipped.
+	bodyless := body == "" && oobURL == "" && reactionTarget == ""
+	if bodyless && !ids.Extras.hasInboundSignal() {
 		x.log.Warn().
 			Str("from", from).
 			Msg("Skipping MUC message: no body, no OOB, no reactions (XEP-0444 reaction with empty body would be dropped here)")
@@ -563,6 +579,20 @@ func (x *xmppClient) handleGroupchatWithOOB(t xmlstream.TokenReadEncoder, start 
 	fromMe := x.isOwnMUCOccupant(roomJID, occupantFull)
 	if fromMe {
 		x.log.Debug().Str("room", roomJID).Msg("MUC message from our own nick that is not an echo; bridging as sent by the user")
+	}
+	// XEP-0333 displayed markers of the room (our own markers were dropped as echoes above): the only
+	// body-less MUC signal that is bridged; chat states and receipts are ignored in groupchat.
+	if bodyless {
+		x.handleInboundSignals(inboundSignal{
+			key:       networkid.PortalKey{ID: networkid.PortalID(roomJID), Receiver: x.loginID},
+			channel:   retractChanLive,
+			groupchat: true,
+			fromFull:  occupantFull,
+			sender:    x.mucMessageSender(roomJID, occupantFull),
+			fromMe:    fromMe,
+			extras:    ids.Extras,
+		})
+		return nil
 	}
 	// XEP-0308 correction (after the echo check, so the echo of our own correction is dropped above):
 	// bridged as an edit of the original, never as a new message.
@@ -1030,6 +1060,7 @@ type jabberRemoteMessage struct {
 	occupantID     string // XEP-0421, groupchat only
 	backfillSource string // "mam" for events that came out of the archive
 	markable       bool   // the message carried XEP-0333 <markable/> (stored in MessageMetadata.Markable)
+	receipt        *receiptRequest // XEP-0184 request to answer once the message is bridged (live 1:1 only)
 	timestamp      time.Time
 	x              *xmppClient // Reference to xmppClient for database access
 	spanCtx        trace.SpanContext // trace context set by queueRemoteEvent before queueing (zero when tracing is off)
@@ -1140,6 +1171,9 @@ func (m *jabberRemoteMessage) MutateContext(ctx context.Context) context.Context
 
 // PostHandle ends the span started in MutateContext.
 func (m *jabberRemoteMessage) PostHandle(ctx context.Context, _ *bridgev2.Portal) {
+	if m.receipt != nil && m.x != nil {
+		m.x.answerReceiptRequest(ctx, m)
+	}
 	telemetry.EndRemoteEvent(ctx)
 }
 

@@ -57,6 +57,13 @@ type xmppClient struct {
 	// sendOutHook, when set (tests only), receives outbound messages built by HandleMatrixEdit instead
 	// of the XMPP session.
 	sendOutHook func(ctx context.Context, m outMessage) (string, error)
+	// sig is the per-session chat signal state (typing peers, dedupe); reset in Connect.
+	sig signalState
+	// signalHook, bridgedHook and betweenHook (tests only) replace the signal send, the "row exists"
+	// check after a bridged message and the message window query of read receipts.
+	signalHook  func(ctx context.Context, s outSignal) error
+	bridgedHook func(key networkid.PortalKey, id networkid.MessageID) bool
+	betweenHook func(key networkid.PortalKey, start, end time.Time) ([]*database.Message, error)
 	// statusHook, when set (tests only), receives message statuses instead of the Matrix connector.
 	statusHook func(ms *bridgev2.MessageStatus, info *bridgev2.MessageStatusEventInfo)
 	// rejected dedupes rejection reports per Matrix event (xmpp_error_stanza.go).
@@ -219,6 +226,7 @@ func (x *xmppClient) Connect(ctx context.Context) {
 	// Join state belongs to the previous session: forget it before anything of this one can join.
 	x.resetMUCJoinState()
 	x.bm.reset()
+	x.sig.reset()
 	span.SetAttributes(attribute.String("xmpp.connect.result", "connected"))
 
 	x.sendState(status.BridgeState{StateEvent: status.StateConnected})
@@ -2311,7 +2319,7 @@ func (x *xmppClient) handleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 		Str("msg_type", string(msgType)).
 		Msg("DEBUG: About to call sendXMPPMessageWithOOB")
 	
-	xmppMsgID, err := sendXMPPMessageWithOOBID(ctx, sess, toJID, messageBody, oobURL, replyID, replyToJID, msgType, preID)
+	xmppMsgID, err := sendXMPPOut(ctx, sess, x.withSignalFlags(outMessage{To: toJID, Type: msgType, ID: preID, Body: messageBody, OOBURL: oobURL, ReplyID: replyID, ReplyTo: replyToJID}))
 	if err != nil {
 		if preID != "" {
 			x.mucEcho.discard(toJIDStr, preID)

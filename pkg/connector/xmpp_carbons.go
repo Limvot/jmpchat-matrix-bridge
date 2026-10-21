@@ -171,6 +171,17 @@ func (x *xmppClient) handleCarbonSent(t xmlstream.TokenReadEncoder, outer *xml.S
 	if toBare == "" {
 		return nil
 	}
+	if typeAttr != "groupchat" {
+		x.handleInboundSignals(inboundSignal{
+			key:      networkid.PortalKey{ID: networkid.PortalID(strings.ToLower(toBare)), Receiver: x.loginID},
+			channel:  retractChanCarbonSent,
+			fromFull: from,
+			sender:   x.makeEventSender(string(x.loginID)),
+			fromMe:   true,
+			hasBody:  body != "",
+			extras:   ids.Extras,
+		})
+	}
 	// Skip carbon copies of chat state notifications (composing, paused, etc.) - no body.
 	if body == "" {
 		return nil
@@ -258,6 +269,16 @@ func (x *xmppClient) handleCarbonReceived(t xmlstream.TokenReadEncoder, outer *x
 	}
 	if fromBare == "" {
 		return nil
+	}
+	if typeAttr != "groupchat" {
+		x.handleInboundSignals(inboundSignal{
+			key:      networkid.PortalKey{ID: networkid.PortalID(strings.ToLower(fromBare)), Receiver: x.loginID},
+			channel:  retractChanCarbonReceived,
+			fromFull: from,
+			sender:   x.makeEventSender(fromBare),
+			hasBody:  body != "",
+			extras:   ids.Extras,
+		})
 	}
 	// Skip carbon copies of chat state notifications (composing, paused, etc.) - no body.
 	if body == "" {

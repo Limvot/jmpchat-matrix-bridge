@@ -1282,3 +1282,12 @@ func (x *xmppClient) noteMUCGhost(occupantFull string) {
 		x.log.Debug().Int("cap", mucOccupantCap).Msg("MUC avatar occupant table full, ignoring new occupants this session")
 	}
 }
+
+// mucOccupantSeen reports whether a ghost for the occupant JID was seen this session (it spoke), so
+// signals from it (read markers) may be bridged without making a ghost join just for them. Memory only.
+func (x *xmppClient) mucOccupantSeen(occupantFull string) bool {
+	x.mucAv.mu.Lock()
+	defer x.mucAv.mu.Unlock()
+	rec := x.mucAv.occ[occupantFull]
+	return rec != nil && rec.hasGhost
+}

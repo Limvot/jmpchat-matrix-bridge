@@ -30,6 +30,12 @@ type JabberConfig struct {
 	// AllowPrivateServerOverride lets a per-login server override (login password-server) point at a
 	// private, loopback or link-local address. Off by default (SSRF guard).
 	AllowPrivateServerOverride bool `yaml:"allow_private_server_override"`
+	// Chat signals (XEP-0085 typing, XEP-0333 markers, XEP-0184 receipts). Pointers so that a missing key
+	// means the default (true); see signalPrefs.
+	SendTyping           *bool `yaml:"send_typing"`
+	SendReadMarkers      *bool `yaml:"send_read_markers"`
+	SendDeliveryReceipts *bool `yaml:"send_delivery_receipts"`
+	MUCReadMarkers       *bool `yaml:"muc_read_markers"`
 }
 
 // allowPrivateServerOverride is nil-safe (tests and stub paths have no config).
@@ -246,6 +252,18 @@ cheogram: false
 # ports (other than 5222/5223), to point at private, loopback or link-local addresses. Leave false
 # unless your XMPP server runs on your own network.
 allow_private_server_override: false
+# Chat signals sent to XMPP contacts. All default to true; set to false to keep them private.
+# Typing (XEP-0085): tell a contact when you are typing in Matrix. Only sent to contacts whose client
+# showed chat state support this session, never to Cheogram (SMS/MMS) numbers.
+send_typing: true
+# Read markers (XEP-0333) in one-to-one chats: tell the contact which of their messages you read.
+# Never sent to Cheogram (SMS/MMS) numbers.
+send_read_markers: true
+# Delivery receipts (XEP-0184): confirm to the sender that a message that asked for it reached the bridge.
+send_delivery_receipts: true
+# Read markers in group chats (MUCs): tells every occupant of the room which message you read (the same
+# as the one-to-one setting, but visible to the whole room). Set to false if you do not want that.
+muc_read_markers: true
 `
 	e := c.extension()
 	if e != nil {
@@ -256,6 +274,10 @@ allow_private_server_override: false
 		// Copy user's cheogram value into base so config save preserves it (framework adds "network" prefix).
 		helper.Copy(configupgrade.Bool, "cheogram")
 		helper.Copy(configupgrade.Bool, "allow_private_server_override")
+		helper.Copy(configupgrade.Bool, "send_typing")
+		helper.Copy(configupgrade.Bool, "send_read_markers")
+		helper.Copy(configupgrade.Bool, "send_delivery_receipts")
+		helper.Copy(configupgrade.Bool, "muc_read_markers")
 		upgradeCardDAVConfig(helper)
 		if e != nil {
 			e.upgradeConfig(helper)
@@ -310,7 +332,7 @@ func (c *JabberConnector) CreateLogin(ctx context.Context, user *bridgev2.User, 
 
 // GetBridgeInfoVersion returns versions for bridge info and room capabilities.
 func (c *JabberConnector) GetBridgeInfoVersion() (info, capabilities int) {
-	return 1, 3
+	return 1, 4
 }
 
 // jabberLoginProcess implements LoginProcess and LoginProcessUserInput for JID+password auth.

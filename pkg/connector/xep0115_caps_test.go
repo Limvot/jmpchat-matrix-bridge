@@ -28,15 +28,18 @@ func TestCapsHashXEP0115KnownVector(t *testing.T) {
 
 func TestBridgeCapsFeatureList(t *testing.T) {
 	want := []string{
+		"http://jabber.org/protocol/chatstates",
 		"http://jabber.org/protocol/disco#info",
 		"jabber:x:oob",
 		"urn:xmpp:bookmarks:1+notify",
+		"urn:xmpp:chat-markers:0",
 		"urn:xmpp:fallback:0",
 		"urn:xmpp:message-correct:0",
 		"urn:xmpp:message-retract:0",
 		"urn:xmpp:message-retract:1",
 		"urn:xmpp:ping",
 		"urn:xmpp:reactions:0",
+		"urn:xmpp:receipts",
 		"urn:xmpp:reply:0",
 		"urn:xmpp:sid:0",
 	}

@@ -177,7 +177,10 @@ type outMessage struct {
 	ReplyID string // XEP-0461 reply target id
 	ReplyTo string // XEP-0461 reply `to` (author JID)
 	Replace string // XEP-0308 correction target id ("" -> not a correction)
-	// Phase E adds: Active, Markable, RequestReceipt bool
+	// Signalling elements (see withSignalFlags): XEP-0085 <active/>, XEP-0333 <markable/>, XEP-0184 <request/>.
+	Active         bool
+	Markable       bool
+	RequestReceipt bool
 }
 
 // replaceReader returns <replace xmlns='urn:xmpp:message-correct:0' id='...'/> (XEP-0308).
@@ -190,7 +193,7 @@ func replaceReader(targetID string) xml.TokenReader {
 }
 
 // outPayload is the child content of the message stanza for m: the body (finalBody, already resolved),
-// the stanza's own origin-id, then the optional OOB, reply and correction (replace + store hint) elements.
+// the stanza's own origin-id, then the optional OOB, reply and correction (replace + store hint) elements and the signalling flags.
 func outPayload(m outMessage, finalBody, stanzaID string) xml.TokenReader {
 	readers := []xml.TokenReader{bodyReader(finalBody), originIDReader(stanzaID)}
 	if m.OOBURL != "" {
@@ -201,6 +204,15 @@ func outPayload(m outMessage, finalBody, stanzaID string) xml.TokenReader {
 	}
 	if m.Replace != "" {
 		readers = append(readers, replaceReader(m.Replace), storeHintReader())
+	}
+	if m.Active {
+		readers = append(readers, emptyElement(chatStatesNS, "active"))
+	}
+	if m.Markable {
+		readers = append(readers, emptyElement(markersNS, "markable"))
+	}
+	if m.RequestReceipt {
+		readers = append(readers, emptyElement(receiptsNS, "request"))
 	}
 	return xmlstream.MultiReader(readers...)
 }

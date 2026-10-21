@@ -10,8 +10,9 @@ import (
 
 // XEP-0115 entity capabilities of the bridge. The initial presence is broadcast to every roster
 // contact, whose clients gate features on the answer, so the list is exactly what the bridge consumes
-// inbound and nothing else: no chat states (dropped), receipts/markers (not implemented), Jingle
-// message initiation (the bridge cannot take a call), no carbons (a server feature), no disco#items.
+// inbound and nothing else: chat states, chat markers and delivery receipts (bridged as typing and
+// read/delivery receipts), but no Jingle message initiation (the bridge cannot take a call), no carbons
+// (a server feature), no disco#items.
 // urn:xmpp:bookmarks:1+notify asks our server for PEP bookmark events.
 
 const (
@@ -23,15 +24,18 @@ const (
 
 // bridgeFeatureVars is the single source of truth for the hash and the disco#info reply. Keep sorted.
 var bridgeFeatureVars = []string{
+	chatStatesNS,
 	"http://jabber.org/protocol/disco#info",
 	oobNS,
 	"urn:xmpp:bookmarks:1+notify",
+	markersNS,
 	fallbackNS,
 	correctNS,
 	retractNS0,
 	retractNS1,
 	"urn:xmpp:ping",
 	reactionsNS,
+	receiptsNS,
 	replyNS,
 	sidNS,
 }

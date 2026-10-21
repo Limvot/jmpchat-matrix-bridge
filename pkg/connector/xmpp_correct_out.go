@@ -35,6 +35,7 @@ var (
 
 // sendOut sends m on the current session (or hands it to the test hook).
 func (x *xmppClient) sendOut(ctx context.Context, m outMessage) (string, error) {
+	m = x.withSignalFlags(m)
 	if x.sendOutHook != nil {
 		return x.sendOutHook(ctx, m)
 	}

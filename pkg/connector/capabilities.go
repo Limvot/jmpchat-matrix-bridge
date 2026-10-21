@@ -10,7 +10,7 @@ import (
 // jabberCapID is a stored/compared capability ID, not a project name: it deliberately keeps the
 // pre-rename prefix. Bump only the date suffix (with the capabilities version in
 // GetBridgeInfoVersion) when the features change: bridgev2 then re-sends room features everywhere.
-const jabberCapID = "github.com/mautrix/jabber.capabilities.2026_11"
+const jabberCapID = "github.com/mautrix/jabber.capabilities.2026_11b"
 
 // jabberCaps declares which message types the bridge is allowed to send to the connector.
 // An empty RoomFeatures causes the bridge core to reject messages before calling HandleMatrixMessage.
@@ -52,6 +52,10 @@ var jabberCaps = &event.RoomFeatures{
 	Reply:  event.CapLevelFullySupported,
 	Delete: event.CapLevelFullySupported,
 	Edit:   event.CapLevelFullySupported, // XEP-0308; no EditMaxAge/EditMaxCount (the XEP has none)
+	// XEP-0333/0184 markers and XEP-0085 typing; whether they are actually sent is decided per portal
+	// and per config (never to Cheogram JIDs, see xmpp_signals_out.go).
+	ReadReceipts:        true,
+	TypingNotifications: true,
 }
 
 func (x *xmppClient) GetCapabilities(ctx context.Context, portal *bridgev2.Portal) *event.RoomFeatures {

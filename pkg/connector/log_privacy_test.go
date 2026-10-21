@@ -1,10 +1,14 @@
 package connector
 
 import (
+	"context"
 	"strings"
 	"testing"
 
 	"github.com/rs/zerolog"
+	"maunium.net/go/mautrix/bridgev2"
+	"maunium.net/go/mautrix/bridgev2/database"
+	"maunium.net/go/mautrix/bridgev2/networkid"
 )
 
 // Issue #12: message content (bodies, captions, reaction emoji, media URLs) must not appear in log output, at any
@@ -30,6 +34,19 @@ func TestInboundMessageContentNotLogged(t *testing.T) {
 	runHandler(t, x, `<message type="chat" from="bob@example.com/res" to="me@example.com" id="k1"><body>`+secret+` fix dm</body><replace xmlns="urn:xmpp:message-correct:0" id="c1"/></message>`)
 	runHandler(t, x, `<message type="groupchat" from="room@muc.example.com/bob" id="k2"><body>`+secret+` fix muc</body><replace xmlns="urn:xmpp:message-correct:0" id="g1"/></message>`)
 	runHandler(t, x, `<message from="me@example.com"><sent xmlns="urn:xmpp:carbons:2"><forwarded xmlns="urn:xmpp:forward:0"><message xmlns="jabber:client" from="me@example.com/l" to="bob@example.com" type="chat" id="k3"><body>`+secret+` fix carbon</body><replace xmlns="urn:xmpp:message-correct:0" id="c1"/></message></forwarded></sent></message>`)
+
+	// XEP-0085/0333/0184 signals (DM, MUC, carbons), also with content in an unrelated <body>.
+	x.mucAv.noteGhost("room@muc.example.com/bob")
+	x.signalHook = func(context.Context, outSignal) error { return nil }
+	x.bridgedHook = func(networkid.PortalKey, networkid.MessageID) bool { return true }
+	runHandler(t, x, `<message type="chat" from="bob@example.com/res" id="n1"><composing xmlns="http://jabber.org/protocol/chatstates"/></message>`)
+	runHandler(t, x, `<message type="chat" from="bob@example.com/res" id="n2"><displayed xmlns="urn:xmpp:chat-markers:0" id="c1"/><body>`+secret+` marker</body></message>`)
+	runHandler(t, x, `<message type="chat" from="bob@example.com/res" id="n3"><received xmlns="urn:xmpp:receipts" id="c1"/></message>`)
+	runHandler(t, x, `<message type="chat" from="bob@example.com/res" id="n4"><body>`+secret+` request</body><request xmlns="urn:xmpp:receipts"/><markable xmlns="urn:xmpp:chat-markers:0"/></message>`)
+	runHandler(t, x, `<message type="groupchat" from="room@muc.example.com/bob" id="n5"><displayed xmlns="urn:xmpp:chat-markers:0" id="S1"/></message>`)
+	runHandler(t, x, `<message from="me@example.com"><sent xmlns="urn:xmpp:carbons:2"><forwarded xmlns="urn:xmpp:forward:0"><message xmlns="jabber:client" from="me@example.com/l" to="bob@example.com" type="chat" id="n6"><displayed xmlns="urn:xmpp:chat-markers:0" id="c1"/><body>`+secret+` carbon marker</body></message></forwarded></sent></message>`)
+	_ = x.HandleMatrixTyping(context.Background(), &bridgev2.MatrixTyping{Portal: &bridgev2.Portal{Portal: &database.Portal{PortalKey: sigKey("bob@example.com"), RoomType: database.RoomTypeDM}}, IsTyping: true})
+	_ = x.HandleMatrixReadReceipt(context.Background(), readMsg(&bridgev2.Portal{Portal: &database.Portal{PortalKey: sigKey("bob@example.com"), RoomType: database.RoomTypeDM}}, mkRow("m1", "bob@example.com", 5, true, "")))
 
 	out := buf.String()
 	if out == "" {
