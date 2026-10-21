@@ -32,6 +32,7 @@ func (x *xmppClient) queueMUCSubject(ctx context.Context, room, subject string) 
 	if x.login == nil || room == "" {
 		return
 	}
+	room = strings.ToLower(room) // portal ids of rooms are lower-case, as stored by the join command
 	topic := sanitizeSubject(subject)
 	x.logFor(ctx).Debug().Str("room", room).Int("subject_len", len(topic)).Msg("MUC subject received, queuing topic change")
 	x.queueRemoteEvent(ctx, &simplevent.ChatInfoChange{

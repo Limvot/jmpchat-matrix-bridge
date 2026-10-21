@@ -211,9 +211,10 @@ func (x *xmppClient) handleInboundSignals(s inboundSignal) {
 	if !e.hasInboundSignal() {
 		return
 	}
-	// A delayed stanza (MUC join history, offline storage) is a replay: a body-less signal in it (marker,
-	// chat state, receipt) is stale and must not be bridged as live. Stanzas with a body are unaffected.
-	if e.Delayed && !s.hasBody {
+	// A delayed stanza is a replay. A body-less chat state in it is always stale. Markers and receipts are
+	// stale only in groupchat (MUC join history); in a DM a delay is offline storage, whose markers and
+	// receipts are real news and are processed. Stanzas with a body are unaffected.
+	if e.Delayed && !s.hasBody && (e.ChatState != "" || s.groupchat) {
 		return
 	}
 	// Cheogram group MMS: the sender of a group stanza is synthesized and cannot be attributed.

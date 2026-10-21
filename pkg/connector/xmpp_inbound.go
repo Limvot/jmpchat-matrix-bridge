@@ -600,7 +600,7 @@ func (x *xmppClient) handleGroupchatWithOOB(t xmlstream.TokenReadEncoder, start 
 	// body-less MUC signal that is bridged; chat states and receipts are ignored in groupchat.
 	if bodyless {
 		x.handleInboundSignals(inboundSignal{
-			key:       networkid.PortalKey{ID: networkid.PortalID(roomJID), Receiver: x.loginID},
+			key:       networkid.PortalKey{ID: networkid.PortalID(strings.ToLower(roomJID)), Receiver: x.loginID},
 			channel:   retractChanLive,
 			groupchat: true,
 			fromFull:  occupantFull,
@@ -625,7 +625,7 @@ func (x *xmppClient) handleGroupchatWithOOB(t xmlstream.TokenReadEncoder, start 
 			hasOOB:        oobURL != "",
 			senderID:      string(corrSender.Sender),
 			ts:            time.Now(),
-		}, networkid.PortalKey{ID: networkid.PortalID(roomJID), Receiver: x.loginID}, corrSender)
+		}, networkid.PortalKey{ID: networkid.PortalID(strings.ToLower(roomJID)), Receiver: x.loginID}, corrSender)
 		return nil
 	}
 	msgID := attrValue(start.Attr, "id")
@@ -639,8 +639,9 @@ func (x *xmppClient) handleGroupchatWithOOB(t xmlstream.TokenReadEncoder, start 
 	ctx, span := startReceiveSpan(kind, "groupchat", occupantFull, roomJID, msgID, oobURL != "", replyID != "", reactionTarget != "")
 	defer span.End()
 	log := x.logFor(ctx)
+	// Portal ids of rooms are lower-case (the join command stores them that way).
 	portalKey := networkid.PortalKey{
-		ID:       networkid.PortalID(roomJID),
+		ID:       networkid.PortalID(strings.ToLower(roomJID)),
 		Receiver: x.loginID,
 	}
 	x.addPortalIDForMAMCatchUp(string(portalKey.ID))
@@ -1011,7 +1012,10 @@ func (x *xmppClient) handlePresence(t xmlstream.TokenReadEncoder, start *xml.Sta
 	}
 	x.mucPendingJoinMu.Lock()
 	pendingNick, pending := x.mucPendingJoin[roomBare]
-	if pending && pendingNick == ourNick && typeVal != "unavailable" {
+	// Confirmed by our requested nick, or by the server's own-presence marker (status 110) when it
+	// assigned a different nick (e.g. status 210): the occupant JID of the presence is then ours.
+	serverAssigned := pending && pendingNick != ourNick && sawMUCUser && info.hasStatus("110")
+	if pending && (pendingNick == ourNick || serverAssigned) && typeVal != "unavailable" {
 		x.mucOurOccupantJIDMu.Lock()
 		if x.mucOurOccupantJID == nil {
 			x.mucOurOccupantJID = make(map[string]string)
@@ -1022,12 +1026,13 @@ func (x *xmppClient) handlePresence(t xmlstream.TokenReadEncoder, start *xml.Sta
 		x.log.Debug().Str("room", roomBare).Str("occupant_jid", fromJID.String()).Msg("MUC join confirmed, stored our occupant JID")
 		// Confirmed with an alternative nick after a 409: remember it and tell the user (goroutine).
 		if track := x.takeMUCJoinTrackLocked(roomBare); track != nil {
-			if track.conflicted && ourNick != track.base {
+			if track.conflicted && !serverAssigned && ourNick != track.base {
 				go x.announceMUCNickChange(roomBare, track.base, track.tried[0], ourNick)
 			}
 			// The explicit join command also creates/enables the XEP-0402 bookmark (goroutine, own span).
 			if track.writeBookmark {
-				go x.bookmarkAfterJoin(roomBare, track.base, ourNick, track.conflicted)
+				// A server-assigned nick is never offered as the bookmark nick.
+				go x.bookmarkAfterJoin(roomBare, track.base, ourNick, track.conflicted || serverAssigned)
 			}
 		}
 		// Queue ChatResync so the bridge re-fetches GetChatInfo (and can refresh room/ghost info after rejoin).

@@ -273,7 +273,8 @@ func (x *xmppClient) HandleMatrixReadReceipt(ctx context.Context, msg *bridgev2.
 
 // sendMUCDisplayed sends the debounced groupchat displayed marker (timer goroutine: no inherited span).
 func (x *xmppClient) sendMUCDisplayed(portalID, ref string) {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 	log := x.logFor(ctx)
 	if x.getMUCOurOccupantJID(portalID) == "" || x.sig.lastDisplayed(portalID) == ref {
 		return

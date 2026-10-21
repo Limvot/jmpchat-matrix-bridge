@@ -33,19 +33,23 @@ func TestDelayedBodylessSignalsDropped(t *testing.T) {
 		t.Fatalf("live MUC marker must still be bridged: %v", *got)
 	}
 
-	// Delayed DM chat state / marker / receipt, live and as a carbon.
+	// Delayed DM chat state is dropped; delayed DM marker / receipt (offline storage) are processed.
 	x, got = hookClient()
+	runHandler(t, x, `<message type="chat" from="bob@example.com/p"><composing xmlns="http://jabber.org/protocol/chatstates"/>`+delayEl+`</message>`)
+	if len(*got) != 0 || x.sig.isPeer("bob@example.com") {
+		t.Fatalf("delayed DM chat state bridged: %v", *got)
+	}
 	for _, s := range []string{
-		`<message type="chat" from="bob@example.com/p"><composing xmlns="http://jabber.org/protocol/chatstates"/>` + delayEl + `</message>`,
 		`<message type="chat" from="bob@example.com/p"><displayed xmlns="urn:xmpp:chat-markers:0" id="m1"/>` + delayEl + `</message>`,
 		`<message type="chat" from="bob@example.com/p"><received xmlns="urn:xmpp:receipts" id="m1"/>` + delayEl + `</message>`,
 		`<message from="me@example.com"><received xmlns="urn:xmpp:carbons:2"><forwarded xmlns="urn:xmpp:forward:0"><message xmlns="jabber:client" from="bob@example.com/p" to="me@example.com" type="chat"><displayed xmlns="urn:xmpp:chat-markers:0" id="m1"/>` + delayEl + `</message></forwarded></received></message>`,
 		`<message from="me@example.com"><sent xmlns="urn:xmpp:carbons:2"><forwarded xmlns="urn:xmpp:forward:0"><message xmlns="jabber:client" from="me@example.com/l" to="bob@example.com" type="chat"><displayed xmlns="urn:xmpp:chat-markers:0" id="m1"/>` + delayEl + `</message></forwarded></sent></message>`,
 	} {
+		before := len(*got)
 		runHandler(t, x, s)
-	}
-	if len(*got) != 0 || x.sig.isPeer("bob@example.com") {
-		t.Fatalf("delayed DM signal bridged: %v", *got)
+		if len(*got) != before+1 {
+			t.Errorf("delayed DM marker/receipt not processed: %s", s)
+		}
 	}
 }
 
