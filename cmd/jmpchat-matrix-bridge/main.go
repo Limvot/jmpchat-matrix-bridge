@@ -108,6 +108,24 @@ func main() {
 		if prefix == "" {
 			prefix = "!jabber"
 		}
+		// bridgev2 calls no connector hook when a portal is deleted by command: deleting a MUC room counts
+		// as leaving it, so wrap the commands to leave (and turn off bookmark auto-join) first.
+		delPortal := *commands.CommandDeletePortal
+		origDelPortal := delPortal.Func
+		delPortal.Func = func(ce *commands.Event) {
+			connector.LeaveOnPortalDelete(ce.Ctx, ce.Bridge, ce.Portal)
+			origDelPortal(ce)
+		}
+		br.Bridge.Commands.(*commands.Processor).AddHandler(&delPortal)
+		delAll := *commands.CommandDeleteAllPortals
+		origDelAll := delAll.Func
+		delAll.Func = func(ce *commands.Event) {
+			if portals, err := ce.Bridge.GetAllPortals(ce.Ctx); err == nil {
+				connector.LeaveOnPortalDelete(ce.Ctx, ce.Bridge, portals...)
+			}
+			origDelAll(ce)
+		}
+		br.Bridge.Commands.(*commands.Processor).AddHandler(&delAll)
 		br.Bridge.Commands.(*commands.Processor).AddHandler(&commands.FullHandler{
 			Func:          withSpan("sync-roster", cmdSyncRoster),
 			Name:          "sync-roster",
