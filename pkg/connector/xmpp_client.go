@@ -97,6 +97,9 @@ type xmppClient struct {
 	// mucOurOccupantJID maps MUC room JID (bare) to our full occupant JID (room@service/nick) for self-echo filtering.
 	mucOurOccupantJID   map[string]string
 	mucOurOccupantJIDMu sync.RWMutex
+	// avatarFetchHook / avatarStampHook (tests only) replace the vCard fetch and the AvatarFetchedAt stamp.
+	avatarFetchHook func(ctx context.Context, bareJID string) ([]byte, string, string, error)
+	avatarStampHook func(bareJID string)
 	// mucHealAt: last self-heal re-join per room (see healMUCAfterError); guarded by mucHealMu.
 	mucHealAt map[string]time.Time
 	mucHealMu sync.Mutex

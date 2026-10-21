@@ -245,9 +245,49 @@ func (x *xmppClient) cachedContactAvatar(bareJID string, meta *GhostMetadata) *b
 	}
 }
 
+// permanentVCardError reports whether err is a cancel-type stanza error that will not go away by
+// retrying soon. Timeouts, wait/auth errors and transport failures are transient.
+func permanentVCardError(err error) bool {
+	var se stanza.Error
+	if err == nil || !errors.As(err, &se) || se.Type != stanza.Cancel {
+		return false
+	}
+	switch se.Condition {
+	case stanza.FeatureNotImplemented, stanza.ServiceUnavailable, stanza.ItemNotFound,
+		stanza.NotAllowed, stanza.Forbidden, stanza.RecipientUnavailable:
+		return true
+	}
+	return false
+}
+
+// stampAvatarAttempt sets GhostMetadata.AvatarFetchedAt to now, keeping the avatar as it is.
+func (x *xmppClient) stampAvatarAttempt(ctx context.Context, bareJID string) {
+	if x.avatarStampHook != nil {
+		x.avatarStampHook(bareJID)
+		return
+	}
+	ghost, gerr := x.conn.br.GetExistingGhostByID(ctx, networkid.UserID(bareJID))
+	if gerr != nil || ghost == nil {
+		return
+	}
+	ghost.UpdateInfo(ctx, &bridgev2.UserInfo{
+		ExtraUpdates: func(ctx context.Context, g *bridgev2.Ghost) bool {
+			m, ok := g.Metadata.(*GhostMetadata)
+			if !ok || m == nil {
+				return false
+			}
+			m.AvatarFetchedAt.Time = time.Now()
+			return true
+		},
+	})
+}
+
 // queueAvatarRefresh starts a background vCard avatar fetch for a 1:1 contact unless one is already
 // in flight for that JID. It never blocks the caller.
 func (x *xmppClient) queueAvatarRefresh(bareJID string) {
+	if IsCheogramDMJID(bareJID) {
+		return // phone-number gateway JIDs have no vCards; every get is answered feature-not-implemented
+	}
 	x.avatarRefreshingMu.Lock()
 	if x.avatarRefreshing == nil {
 		x.avatarRefreshing = make(map[string]bool)
@@ -284,7 +324,19 @@ func (x *xmppClient) doAvatarRefresh(bareJID string) {
 	if span.IsRecording() {
 		span.SetAttributes(attribute.String("xmpp.peer.jid", bareJID))
 	}
-	data, _, hash, err := x.fetchContactAvatar(ctx, bareJID)
+	fetch := x.fetchContactAvatar
+	if x.avatarFetchHook != nil {
+		fetch = x.avatarFetchHook
+	}
+	data, _, hash, err := fetch(ctx, bareJID)
+	if permanentVCardError(err) {
+		// The contact's server will never answer a vCard get (feature-not-implemented, not-allowed, ...):
+		// keep the current avatar and stamp the attempt so the 24 h gate applies instead of a re-fetch at
+		// every start.
+		log.Debug().Err(err).Str("jid", bareJID).Msg("Contact vCard unavailable (permanent error)")
+		x.stampAvatarAttempt(ctx, bareJID)
+		return
+	}
 	if errors.Is(err, errAvatarRejected) {
 		// Oversized or non-image photo: keep the current avatar and stamp the attempt so the
 		// 24 h refresh gate (not every GetUserInfo) decides when to look again.
@@ -292,18 +344,7 @@ func (x *xmppClient) doAvatarRefresh(bareJID string) {
 		if span.IsRecording() {
 			span.SetAttributes(attribute.Bool("xmpp.avatar.changed", false), attribute.Bool("xmpp.avatar.rejected", true))
 		}
-		if ghost, gerr := x.conn.br.GetExistingGhostByID(ctx, networkid.UserID(bareJID)); gerr == nil && ghost != nil {
-			ghost.UpdateInfo(ctx, &bridgev2.UserInfo{
-				ExtraUpdates: func(ctx context.Context, g *bridgev2.Ghost) bool {
-					m, ok := g.Metadata.(*GhostMetadata)
-					if !ok || m == nil {
-						return false
-					}
-					m.AvatarFetchedAt.Time = time.Now()
-					return true
-				},
-			})
-		}
+		x.stampAvatarAttempt(ctx, bareJID)
 		return
 	}
 	if err != nil {
