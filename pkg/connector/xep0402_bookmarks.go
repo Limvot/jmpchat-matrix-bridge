@@ -468,12 +468,17 @@ func skipElement(r xml.TokenReader) error {
 }
 
 // bookmarkEventTrusted is the spoofing guard of the PEP event handler: our own account's PEP service
-// delivers events with from = our exact bare JID and type headline. A contact, a MUC occupant, our own
-// full JID or any other entity is rejected.
+// delivers events with from = our exact bare JID and type headline. mellium blanks a `from` equal to our
+// bare JID, and per RFC 6120 §8.1.2.1 a stanza without `from` comes from our own account (the server
+// stamps `from` on everything a remote entity sends), so an empty `from` is accepted too. A contact, a
+// MUC occupant, our own full JID or any other entity is rejected.
 func bookmarkEventTrusted(msg stanza.Message, ownBare jid.JID) bool {
 	own := ownBare.Bare()
 	if own.String() == "" || msg.Type != stanza.HeadlineMessage {
 		return false
+	}
+	if msg.From.String() == "" {
+		return true
 	}
 	return msg.From.Equal(own)
 }

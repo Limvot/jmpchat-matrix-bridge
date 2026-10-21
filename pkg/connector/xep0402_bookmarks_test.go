@@ -383,7 +383,8 @@ func TestBookmarkEventTrusted(t *testing.T) {
 		{"other bare", mk("you@example.com", stanza.HeadlineMessage), false},
 		{"muc occupant", mk("room@muc.example.com/me", stanza.HeadlineMessage), false},
 		{"server", mk("example.com", stanza.HeadlineMessage), false},
-		{"no from", mk("", stanza.HeadlineMessage), false},
+		{"no from (own account, from blanked by mellium)", mk("", stanza.HeadlineMessage), true},
+		{"no from but chat", mk("", stanza.ChatMessage), false},
 		{"own bare but chat", mk("me@example.com", stanza.ChatMessage), false},
 		{"own bare but normal", mk("me@example.com", stanza.NormalMessage), false},
 	} {
