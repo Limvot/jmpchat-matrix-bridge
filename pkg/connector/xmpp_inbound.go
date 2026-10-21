@@ -557,7 +557,10 @@ func (x *xmppClient) handleGroupchatWithOOB(t xmlstream.TokenReadEncoder, start 
 	// XEP-0045 section 8.1: a groupchat message with <subject> and no <body> is a subject change (with a
 	// body it is a normal message and the subject is ignored). Bridged as the room topic; never logged.
 	if ids.Extras.Subject != nil && body == "" && oobURL == "" && reactionTarget == "" {
-		if room := bareJID(from); room != "" {
+		// Only a room joined this session may change a topic, and only from the room itself or one of its
+		// occupants (from is bare room JID or room/nick by construction of bareJID): otherwise any contact
+		// could create portals or change a DM portal's topic.
+		if room := bareJID(from); room != "" && x.isJoinedRoomBare(room) {
 			ctx, span := startReceiveSpan("subject", "groupchat", from, room, attrValue(start.Attr, "id"), false, false, false)
 			defer span.End()
 			x.queueMUCSubject(ctx, room, *ids.Extras.Subject)
@@ -1188,6 +1191,8 @@ func (m *jabberRemoteMessage) MutateContext(ctx context.Context) context.Context
 
 // PostHandle ends the span started in MutateContext.
 func (m *jabberRemoteMessage) PostHandle(ctx context.Context, _ *bridgev2.Portal) {
+	// Intentional: encrypted messages are answered too (receipt/marker). The bridge did deliver the
+	// notice, so the sender is told it arrived, although the content could not be bridged.
 	if m.receipt != nil && m.x != nil {
 		m.x.answerReceiptRequest(ctx, m)
 	}
@@ -1358,10 +1363,18 @@ func (m *jabberRemoteMessage) convertMessage(ctx context.Context, portal *bridge
 		span.SetAttributes(attribute.Bool("xmpp.has_oob", m.oobURL != ""))
 	}
 	if m.encrypted != "" {
-		return &bridgev2.ConvertedMessage{Parts: []*bridgev2.ConvertedMessagePart{{
+		cm := &bridgev2.ConvertedMessage{Parts: []*bridgev2.ConvertedMessagePart{{
 			Type:    event.EventMessage,
 			Content: encryptedNoticeContent(m.encrypted),
-		}}}, nil
+		}}}
+		// Keep the reply context: the target is resolved like for a normal message (the body is empty, so
+		// only the lookup result is used).
+		if m.replyID != "" {
+			if _, replyTarget := textForBody(ctx, m.x, m.portalKey, m.refIsMUC(portal), "", m.replyID, m.replyFallback); replyTarget != nil {
+				cm.ReplyTo = &networkid.MessageOptionalPartID{MessageID: replyTarget.ID}
+			}
+		}
+		return cm, nil
 	}
 	body := strings.TrimSpace(m.body)
 	// Prefer XEP-0066 OOB URL when present (Jabber client sent media with OOB).

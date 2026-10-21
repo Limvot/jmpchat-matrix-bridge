@@ -1246,7 +1246,7 @@ func (x *xmppClient) getMUCRoomMetadata(ctx context.Context, roomJID string) (na
 		}
 		desc, _ := f.GetString("muc#roominfo_description")
 		subj, _ := f.GetString("muc#roominfo_subject")
-		topic = composeMUCTopic(desc, subj)
+		topic = composeMUCTopic(sanitizeSubject(capSubject(desc)), sanitizeSubject(capSubject(subj)))
 		// Fallback field names used by some servers
 		if name == "" {
 			if n, ok := f.GetString("Room name"); ok && n != "" {
@@ -1254,13 +1254,13 @@ func (x *xmppClient) getMUCRoomMetadata(ctx context.Context, roomJID string) (na
 			}
 		}
 		if topic == "" {
-			if d, ok := f.GetString("Description"); ok && d != "" {
-				topic = d
+			if s, ok := f.GetString("Subject"); ok && s != "" {
+				topic = sanitizeSubject(capSubject(s))
 			}
 		}
 		if topic == "" {
-			if s, ok := f.GetString("Subject"); ok && s != "" {
-				topic = s
+			if d, ok := f.GetString("Description"); ok && d != "" {
+				topic = sanitizeSubject(capSubject(d))
 			}
 		}
 		break
@@ -1307,9 +1307,16 @@ func (x *xmppClient) getMUCChatInfo(ctx context.Context, portal *bridgev2.Portal
 			},
 		},
 	}
+	// The placeholder/disco topic is only for portal creation. Once the Matrix room exists the live
+	// subject (queueMUCSubject, re-sent by the room on every join) owns the topic; returning one here
+	// would flip it back and forth on every rejoin resync.
+	topicPtr := &topic
+	if portal != nil && portal.MXID != "" {
+		topicPtr = nil
+	}
 	return &bridgev2.ChatInfo{
 		Name:    &name,
-		Topic:   &topic,
+		Topic:   topicPtr,
 		Type:    &rt,
 		Members: members,
 		ExtraUpdates: func(ctx context.Context, p *bridgev2.Portal) bool {

@@ -8,6 +8,7 @@ import (
 
 	"github.com/rs/zerolog"
 	"maunium.net/go/mautrix/bridgev2"
+	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/bridgev2/simplevent"
 	"maunium.net/go/mautrix/event"
 )
@@ -84,7 +85,50 @@ func TestComposeMUCTopicPrefersSubject(t *testing.T) {
 func subjClient() (*xmppClient, *[]bridgev2.RemoteEvent) {
 	x, got := hookClient()
 	x.conn = &JabberConnector{}
+	markJoinedForTest(x, "room@muc.example.com")
 	return x, got
+}
+
+// markJoinedForTest records room as joined this session (memory only).
+func markJoinedForTest(x *xmppClient, room string) {
+	x.mucOurOccupantJIDMu.Lock()
+	defer x.mucOurOccupantJIDMu.Unlock()
+	if x.mucOurOccupantJID == nil {
+		x.mucOurOccupantJID = map[string]string{}
+	}
+	x.mucOurOccupantJID[room] = room + "/me"
+}
+
+func TestSubjectFromUnjoinedRoomOrContactIgnored(t *testing.T) {
+	x, got := subjClient()
+	// A contact (DM portal JID) and a room we did not join must not queue a topic change.
+	runHandler(t, x, `<message type="groupchat" from="bob@example.com/p" id="s1"><subject>pwn</subject></message>`)
+	runHandler(t, x, `<message type="groupchat" from="other@muc.example.com/bob" id="s2"><subject>pwn</subject></message>`)
+	if len(*got) != 0 {
+		t.Fatalf("queued %d events for spoofed subjects", len(*got))
+	}
+	// Room itself and an occupant of the joined room are accepted.
+	runHandler(t, x, `<message type="groupchat" from="room@muc.example.com" id="s3"><subject>a</subject></message>`)
+	runHandler(t, x, `<message type="groupchat" from="room@muc.example.com/bob" id="s4"><subject>b</subject></message>`)
+	if len(*got) != 2 {
+		t.Fatalf("queued %d events, want 2", len(*got))
+	}
+}
+
+func TestMUCChatInfoTopicOnlyAtCreation(t *testing.T) {
+	x, _ := subjClient()
+	const room = "room@muc.example.com"
+	created, err := x.getMUCChatInfo(context.Background(), &bridgev2.Portal{Portal: &database.Portal{}}, room)
+	if err != nil || created.Topic == nil || *created.Topic == "" {
+		t.Fatalf("creation info = %+v, %v", created, err)
+	}
+	existing := &bridgev2.Portal{Portal: &database.Portal{MXID: "!r:example.com"}}
+	for i := 0; i < 2; i++ {
+		ci, err := x.getMUCChatInfo(context.Background(), existing, room)
+		if err != nil || ci.Topic != nil {
+			t.Fatalf("resync %d: Topic = %v, %v; the live subject owns the topic", i, ci.Topic, err)
+		}
+	}
 }
 
 func TestSanitizeSubject(t *testing.T) {
