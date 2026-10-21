@@ -230,11 +230,17 @@ func (x *xmppClient) bookmarkFetch(ctx context.Context) ([]bookmarkConf, bookmar
 // first time. ok is false when the check itself failed (state stays unknown, so the next call retries;
 // joins and leaves are never blocked by it).
 func (x *xmppClient) ensureBookmarkGate(ctx context.Context) (s bookmarkSupport, ok bool) {
+	s, err := x.ensureBookmarkGateErr(ctx)
+	return s, err == nil
+}
+
+// ensureBookmarkGateErr is ensureBookmarkGate returning the error of a failed check.
+func (x *xmppClient) ensureBookmarkGateErr(ctx context.Context) (bookmarkSupport, error) {
 	x.bm.mu.Lock()
 	if x.bm.gateKnown {
-		s = x.bm.support
+		s := x.bm.support
 		x.bm.mu.Unlock()
-		return s, true
+		return s, nil
 	}
 	x.bm.mu.Unlock()
 	info, err := x.bookmarkDisco(ctx)
@@ -242,9 +248,9 @@ func (x *xmppClient) ensureBookmarkGate(ctx context.Context) (s bookmarkSupport,
 		if !errors.Is(err, errBookmarksNotConnected) {
 			x.logFor(ctx).Warn().Err(err).Msg("Bookmarks: capability check failed (disco#info of own account); will retry")
 		}
-		return bookmarkSupport{}, false
+		return bookmarkSupport{}, err
 	}
-	s = bookmarkSupportFromInfo(info)
+	s := bookmarkSupportFromInfo(info)
 	x.bm.mu.Lock()
 	x.bm.gateKnown, x.bm.support = true, s
 	first := !x.bm.gateLogged
@@ -253,21 +259,45 @@ func (x *xmppClient) ensureBookmarkGate(ctx context.Context) (s bookmarkSupport,
 	if first {
 		x.logBookmarkGate(ctx, s)
 	}
-	return s, true
+	return s, nil
 }
 
+// bookmarkStartupStatus is the outcome of bookmarkStartup.
+type bookmarkStartupStatus int
+
+const (
+	// bookmarkStartupFetched: the bookmarks were read; the cache is filled.
+	bookmarkStartupFetched bookmarkStartupStatus = iota
+	// bookmarkStartupUnsupported: the server does not offer bookmark reading (final for this session).
+	bookmarkStartupUnsupported
+	// bookmarkStartupFailed: the gate check or the fetch failed (timeout, transient error); worth retrying.
+	bookmarkStartupFailed
+	// bookmarkStartupNoSession: there is no session (it ended); nothing to retry.
+	bookmarkStartupNoSession
+)
+
 // bookmarkStartup is the first step of the startup coordinator (runMUCAutoRejoin): the capability gate and
-// one fetch that fills the cache. fetched is false when reading is unsupported or the fetch failed (the
-// caller then behaves as before bookmarks existed: no skip set, no imports).
-func (x *xmppClient) bookmarkStartup(ctx context.Context) (bms []bookmarkConf, fetched bool) {
-	s, ok := x.ensureBookmarkGate(ctx)
-	if !ok || !s.Read {
-		return nil, false
+// one fetch that fills the cache. Unless the status is bookmarkStartupFetched the caller behaves as before
+// bookmarks existed (no skip set, no imports); on bookmarkStartupFailed it retries later (see
+// retryBookmarkStartup). Each failure logs one warning.
+func (x *xmppClient) bookmarkStartup(ctx context.Context) ([]bookmarkConf, bookmarkStartupStatus) {
+	s, err := x.ensureBookmarkGateErr(ctx)
+	if err != nil {
+		if errors.Is(err, errBookmarksNotConnected) {
+			return nil, bookmarkStartupNoSession
+		}
+		return nil, bookmarkStartupFailed
+	}
+	if !s.Read {
+		return nil, bookmarkStartupUnsupported
 	}
 	bms, info, err := x.bookmarkFetch(ctx)
 	if err != nil {
-		x.logFor(ctx).Warn().Err(err).Msg("Bookmarks: fetch failed; bookmarks are not applied this session")
-		return nil, false
+		if errors.Is(err, errBookmarksNotConnected) {
+			return nil, bookmarkStartupNoSession
+		}
+		x.logFor(ctx).Warn().Err(err).Msg("Bookmarks: fetch failed; will retry")
+		return nil, bookmarkStartupFailed
 	}
 	x.bm.setCache(bms)
 	log := x.logFor(ctx)
@@ -276,5 +306,5 @@ func (x *xmppClient) bookmarkStartup(ctx context.Context) (bms []bookmarkConf, f
 		// Room JID, autojoin and nick only: never the password, name or extensions.
 		log.Debug().Str("room", b.ID).Bool("autojoin", b.Autojoin).Str("nick", b.Nick).Msg("Bookmark")
 	}
-	return bms, true
+	return bms, bookmarkStartupFetched
 }

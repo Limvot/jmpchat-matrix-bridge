@@ -121,7 +121,9 @@ func (r *rejoinRig) joined() []string {
 func fastRejoin(t *testing.T, interval time.Duration) {
 	od, oi := mucRejoinInitialDelay, mucRejoinInterval
 	mucRejoinInitialDelay, mucRejoinInterval = 0, interval
-	t.Cleanup(func() { mucRejoinInitialDelay, mucRejoinInterval = od, oi })
+	or := bookmarkStartupRetryDelays
+	bookmarkStartupRetryDelays = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
+	t.Cleanup(func() { mucRejoinInitialDelay, mucRejoinInterval, bookmarkStartupRetryDelays = od, oi, or })
 }
 
 func TestRunMUCAutoRejoin(t *testing.T) {

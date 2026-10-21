@@ -47,6 +47,12 @@ func bookmarkLeftNotice(prefix, room string) string {
 	return fmt.Sprintf("Left %s: its bookmark was set to not auto-join (or was deleted) on another client. Use `%s join %s` to return.", room, prefix, room)
 }
 
+// bookmarkLeftLateNotice words the notice for a re-joined room whose bookmark (read only after the
+// re-join, see retryBookmarkStartup) says not to auto-join.
+func bookmarkLeftLateNotice(prefix, room string) string {
+	return fmt.Sprintf("Left %s again: its bookmark is set to not auto-join (bookmarks could only be read after the re-join). Use `%s join %s` to return.", room, prefix, room)
+}
+
 // bookmarkBudgetNotice is posted once per session when the import budget is used up.
 func bookmarkBudgetNotice(prefix string) string {
 	return fmt.Sprintf("Imported the maximum of %d bookmarked rooms this session; more bookmarks were not imported. Run `%s bookmarks-sync` or reconnect to continue.", bookmarkImportMaxRooms, prefix)

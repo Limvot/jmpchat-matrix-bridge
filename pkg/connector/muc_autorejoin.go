@@ -126,6 +126,10 @@ func (x *xmppClient) newestBridgedMessage(ctx context.Context, roomBare string) 
 	return msgs[0].Timestamp
 }
 
+// bookmarkStartupRetryDelays are the waits before each retry of a failed bookmark startup (gate check or
+// fetch), counted from the end of the rejoin batch and then from each failed attempt (variable for tests).
+var bookmarkStartupRetryDelays = []time.Duration{30 * time.Second, 2 * time.Minute, 10 * time.Minute}
+
 // runMUCAutoRejoin is the startup coordinator, run once per session in its own goroutine (never on the
 // Serve goroutine) with its own root span. ctx is the session context: when the session ends it is
 // cancelled and the batch stops before the next join. Steps:
@@ -136,14 +140,18 @@ func (x *xmppClient) newestBridgedMessage(ctx context.Context, roomBare string) 
 //  3. the autojoin bookmarks that have no Matrix room yet (imports, per-session budget);
 //  4. one staggered (mucRejoinInterval) join loop over the rooms, then the imports, through the normal
 //     joinMUC path (nick choice incl. the bookmark nick, 409 handling) with a bounded history request;
-//  5. the one-time backfill of bookmarks for the bridged rooms that have none (xep0402_backfill.go).
+//  5. the one-time backfill of bookmarks for the bridged rooms that have none (xep0402_backfill.go);
+//  6. when step 1 failed transiently, retryBookmarkStartup retries it with backoff and, on success, runs
+//     the bookmark parts of steps 2, 3 and 5 that were skipped (at most once: this goroutine is the only
+//     caller and runs once per session).
 func (x *xmppClient) runMUCAutoRejoin(sessCtx context.Context) {
 	ctx, span := telemetry.Start(sessCtx, "xmpp.muc.auto_rejoin", trace.WithSpanKind(trace.SpanKindProducer))
 	defer span.End()
 	log := x.logFor(ctx)
 
 	start := time.Now()
-	bms, fetched := x.bookmarkStartup(ctx)
+	bms, status := x.bookmarkStartup(ctx)
+	fetched := status == bookmarkStartupFetched
 	if !waitCtx(ctx, mucRejoinInitialDelay-time.Since(start)) {
 		return
 	}
@@ -174,15 +182,7 @@ func (x *xmppClient) runMUCAutoRejoin(sessCtx context.Context) {
 	}
 	var imports []bookmarkConf
 	if fetched {
-		var st importStats
-		imports, st = selectBookmarkImports(bms, portals, x.loginID, x.bm.importBudgetLeft())
-		x.bm.takeImportBudget(len(imports))
-		if st.Capped > 0 {
-			log.Warn().Int("imported", len(imports)).Int("autojoin", st.Autojoin).Int("capped", st.Capped).Msg("Bookmarks: import budget reached, the rest is skipped")
-			if x.bm.markBudgetNoticed() {
-				x.notifyManagement(ctx, bookmarkBudgetNotice(x.mucCmdPrefix()))
-			}
-		}
+		imports = x.planBookmarkImports(ctx, bms, portals)
 	}
 	joined, failed, imported := 0, 0, 0
 	total := len(rooms) + len(imports)
@@ -221,15 +221,123 @@ func (x *xmppClient) runMUCAutoRejoin(sessCtx context.Context) {
 			attribute.Int("xmpp.muc.rejoin.imported", imported))
 	}
 	log.Info().Int("joined", joined).Int("imported", imported).Int("skipped", skipped).Int("failed", failed).Msg("MUC auto-rejoin finished")
-	if fetched && ctx.Err() == nil && !x.backfillDone() {
-		if !waitCtx(ctx, bookmarkBackfillSettle) {
+	if ctx.Err() != nil {
+		return
+	}
+	switch status {
+	case bookmarkStartupFetched:
+		x.startupBookmarkBackfill(ctx, rooms)
+	case bookmarkStartupFailed:
+		x.retryBookmarkStartup(ctx, rooms)
+	}
+}
+
+// planBookmarkImports picks the autojoin bookmarks without a Matrix room to import, within the session's
+// import budget (taken here); the budget notice is posted once per session.
+func (x *xmppClient) planBookmarkImports(ctx context.Context, bms []bookmarkConf, portals []*database.Portal) []bookmarkConf {
+	imports, st := selectBookmarkImports(bms, portals, x.loginID, x.bm.importBudgetLeft())
+	x.bm.takeImportBudget(len(imports))
+	if st.Capped > 0 {
+		x.logFor(ctx).Warn().Int("imported", len(imports)).Int("autojoin", st.Autojoin).Int("capped", st.Capped).Msg("Bookmarks: import budget reached, the rest is skipped")
+		if x.bm.markBudgetNoticed() {
+			x.notifyManagement(ctx, bookmarkBudgetNotice(x.mucCmdPrefix()))
+		}
+	}
+	return imports
+}
+
+// startupBookmarkBackfill runs the one-time bookmark backfill for the re-joined rooms (after a settle delay
+// so the confirmed occupant nicks are known). No-op once the login has run it.
+func (x *xmppClient) startupBookmarkBackfill(ctx context.Context, rooms []*database.Portal) {
+	if x.backfillDone() {
+		return
+	}
+	if !waitCtx(ctx, bookmarkBackfillSettle) {
+		return
+	}
+	keys := make([]string, 0, len(rooms))
+	for _, p := range rooms {
+		keys = append(keys, bookmarkKey(string(p.ID)))
+	}
+	x.runBookmarkBackfill(ctx, keys, false)
+}
+
+// retryBookmarkStartup retries a failed bookmark startup (gate check or fetch) with backoff
+// (bookmarkStartupRetryDelays) within the session. rooms are the rooms the batch re-joined without
+// bookmarks. On success it applies what the batch skipped, once: rooms whose bookmark says autojoin=false
+// are left again and marked left (with a notice), the autojoin bookmarks without a Matrix room are
+// imported, and the one-time backfill runs. Each failed attempt logs one warning (bookmarkStartup); a
+// success after a retry logs one info line.
+func (x *xmppClient) retryBookmarkStartup(ctx context.Context, rooms []*database.Portal) {
+	log := x.logFor(ctx)
+	for attempt, d := range bookmarkStartupRetryDelays {
+		if !waitCtx(ctx, d) {
 			return
 		}
-		keys := make([]string, 0, len(rooms))
-		for _, p := range rooms {
-			keys = append(keys, bookmarkKey(string(p.ID)))
+		bms, status := x.bookmarkStartup(ctx)
+		switch status {
+		case bookmarkStartupFailed:
+			continue
+		case bookmarkStartupNoSession:
+			return
+		case bookmarkStartupUnsupported:
+			log.Info().Int("attempt", attempt+1).Msg("Bookmarks: capability check succeeded after retry; reading bookmarks is not supported")
+			return
 		}
-		x.runBookmarkBackfill(ctx, keys, false)
+		log.Info().Int("attempt", attempt+1).Int("count", len(bms)).Msg("Bookmarks: startup fetch succeeded after retry; applying bookmarks")
+		x.applyDeferredBookmarkStartup(ctx, rooms, bms)
+		return
+	}
+	log.Info().Int("attempts", len(bookmarkStartupRetryDelays)).Msg("Bookmarks: startup fetch kept failing; bookmarks are not applied at startup this session")
+}
+
+// applyDeferredBookmarkStartup is the bookmark part of the startup batch, run after a late successful
+// fetch: autojoin=false handling for the re-joined rooms, imports and the one-time backfill.
+func (x *xmppClient) applyDeferredBookmarkStartup(ctx context.Context, rooms []*database.Portal, bms []bookmarkConf) {
+	log := x.logFor(ctx)
+	keep, off := splitBookmarkAutojoinOff(rooms, bms)
+	for _, p := range off {
+		if ctx.Err() != nil {
+			return
+		}
+		room := string(p.ID)
+		if x.isMUCLeft(ctx, room) {
+			continue // left explicitly in the meantime
+		}
+		if x.getMUCOurOccupantJID(room) != "" || x.mucJoinInFlight(room) {
+			if err := x.leaveMUC(ctx, room); err != nil {
+				log.Warn().Err(err).Str("room", room).Msg("Bookmarks: leaving a room with autojoin off failed")
+				continue
+			}
+		}
+		if err := x.setMUCLeft(ctx, room, true); err != nil {
+			log.Warn().Err(err).Str("room", room).Msg("Bookmarks: failed to mark a room left")
+		}
+		x.notifyMUC(ctx, room, bookmarkLeftLateNotice(x.mucCmdPrefix(), room))
+		log.Info().Str("room", room).Msg("Bookmarks: bookmark has autojoin off; left the re-joined room, marked left")
+	}
+	portals, err := x.listMUCRejoinPortals(ctx)
+	if err != nil {
+		log.Warn().Err(err).Msg("Bookmarks: failed to list portals; no imports")
+	} else {
+		imports := x.planBookmarkImports(ctx, bms, portals)
+		for i, b := range imports {
+			if i > 0 && !waitCtx(ctx, mucRejoinInterval) {
+				return
+			}
+			if ctx.Err() != nil {
+				return
+			}
+			room := bookmarkKey(b.ID)
+			if err := x.importBookmarkedRoom(ctx, room); err != nil {
+				log.Warn().Err(err).Str("room", room).Msg("Bookmarks: import join failed")
+				continue
+			}
+			log.Info().Str("room", room).Msg("Bookmarks: imported room")
+		}
+	}
+	if ctx.Err() == nil {
+		x.startupBookmarkBackfill(ctx, keep)
 	}
 }
 
