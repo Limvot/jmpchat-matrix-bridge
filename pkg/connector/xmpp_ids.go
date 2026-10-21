@@ -31,6 +31,10 @@ type messageIDs struct {
 	OriginID   string
 	OccupantID string // XEP-0421 occupant-id; only meaningful for groupchat
 
+	// ReplyFallback is the XEP-0428 fallback range for a XEP-0461 reply (offsets relative to the
+	// trimmed body); filled by parseMessageBodyOOBIDs only.
+	ReplyFallback replyFallback
+
 	// Retract is the XEP-0424/0425 retraction carried by the stanza (nil when none), and Tombstone is
 	// set for an archived original that was retracted (<retracted>). Both are filled by finish().
 	Retract   *retractInfo
