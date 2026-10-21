@@ -1,3 +1,14 @@
+Third-party code adapted in this repository
+
+The following files contain code adapted from github.com/keplersj/mautrix-xmpp,
+which is distributed under the MIT license reproduced below:
+
+  - pkg/connector/xmpp_dial.go
+  - cmd/jmpchat-matrix-bridge/logscrub.go
+  - cmd/jmpchat-matrix-bridge/preflight.go
+
+----------------------------------------------------------------------
+
 MIT License
 
 Copyright (c) 2026 Kepler Sticka-Jones

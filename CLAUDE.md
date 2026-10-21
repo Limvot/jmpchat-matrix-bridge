@@ -38,7 +38,9 @@ All bridge logic lives in `pkg/connector/`. The bridgev2 framework handles Matri
 
 ### Connector Core
 
-- **`pkg/connector/connector.go`** — `JabberConnector` (implements `bridgev2.NetworkConnector`). Login flow (JID+password via `jabberLoginProcess`), XMPP session dial (`dialXMPP` with DNS→TCP→TLS/SASL), `LoadUserLogin` (spawns `xmppClient` or `stubJabberClient`). Also defines helper interfaces (`RosterSyncer`, `RosterManager`, `MUCJoiner`) and MUC nick persistence functions.
+- **`pkg/connector/connector.go`** — `JabberConnector` (implements `bridgev2.NetworkConnector`). Login flow (JID+password via `jabberLoginProcess`), `login password-server` flow (`buildLoginMeta`, per-login server override), `LoadUserLogin` (spawns `xmppClient` or `stubJabberClient`). Also defines helper interfaces (`RosterSyncer`, `RosterManager`, `MUCJoiner`) and MUC nick persistence functions.
+
+- **`pkg/connector/xmpp_dial.go`** — XMPP dialing (adapted in part from mautrix-xmpp, see `LICENSE-THIRD-PARTY`). `dialXMPP` uses the per-login override (`dialOptions`, `parseServerOverride`) or SRV discovery (`resolveXMPPEndpoints`: `_xmpps-client` then `_xmpp-client`, priority/direct-TLS-first/weight order, `.` target = unavailable, max 8, fallback `domain:5222`), tries endpoints in order and stops on a SASL failure. Direct TLS (XEP-0368) and STARTTLS both verify the certificate against the JID domain, never the SRV target or override host. Override hosts that resolve to private/loopback addresses are refused unless `network.allow_private_server_override`. `saslCondition` reads mellium's internal `saslerr.Error` by reflection (depends on mellium internals). Seams: `xmppResolver`, `dialXMPPFunc`, `dialEndpointFunc`, `xmppTLSConfigHook`.
 
 - **`pkg/connector/xmpp_client.go`** — `xmppClient` (implements `bridgev2.NetworkAPI` and related interfaces). The largest file (~1800 lines). Handles: reconnect loop with exponential backoff, roster sync, MUC join/leave/nick, `HandleMatrixMessage` (text, media, replies, reactions → XMPP), `ResolveIdentifier` (JID/phone → portal key), `GetChatInfo`/`GetUserInfo`, portal type detection (`portalIsMUC` via disco#info or heuristic).
 
@@ -133,6 +135,7 @@ All commands use the configured prefix (default `!jabber`):
 | Command | Description |
 |---------|-------------|
 | `login password` | Log in with JID + password |
+| `login password-server <jid> <password> <server>` | Same, connecting to a specific server (`host`, `host:port`, `tls://host:port` for direct TLS, or `auto` to clear a stored override) |
 | `pm <jid-or-phone>` | Start a DM (Cheogram: phone numbers resolved automatically) |
 | `join [<login>] <room@conference.domain>` | Join a MUC room (also creates/enables its bookmark, auto-join on, and is the only way back into a room left via `leave` or a bookmark turned off elsewhere) |
 | `leave [<login>] <room@conference.domain>` | Leave a MUC room (an existing bookmark is kept with auto-join off) |
@@ -186,7 +189,7 @@ See `README.md` for full Docker usage with registration generation and volume mo
 - Go 1.26+ (per `go.mod`)
 - `maunium.net/go/mautrix v0.32.0` — bridgev2 framework (Matrix protocol, appservice, DB schema)
 - `go.mau.fi/util v0.11.0` — shared utilities
-- `mellium.im/xmpp v0.22.0` — XMPP client library
+- `mellium.im/xmpp v0.23.0` — XMPP client library
 - `mellium.im/sasl v0.3.2` — SASL authentication
 - `mellium.im/xmlstream v0.15.4` — XML stream processing
 - Database: PostgreSQL 10+ (`github.com/lib/pq`) or SQLite (`github.com/mattn/go-sqlite3`)
@@ -199,7 +202,7 @@ See `README.md` for full Docker usage with registration generation and volume mo
 - `resource_prefix` — XMPP resource prefix
 - `cheogram` — Enable Cheogram phone number resolution (also via `JMPCHAT_BRIDGE_CHEOGRAM=1` env var; the pre-rename `MAUTRIX_JABBER_CHEOGRAM` is still accepted)
 
-The bridge is not bound to any single XMPP server: the connection host is derived from the JID's domain at login (`dialXMPP` does A/AAAA lookup on the domain, port 5222). There is no server/port config setting. Note: `dialXMPP` does not yet do SRV lookup, so servers whose client-connect host differs from the JID domain aren't supported yet — see the SRV/override to-do in README.md.
+The bridge is not bound to any single XMPP server: the connection host is derived from the JID's domain at login (`dialXMPP` does SRV lookup for `_xmpps-client`/`_xmpp-client`, falling back to the domain on port 5222; a per-login override is set with `login password-server`). The only server-related config key is `network.allow_private_server_override` (default false).
 
 Tracing is configured only through environment variables (no config-file keys), see `pkg/telemetry` and the README "Tracing (OpenTelemetry)" section. It is enabled iff `OTEL_EXPORTER_OTLP_ENDPOINT` or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` is set. Protocol comes from `OTEL_EXPORTER_OTLP_(TRACES_)PROTOCOL` and defaults to `http/protobuf` per the OTel spec (the code does not infer it from the port; always set it explicitly: `grpc` for :4317, `http/protobuf` for :4318). `OTEL_SDK_DISABLED=true` or `OTEL_TRACES_EXPORTER=none` disables it. `DD_SERVICE`/`DD_VERSION`/`DD_ENV` are fallbacks for resource attributes; `OTEL_SERVICE_NAME`/`OTEL_RESOURCE_ATTRIBUTES` override them.
 

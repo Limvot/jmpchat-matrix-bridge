@@ -178,7 +178,7 @@ func (x *xmppClient) Connect(ctx context.Context) {
 		}
 		return
 	}
-	sess, err := dialXMPP(ctx, origin, x.meta.Password, log)
+	sess, err := dialXMPPFunc(ctx, origin, x.meta.Password, x.dialOptions(), log)
 	if err != nil {
 		telemetry.Fail(span, err)
 		span.SetAttributes(attribute.String("xmpp.connect.result", "failed"))

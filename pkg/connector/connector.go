@@ -3,7 +3,6 @@ package connector
 import (
 	"context"
 	"fmt"
-	"net"
 	"os"
 	"reflect"
 	"strconv"
@@ -13,8 +12,6 @@ import (
 
 	"github.com/rs/zerolog"
 	"go.mau.fi/util/configupgrade"
-	"mellium.im/sasl"
-	"mellium.im/xmpp"
 	"mellium.im/xmpp/jid"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/database"
@@ -30,6 +27,21 @@ type JabberConfig struct {
 	ResourcePrefix string        `yaml:"resource_prefix"`
 	Cheogram       bool          `yaml:"cheogram"` // resolve phone numbers and short codes to Cheogram JIDs (SMS/MMS)
 	CardDAV        CardDAVConfig `yaml:"carddav"`
+	// AllowPrivateServerOverride lets a per-login server override (login password-server) point at a
+	// private, loopback or link-local address. Off by default (SSRF guard).
+	AllowPrivateServerOverride bool `yaml:"allow_private_server_override"`
+}
+
+// allowPrivateServerOverride is nil-safe (tests and stub paths have no config).
+func (c *JabberConnector) allowPrivateServerOverride() bool {
+	return c != nil && c.networkConfig != nil && c.networkConfig.AllowPrivateServerOverride
+}
+
+// dialOptions returns the dial options of this login: the stored override plus the SSRF setting.
+func (x *xmppClient) dialOptions() dialOptions {
+	opts := x.meta.dialOptions()
+	opts.AllowPrivate = x.conn.allowPrivateServerOverride()
+	return opts
 }
 
 // BackfillConfig holds backfill settings from config.backfill, used by MAM backfill-on-view and full backfill on login / sync-roster.
@@ -225,10 +237,14 @@ func (c *JabberConnector) GetCapabilities() *bridgev2.NetworkGeneralCapabilities
 // otherwise the framework writes the example value (false) and overwrites the user's true on restart.
 func (c *JabberConnector) GetConfig() (example string, data any, upgrader configupgrade.Upgrader) {
 	example = `# Connector config (under network by the framework).
-# The XMPP server is derived from the JID's domain at login; there is no server setting here.
+# The XMPP server is found at login by DNS SRV lookup (xmpps-client, xmpp-client) on the JID's domain,
+# falling back to the domain on port 5222. A per-login override is set with "login password-server".
 # resource_prefix: "mautrix"
 # Resolve phone numbers and short codes to Cheogram JIDs (SMS/MMS). Set to true to enable.
 cheogram: false
+# Allow a per-login server override (login password-server) to point at private, loopback or
+# link-local addresses. Leave false unless your XMPP server runs on your own network.
+# allow_private_server_override: false
 `
 	e := c.extension()
 	if e != nil {
@@ -238,6 +254,7 @@ cheogram: false
 	upgrader = configupgrade.SimpleUpgrader(func(helper configupgrade.Helper) {
 		// Copy user's cheogram value into base so config save preserves it (framework adds "network" prefix).
 		helper.Copy(configupgrade.Bool, "cheogram")
+		helper.Copy(configupgrade.Bool, "allow_private_server_override")
 		upgradeCardDAVConfig(helper)
 		if e != nil {
 			e.upgradeConfig(helper)
@@ -275,15 +292,19 @@ func (c *JabberConnector) GetLoginFlows() []bridgev2.LoginFlow {
 		ID:          "password",
 		Name:        "Password",
 		Description: "Log in with your Jabber ID (JID) and password",
+	}, {
+		ID:          "password-server",
+		Name:        "Password (custom server)",
+		Description: "Log in with your JID and password, connecting to a specific server (host:port or tls://host:port)",
 	}}
 }
 
 // CreateLogin returns a login process for the given flow (e.g. "password").
 func (c *JabberConnector) CreateLogin(ctx context.Context, user *bridgev2.User, flowID string) (bridgev2.LoginProcess, error) {
-	if flowID != "password" {
+	if flowID != "password" && flowID != "password-server" {
 		return nil, fmt.Errorf("unknown flow %q", flowID)
 	}
-	return &jabberLoginProcess{conn: c, user: user}, nil
+	return &jabberLoginProcess{conn: c, user: user, customServer: flowID == "password-server"}, nil
 }
 
 // GetBridgeInfoVersion returns versions for bridge info and room capabilities.
@@ -293,14 +314,48 @@ func (c *JabberConnector) GetBridgeInfoVersion() (info, capabilities int) {
 
 // jabberLoginProcess implements LoginProcess and LoginProcessUserInput for JID+password auth.
 type jabberLoginProcess struct {
-	conn *JabberConnector
-	user *bridgev2.User
+	conn         *JabberConnector
+	user         *bridgev2.User
+	customServer bool // the password-server flow (asks for a server override)
+}
+
+// buildLoginMeta builds the metadata and dial options of a new login. In the custom-server flow the
+// server is required ("auto" clears a stored override); the plain flow keeps any stored override.
+func buildLoginMeta(password, server string, custom bool) (*JabberLoginMeta, dialOptions, error) {
+	meta := &JabberLoginMeta{Password: password}
+	if !custom {
+		return meta, dialOptions{}, nil
+	}
+	if strings.TrimSpace(server) == "" {
+		return nil, dialOptions{}, fmt.Errorf("server is required (use auto for DNS discovery)")
+	}
+	opts, _, err := parseServerOverride(server)
+	if err != nil {
+		return nil, dialOptions{}, err
+	}
+	meta.Server, meta.Port, meta.DirectTLS = opts.Server, opts.Port, opts.DirectTLS
+	meta.serverExplicit = true
+	return meta, opts, nil
 }
 
 func (j *jabberLoginProcess) Start(ctx context.Context) (*bridgev2.LoginStep, error) {
 	prefix := "!jabber"
 	if j.conn.br != nil && j.conn.br.Config != nil && j.conn.br.Config.CommandPrefix != "" {
 		prefix = j.conn.br.Config.CommandPrefix
+	}
+	if j.customServer {
+		return &bridgev2.LoginStep{
+			Type:         bridgev2.LoginStepTypeUserInput,
+			StepID:       "fi.mau.jabber.password_server",
+			Instructions: fmt.Sprintf("Enter your Jabber ID, password and the server to connect to. You can send them in one message: `%s login password-server <jid> <password> <server>`.\n\nAfter you submit, the bot will connect to your XMPP server; this can take 1–2 minutes—please wait for a response.", prefix),
+			UserInputParams: &bridgev2.LoginUserInputParams{
+				Fields: []bridgev2.LoginInputDataField{
+					{Type: bridgev2.LoginInputFieldTypeUsername, ID: "jid", Name: "Jabber ID (JID)", Description: "Your full JID, e.g. user@example.com"},
+					{Type: bridgev2.LoginInputFieldTypePassword, ID: "password", Name: "Password", Description: "Your Jabber account password"},
+					{Type: bridgev2.LoginInputFieldTypeDomain, ID: "server", Name: "Server", Description: "host, host:port, or tls://host:port for direct TLS; auto to use DNS"},
+				},
+			},
+		}, nil
 	}
 	return &bridgev2.LoginStep{
 		Type:         bridgev2.LoginStepTypeUserInput,
@@ -338,6 +393,11 @@ func (j *jabberLoginProcess) SubmitUserInput(ctx context.Context, input map[stri
 	if password == "" {
 		return nil, fmt.Errorf("password is required")
 	}
+	meta, dialOpts, err := buildLoginMeta(password, input["server"], j.customServer)
+	if err != nil {
+		return nil, err
+	}
+	dialOpts.AllowPrivate = j.conn.allowPrivateServerOverride()
 
 	ctx, span := telemetry.Start(ctx, "bridge.login.submit",
 		trace.WithSpanKind(trace.SpanKindConsumer),
@@ -357,15 +417,25 @@ func (j *jabberLoginProcess) SubmitUserInput(ctx context.Context, input map[stri
 		telemetry.Fail(span, err)
 		return nil, fmt.Errorf("invalid JID format (use user@domain)")
 	}
-	session, err := dialXMPP(dialCtx, origin, password, &log)
+	session, err := dialXMPPFunc(dialCtx, origin, password, dialOpts, &log)
 	if err != nil {
 		telemetry.Fail(span, err)
 		log.Debug().Str("jid", jidStr).Msg("XMPP login: connection or auth failed")
+		hint := ""
+		if !j.customServer {
+			hint = fmt.Sprintf(" If your provider uses a different connection host, use `%s login password-server`.", j.commandPrefix())
+		}
 		if dialCtx.Err() != nil {
-			return nil, fmt.Errorf("connection timed out (is the server reachable?): %w", err)
+			return nil, fmt.Errorf("connection timed out (is the server reachable?): %w.%s", err, hint)
 		}
 		// Do not wrap or echo err to avoid leaking server messages or credentials into logs.
-		return nil, fmt.Errorf("XMPP authentication failed")
+		if _, isSASL := saslCondition(err); isSASL {
+			return nil, fmt.Errorf("XMPP authentication failed")
+		}
+		if strings.Contains(err.Error(), errPrivateOverride) {
+			return nil, fmt.Errorf("%s (allow it with network.allow_private_server_override)", errPrivateOverride)
+		}
+		return nil, fmt.Errorf("could not connect to the XMPP server.%s", hint)
 	}
 	_ = session.Close()
 	log.Debug().Str("jid", jidStr).Msg("XMPP login: verification succeeded, creating bridge login")
@@ -374,7 +444,7 @@ func (j *jabberLoginProcess) SubmitUserInput(ctx context.Context, input map[stri
 	data := &database.UserLogin{
 		ID:         loginID,
 		RemoteName: jidStr,
-		Metadata:   &JabberLoginMeta{Password: password},
+		Metadata:   meta,
 	}
 
 	ul, err := j.user.NewLogin(ctx, data, nil)
@@ -400,129 +470,16 @@ func (j *jabberLoginProcess) SubmitUserInput(ctx context.Context, input map[stri
 
 func (j *jabberLoginProcess) Cancel() {}
 
+func (j *jabberLoginProcess) commandPrefix() string {
+	if j.conn.br != nil && j.conn.br.Config != nil && j.conn.br.Config.CommandPrefix != "" {
+		return j.conn.br.Config.CommandPrefix
+	}
+	return "!jabber"
+}
+
 // parseJID parses a JID string into a jid.JID (bare JID for dialing).
 func parseJID(s string) (jid.JID, error) {
 	return jid.Parse(s)
-}
-
-// saslMechanisms lists SASL mechanisms in preferred order (stronger first).
-// Many servers do not advertise PLAIN; SCRAM-SHA-1/256 are widely supported.
-var saslMechanisms = []sasl.Mechanism{
-	sasl.ScramSha256Plus, sasl.ScramSha256,
-	sasl.ScramSha1Plus, sasl.ScramSha1,
-	sasl.Plain,
-}
-
-const xmppDefaultPort = "5222"
-
-// sortIPsPreferIPv6 returns a copy of the slice with IPv6 addresses first, then IPv4.
-// Used for Phase 2.2 dual-stack: we try IPv6 when the resolver returns both families.
-func sortIPsPreferIPv6(ips []string) []string {
-	var v6, v4 []string
-	for _, ip := range ips {
-		if net.ParseIP(ip).To4() == nil {
-			v6 = append(v6, ip)
-		} else {
-			v4 = append(v4, ip)
-		}
-	}
-	out := make([]string, 0, len(ips))
-	out = append(out, v6...)
-	out = append(out, v4...)
-	return out
-}
-
-// dialXMPP opens an XMPP client session with the given origin and password.
-// Caller must close the session when done.
-// Logs DNS vs TCP vs TLS/SASL timing when log is non-nil so slow steps can be identified.
-func dialXMPP(ctx context.Context, origin jid.JID, password string, log *zerolog.Logger) (*xmpp.Session, error) {
-	t0 := time.Now()
-	domain := origin.Domainpart()
-
-	ctx, dialSpan := telemetry.StartChild(ctx, "xmpp.dial",
-		trace.WithAttributes(attribute.String("server.address", domain)))
-	defer dialSpan.End()
-
-	// Step 1: resolve domain with a bounded timeout
-	_, dnsSpan := telemetry.StartChild(ctx, "xmpp.dial.dns")
-	resolveCtx, resolveCancel := context.WithTimeout(ctx, 15*time.Second)
-	ips, err := net.DefaultResolver.LookupHost(resolveCtx, domain)
-	resolveCancel()
-	if err != nil {
-		telemetry.Fail(dnsSpan, err)
-		dnsSpan.End()
-		telemetry.Fail(dialSpan, err)
-		return nil, fmt.Errorf("DNS lookup %s: %w", domain, err)
-	}
-	dnsSpan.SetAttributes(attribute.Int("ip_count", len(ips)))
-	dnsSpan.End()
-	if len(ips) == 0 {
-		err = fmt.Errorf("DNS lookup %s: no addresses", domain)
-		telemetry.Fail(dialSpan, err)
-		return nil, err
-	}
-	// Phase 2.2: dual-stack — try IPv6 first when both families are present
-	ips = sortIPsPreferIPv6(ips)
-	if log != nil {
-		log.Debug().
-			Dur("dns_ms", time.Since(t0)).
-			Str("domain", domain).
-			Strs("ips", ips).
-			Msg("XMPP login: DNS resolved (dual-stack, IPv6 preferred)")
-	}
-
-	// Step 2: TCP connect (try each resolved IP in order until one works)
-	t1 := time.Now()
-	dialer := net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}
-	var conn net.Conn
-	_, tcpSpan := telemetry.StartChild(ctx, "xmpp.dial.tcp")
-	attempts := 0
-	for _, ip := range ips {
-		attempts++
-		addr := net.JoinHostPort(ip, xmppDefaultPort)
-		conn, err = dialer.DialContext(ctx, "tcp", addr)
-		if err == nil {
-			if log != nil {
-				log.Debug().
-					Dur("tcp_ms", time.Since(t1)).
-					Str("addr", addr).
-					Msg("XMPP login: TCP connected, negotiating TLS and SASL")
-			}
-			break
-		}
-	}
-	tcpSpan.SetAttributes(attribute.Int("tcp.attempts", attempts))
-	if conn == nil {
-		telemetry.Fail(tcpSpan, err)
-		tcpSpan.End()
-		telemetry.Fail(dialSpan, err)
-		return nil, fmt.Errorf("TCP connect %s (tried %d IPs): %w", domain, len(ips), err)
-	}
-	tcpSpan.End()
-
-	// Step 3: XMPP stream (TLS + SASL + bind)
-	features := []xmpp.StreamFeature{
-		xmpp.StartTLS(nil),
-		xmpp.SASL("", password, saslMechanisms...),
-		xmpp.BindResource(),
-	}
-	streamCtx, streamSpan := telemetry.StartChild(ctx, "xmpp.dial.stream")
-	sess, err := xmpp.NewClientSession(streamCtx, origin, conn, features...)
-	if err != nil {
-		telemetry.Fail(streamSpan, err)
-		streamSpan.End()
-		telemetry.Fail(dialSpan, err)
-		conn.Close()
-		return nil, err
-	}
-	streamSpan.End()
-	if log != nil {
-		log.Debug().
-			Dur("stream_ms", time.Since(t1)).
-			Dur("total_ms", time.Since(t0)).
-			Msg("XMPP login: session established")
-	}
-	return sess, nil
 }
 
 // SetMUCPreferredNickForRoom sets the preferred MUC nickname for a room and persists it in portal metadata.

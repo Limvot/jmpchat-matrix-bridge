@@ -12,23 +12,35 @@ import (
 // JabberLoginMeta is stored in UserLogin.Metadata (JSON) so we can reconnect
 // with the same credentials.
 //
-// Server and Port are reserved for a future per-account server/port override and
-// are NOT yet wired into dialXMPP: today the connection host is always derived
-// from the JID's domain (A/AAAA lookup, port 5222). See the SRV/override to-do in
-// README.md before relying on these fields.
+// Server, Port and DirectTLS are the optional per-login server override (set with the
+// password-server login flow). Without a Server the connection host is found by DNS SRV discovery with
+// a fallback to the JID's domain (see xmpp_dial.go).
 type JabberLoginMeta struct {
 	Password       string `json:"password"`
-	Server         string `json:"server,omitempty"`
-	Port           int    `json:"port,omitempty"`
+	Server         string `json:"server,omitempty"`           // override host ("" = DNS SRV discovery)
+	Port           int    `json:"port,omitempty"`             // override port (0 = mode default)
+	DirectTLS      bool   `json:"direct_tls,omitempty"`       // override uses XEP-0368 direct TLS
 	DefaultMUCNick string `json:"default_muc_nick,omitempty"` // Default MUC nickname when no room-specific nick is set
 
 	// Extra is opaque data owned by optional build-tagged features; preserved across builds.
 	Extra map[string]json.RawMessage `json:"extra,omitempty"`
+
+	// serverExplicit is set (never serialized) on the metadata built by the password-server login flow, so
+	// CopyFrom replaces (or clears, with "auto") the stored override; the plain password flow keeps it.
+	serverExplicit bool
+}
+
+// dialOptions returns the stored server override as dial options (AllowPrivate is filled by the caller).
+func (m *JabberLoginMeta) dialOptions() dialOptions {
+	if m == nil {
+		return dialOptions{}
+	}
+	return dialOptions{Server: m.Server, Port: m.Port, DirectTLS: m.DirectTLS}
 }
 
 // CopyFrom implements database.MetaMerger. bridgev2 calls it when a login that already exists is logged
 // in again (instead of replacing the metadata wholesale), with other being the fresh metadata of the new
-// login (which only carries the password). The new password (and Server/Port/DefaultMUCNick when set)
+// login (which only carries the password). The new password (and DefaultMUCNick when set; the server override only when the new login chose one explicitly)
 // win; every Extra key of the existing metadata survives unless other carries the same key. Extra is
 // replaced copy-on-write: readers holding the old map never see it change.
 func (m *JabberLoginMeta) CopyFrom(other any) {
@@ -37,11 +49,8 @@ func (m *JabberLoginMeta) CopyFrom(other any) {
 		return
 	}
 	m.Password = o.Password
-	if o.Server != "" {
-		m.Server = o.Server
-	}
-	if o.Port != 0 {
-		m.Port = o.Port
+	if o.serverExplicit {
+		m.Server, m.Port, m.DirectTLS = o.Server, o.Port, o.DirectTLS
 	}
 	if o.DefaultMUCNick != "" {
 		m.DefaultMUCNick = o.DefaultMUCNick

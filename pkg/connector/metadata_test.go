@@ -25,8 +25,8 @@ func TestJabberLoginMetaCopyFrom(t *testing.T) {
 	}
 
 	// Incoming values override; Extra keys merge copy-on-write.
-	m.CopyFrom(&JabberLoginMeta{Password: "p3", DefaultMUCNick: "n2", Port: 1, Extra: map[string]json.RawMessage{"x": json.RawMessage(`1`), "sip": json.RawMessage(`{"u":2}`)}})
-	if m.DefaultMUCNick != "n2" || m.Port != 1 || len(m.Extra) != 3 || string(m.Extra["sip"]) != `{"u":2}` {
+	m.CopyFrom(&JabberLoginMeta{Password: "p3", DefaultMUCNick: "n2", Extra: map[string]json.RawMessage{"x": json.RawMessage(`1`), "sip": json.RawMessage(`{"u":2}`)}})
+	if m.DefaultMUCNick != "n2" || m.Port != 5222 || len(m.Extra) != 3 || string(m.Extra["sip"]) != `{"u":2}` {
 		t.Fatalf("merge: %+v", m)
 	}
 	if string(oldExtra["sip"]) != `{"u":1}` || len(oldExtra) != 2 {
@@ -44,5 +44,35 @@ func TestJabberLoginMetaCopyFrom(t *testing.T) {
 	n.CopyFrom(n)
 	if n.Password != "b" {
 		t.Fatal("ignored input changed meta")
+	}
+}
+
+func TestCopyFromServerExplicitReplacesAndClears(t *testing.T) {
+	m := &JabberLoginMeta{Password: "a", Server: "old.example.com", Port: 5222}
+	m.CopyFrom(&JabberLoginMeta{Password: "b", Server: "new.example.com", Port: 5223, DirectTLS: true, serverExplicit: true})
+	if m.Server != "new.example.com" || m.Port != 5223 || !m.DirectTLS {
+		t.Fatalf("override not replaced: %+v", m)
+	}
+	m.CopyFrom(&JabberLoginMeta{Password: "c", serverExplicit: true}) // "auto"
+	if m.Server != "" || m.Port != 0 || m.DirectTLS {
+		t.Fatalf("override not cleared: %+v", m)
+	}
+}
+
+func TestCopyFromPlainFlowKeepsOverride(t *testing.T) {
+	m := &JabberLoginMeta{Password: "a", Server: "s.example.com", Port: 5223, DirectTLS: true}
+	m.CopyFrom(&JabberLoginMeta{Password: "b"})
+	if m.Password != "b" || m.Server != "s.example.com" || m.Port != 5223 || !m.DirectTLS {
+		t.Fatalf("override lost: %+v", m)
+	}
+}
+
+func TestMetaDialOptions(t *testing.T) {
+	m := &JabberLoginMeta{Server: "s.example.com", Port: 5223, DirectTLS: true}
+	if got := m.dialOptions(); got != (dialOptions{Server: "s.example.com", Port: 5223, DirectTLS: true}) {
+		t.Fatalf("%+v", got)
+	}
+	if (*JabberLoginMeta)(nil).dialOptions() != (dialOptions{}) {
+		t.Fatal("nil meta")
 	}
 }
