@@ -12,12 +12,12 @@ import (
 
 	"github.com/rs/zerolog"
 	"go.mau.fi/util/configupgrade"
-	"mellium.im/xmpp/jid"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/bridgev2/networkid"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/trace"
+	"mellium.im/xmpp/jid"
 
 	"github.com/williamkray/jmpchat-matrix-bridge/pkg/telemetry"
 )
@@ -59,11 +59,11 @@ type BackfillConfig struct {
 // JabberConnector implements the bridgev2 NetworkConnector interface for
 // the Matrix-Jabber (XMPP) bridge.
 type JabberConnector struct {
-	br                  *bridgev2.Bridge
-	networkConfig       *JabberConfig  // set from main after LoadConfig; bridge only has BridgeConfig
-	backfillConfig      *BackfillConfig // set from main from config.backfill
-	deliveryReceipts bool // whether to send read receipts when messages are bridged (matrix.delivery_receipts)
-	appServiceID     string // appservice.id from config, used in ghost display names (e.g. "user@example.com (cheogram)")
+	br               *bridgev2.Bridge
+	networkConfig    *JabberConfig   // set from main after LoadConfig; bridge only has BridgeConfig
+	backfillConfig   *BackfillConfig // set from main from config.backfill
+	deliveryReceipts bool            // whether to send read receipts when messages are bridged (matrix.delivery_receipts)
+	appServiceID     string          // appservice.id from config, used in ghost display names (e.g. "user@example.com (cheogram)")
 
 	extnOnce sync.Once
 	extn     connectorExtension // optional build-tagged extension (nil in the default build)
@@ -218,11 +218,11 @@ func (c *JabberConnector) Start(ctx context.Context) error {
 // GetName returns bridge metadata for m.bridge and example config.
 func (c *JabberConnector) GetName() bridgev2.BridgeName {
 	return bridgev2.BridgeName{
-		DisplayName:         "Jabber",
-		NetworkURL:          "https://xmpp.org/",
-		NetworkID:           "jabber",
-		BeeperBridgeType:    "github.com/williamkray/jmpchat-matrix-bridge",
-		DefaultPort:         29318, // mau.fi/ports or any free port
+		DisplayName:          "Jabber",
+		NetworkURL:           "https://xmpp.org/",
+		NetworkID:            "jabber",
+		BeeperBridgeType:     "github.com/williamkray/jmpchat-matrix-bridge",
+		DefaultPort:          29318, // mau.fi/ports or any free port
 		DefaultCommandPrefix: "!jabber",
 	}
 }

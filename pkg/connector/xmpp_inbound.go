@@ -16,13 +16,6 @@ import (
 	"github.com/rs/zerolog"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
-	"mellium.im/xmpp"
-	"mellium.im/xmpp/jid"
-	"mellium.im/xmpp/mux"
-	"mellium.im/xmpp/ping"
-	"mellium.im/xmpp/roster"
-	"mellium.im/xmpp/stanza"
-	"mellium.im/xmlstream"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/bridgev2/networkid"
@@ -30,6 +23,13 @@ import (
 	"maunium.net/go/mautrix/bridgev2/status"
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
+	"mellium.im/xmlstream"
+	"mellium.im/xmpp"
+	"mellium.im/xmpp/jid"
+	"mellium.im/xmpp/mux"
+	"mellium.im/xmpp/ping"
+	"mellium.im/xmpp/roster"
+	"mellium.im/xmpp/stanza"
 
 	"github.com/williamkray/jmpchat-matrix-bridge/pkg/telemetry"
 )
@@ -370,7 +370,7 @@ func (x *xmppClient) handleMessageWithOOB(t xmlstream.TokenReadEncoder, start *x
 			x.handleInboundCorrection(correction{
 				claim:         senderClaim{channel: retractChanLive, msgType: attrValue(start.Attr, "type"), fromFull: from},
 				target:        ids.Extras.Replace,
-				encrypted: ids.Extras.Encryption != "",
+				encrypted:     ids.Extras.Encryption != "",
 				corrID:        firstNonEmpty(attrValue(start.Attr, "id"), ids.OriginID),
 				body:          body,
 				replyID:       replyID,
@@ -459,7 +459,7 @@ func (x *xmppClient) handleMessageWithOOB(t xmlstream.TokenReadEncoder, start *x
 				body:           "", // Reactions don't have body text
 				oobURL:         "",
 				replyID:        "",
-				reactionTarget: reactionTarget, // XEP-0444 reaction target message ID
+				reactionTarget: reactionTarget,  // XEP-0444 reaction target message ID
 				reactionEmojis: []string{emoji}, // Single emoji per event
 				timestamp:      time.Now(),
 				x:              x, // Store reference to xmppClient for database access
@@ -477,8 +477,8 @@ func (x *xmppClient) handleMessageWithOOB(t xmlstream.TokenReadEncoder, start *x
 			oobURL:         oobURL,
 			replyID:        replyID, // XEP-0461 reply ID (XMPP message ID being replied to)
 			replyFallback:  ids.ReplyFallback,
-			reactionTarget: reactionTarget, // XEP-0444 reaction target message ID (empty for non-reactions)
-			reactionEmojis: reactionEmojis, // XEP-0444 reaction emojis (empty for non-reactions)
+			reactionTarget: reactionTarget,                    // XEP-0444 reaction target message ID (empty for non-reactions)
+			reactionEmojis: reactionEmojis,                    // XEP-0444 reaction emojis (empty for non-reactions)
 			stanzaID:       ids.stanzaIDBy(string(x.loginID)), // archive id assigned by our own server (untrusted `by` ignored)
 			originID:       ids.OriginID,
 			timestamp:      time.Now(),
@@ -617,7 +617,7 @@ func (x *xmppClient) handleGroupchatWithOOB(t xmlstream.TokenReadEncoder, start 
 		x.handleInboundCorrection(correction{
 			claim:         senderClaim{channel: retractChanLive, groupchat: true, msgType: "groupchat", fromFull: from, occupantID: ids.OccupantID},
 			target:        ids.Extras.Replace,
-			encrypted: ids.Extras.Encryption != "",
+			encrypted:     ids.Extras.Encryption != "",
 			corrID:        firstNonEmpty(attrValue(start.Attr, "id"), ids.OriginID),
 			body:          body,
 			replyID:       replyID,
@@ -1071,32 +1071,32 @@ type jabberRemoteMessage struct {
 	sender         bridgev2.EventSender
 	id             networkid.MessageID
 	body           string
-	oobURL         string   // XEP-0066 OOB media URL when present
-	replyID        string   // XEP-0461 reply ID (XMPP message ID being replied to)
-	reactionTarget string   // XEP-0444 reaction target message ID
-	reactionEmojis []string // XEP-0444 reaction emojis
+	oobURL         string        // XEP-0066 OOB media URL when present
+	replyID        string        // XEP-0461 reply ID (XMPP message ID being replied to)
+	reactionTarget string        // XEP-0444 reaction target message ID
+	reactionEmojis []string      // XEP-0444 reaction emojis
 	replyFallback  replyFallback // XEP-0428 fallback range of the reply quote (offsets in body code points)
 	groupchat      bool          // the event came from a groupchat stanza (reply/reaction ids are room stanza-ids)
 	// Stable ids stored in MessageMetadata (see dbMeta). stanzaID is only ever set from a stanza-id
 	// whose `by` is a trusted entity (room for groupchat, our account for 1:1 and MAM).
 	stanzaID       string
 	originID       string
-	occupantID     string // XEP-0421, groupchat only
-	backfillSource string // "mam" for events that came out of the archive
-	encrypted      string // encrypted message kind (encKind*); body and oobURL were cleared, a notice is bridged
-	markable       bool   // the message carried XEP-0333 <markable/> (stored in MessageMetadata.Markable)
+	occupantID     string          // XEP-0421, groupchat only
+	backfillSource string          // "mam" for events that came out of the archive
+	encrypted      string          // encrypted message kind (encKind*); body and oobURL were cleared, a notice is bridged
+	markable       bool            // the message carried XEP-0333 <markable/> (stored in MessageMetadata.Markable)
 	receipt        *receiptRequest // XEP-0184 request to answer once the message is bridged (live 1:1 only)
 	timestamp      time.Time
-	x              *xmppClient // Reference to xmppClient for database access
+	x              *xmppClient       // Reference to xmppClient for database access
 	spanCtx        trace.SpanContext // trace context set by queueRemoteEvent before queueing (zero when tracing is off)
 }
 
 var (
-	_ bridgev2.RemoteMessage    = (*jabberRemoteMessage)(nil)
-	_ bridgev2.RemoteReaction   = (*jabberRemoteMessage)(nil)
-	_ bridgev2.RemoteReactionRemove = (*jabberRemoteMessage)(nil)
+	_ bridgev2.RemoteMessage                  = (*jabberRemoteMessage)(nil)
+	_ bridgev2.RemoteReaction                 = (*jabberRemoteMessage)(nil)
+	_ bridgev2.RemoteReactionRemove           = (*jabberRemoteMessage)(nil)
 	_ bridgev2.RemoteEventWithContextMutation = (*jabberRemoteMessage)(nil)
-	_ bridgev2.RemotePostHandler = (*jabberRemoteMessage)(nil)
+	_ bridgev2.RemotePostHandler              = (*jabberRemoteMessage)(nil)
 )
 
 // parseBodyReaction detects body-based reaction format used by some clients (e.g. "message-id🥳> quoted text").
@@ -1182,9 +1182,9 @@ func (m *jabberRemoteMessage) GetType() bridgev2.RemoteEventType {
 	return bridgev2.RemoteEventMessage
 }
 
-func (m *jabberRemoteMessage) GetPortalKey() networkid.PortalKey  { return m.portalKey }
+func (m *jabberRemoteMessage) GetPortalKey() networkid.PortalKey { return m.portalKey }
 func (m *jabberRemoteMessage) GetSender() bridgev2.EventSender   { return m.sender }
-func (m *jabberRemoteMessage) GetID() networkid.MessageID         { return m.id }
+func (m *jabberRemoteMessage) GetID() networkid.MessageID        { return m.id }
 func (m *jabberRemoteMessage) AddLogContext(c zerolog.Context) zerolog.Context {
 	return c.Str("message_id", string(m.id))
 }
@@ -1542,12 +1542,12 @@ func makeMediaPart(fileName string, msgType event.MessageType, mxcURL id.Content
 		}
 	}
 	content := &event.MessageEventContent{
-		MsgType:   msgType,
-		Body:      displayBody,
-		FileName:  fileName,
-		URL:       mxcURL,
-		File:      file,
-		Info:      &event.FileInfo{MimeType: mimeType, Size: size},
+		MsgType:  msgType,
+		Body:     displayBody,
+		FileName: fileName,
+		URL:      mxcURL,
+		File:     file,
+		Info:     &event.FileInfo{MimeType: mimeType, Size: size},
 	}
 	return &bridgev2.ConvertedMessage{
 		Parts: []*bridgev2.ConvertedMessagePart{{
@@ -1650,7 +1650,7 @@ func isLikelyFileAttachment(urlStr string, mimeType string, fileName string) boo
 			}
 		}
 	}
-	
+
 	// Check if fileName has a file extension
 	if fileName != "" && fileName != "." && fileName != "file" {
 		ext := strings.ToLower(path.Ext(fileName))
@@ -1658,7 +1658,7 @@ func isLikelyFileAttachment(urlStr string, mimeType string, fileName string) boo
 			return true
 		}
 	}
-	
+
 	// Check Content-Type - exclude web page types
 	webPageTypes := []string{"text/html", "text/plain", "application/json", "application/xml",
 		"text/xml", "application/xhtml+xml", "text/css", "application/javascript",
@@ -1668,7 +1668,7 @@ func isLikelyFileAttachment(urlStr string, mimeType string, fileName string) boo
 			return false
 		}
 	}
-	
+
 	// If Content-Type indicates it's a file type (image, video, audio, or application/octet-stream),
 	// treat it as a file attachment
 	if strings.HasPrefix(mimeType, "image/") ||
@@ -1678,9 +1678,8 @@ func isLikelyFileAttachment(urlStr string, mimeType string, fileName string) boo
 		strings.HasPrefix(mimeType, "application/") && !strings.Contains(mimeType, "json") && !strings.Contains(mimeType, "xml") {
 		return true
 	}
-	
+
 	// Default: if we can't determine, don't treat as file attachment
 	// This prevents web pages from being uploaded as attachments
 	return false
 }
-

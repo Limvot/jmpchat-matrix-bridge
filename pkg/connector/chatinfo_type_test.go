@@ -11,12 +11,12 @@ import (
 
 func TestIsMUCJIDHeuristic(t *testing.T) {
 	for jidStr, want := range map[string]bool{
-		"room@conference.example.com":  true,
-		"room@muc.example.com":         true,
-		"room@groups.example.com": true,
-		"bob@example.com":              false,
-		"+15551230001@cheogram.com":    false,
-		"groups@example.com":           false,
+		"room@conference.example.com": true,
+		"room@muc.example.com":        true,
+		"room@groups.example.com":     true,
+		"bob@example.com":             false,
+		"+15551230001@cheogram.com":   false,
+		"groups@example.com":          false,
 	} {
 		if got := isMUCJID(jidStr); got != want {
 			t.Errorf("isMUCJID(%q) = %v, want %v", jidStr, got, want)

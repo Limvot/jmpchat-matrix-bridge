@@ -23,16 +23,16 @@ var jabberCaps = &event.RoomFeatures{
 				"image/*": event.CapLevelFullySupported,
 				"*/*":     event.CapLevelFullySupported,
 			},
-			MaxSize:          50 * 1024 * 1024,
-			Caption:          event.CapLevelFullySupported,
+			MaxSize: 50 * 1024 * 1024,
+			Caption: event.CapLevelFullySupported,
 		},
 		event.MsgVideo: {
 			MimeTypes: map[string]event.CapabilitySupportLevel{
 				"video/*": event.CapLevelFullySupported,
 				"*/*":     event.CapLevelFullySupported,
 			},
-			MaxSize:          50 * 1024 * 1024,
-			Caption:          event.CapLevelFullySupported,
+			MaxSize: 50 * 1024 * 1024,
+			Caption: event.CapLevelFullySupported,
 		},
 		event.MsgAudio: {
 			MimeTypes: map[string]event.CapabilitySupportLevel{
@@ -45,8 +45,8 @@ var jabberCaps = &event.RoomFeatures{
 			MimeTypes: map[string]event.CapabilitySupportLevel{
 				"*/*": event.CapLevelFullySupported,
 			},
-			MaxSize:          50 * 1024 * 1024,
-			Caption:          event.CapLevelFullySupported,
+			MaxSize: 50 * 1024 * 1024,
+			Caption: event.CapLevelFullySupported,
 		},
 	},
 	Reply:  event.CapLevelFullySupported,

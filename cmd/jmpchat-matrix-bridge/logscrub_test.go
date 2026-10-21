@@ -68,7 +68,10 @@ type levelRecorder struct {
 	data  []byte
 }
 
-func (l *levelRecorder) Write(p []byte) (int, error) { l.data = append([]byte{}, p...); return len(p), nil }
+func (l *levelRecorder) Write(p []byte) (int, error) {
+	l.data = append([]byte{}, p...)
+	return len(p), nil
+}
 func (l *levelRecorder) WriteLevel(lv zerolog.Level, p []byte) (int, error) {
 	l.level = lv
 	return l.Write(p)

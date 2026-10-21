@@ -72,9 +72,9 @@ type typingRecord struct {
 // signalState is per session (reset in Connect).
 type signalState struct {
 	mu             sync.Mutex
-	chatStatePeers map[string]struct{}     // lower bare JIDs that sent us any XEP-0085 state this session
-	typingSent     map[string]typingRecord // portal ID -> last state sent
-	displayedSent  map[string]string       // portal ID -> last displayed ref sent
+	chatStatePeers map[string]struct{}          // lower bare JIDs that sent us any XEP-0085 state this session
+	typingSent     map[string]typingRecord      // portal ID -> last state sent
+	displayedSent  map[string]string            // portal ID -> last displayed ref sent
 	mucPending     map[string]*mucPendingMarker // portal ID -> the one pending debounced MUC marker
 }
 

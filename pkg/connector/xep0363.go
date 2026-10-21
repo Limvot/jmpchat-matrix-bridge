@@ -8,8 +8,8 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/xml"
-	"fmt"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -17,16 +17,16 @@ import (
 	"sync"
 	"time"
 
+	"mellium.im/xmlstream"
 	"mellium.im/xmpp"
 	"mellium.im/xmpp/jid"
 	"mellium.im/xmpp/stanza"
-	"mellium.im/xmlstream"
 )
 
 const (
-	xep0363NS           = "urn:xmpp:http:upload:0"
-	slotRequestTimeout  = 15 * time.Second
-	uploadHTTPTimeout   = 60 * time.Second
+	xep0363NS          = "urn:xmpp:http:upload:0"
+	slotRequestTimeout = 15 * time.Second
+	uploadHTTPTimeout  = 60 * time.Second
 )
 
 // newStanzaID returns a unique stanza ID for IQ requests.
@@ -40,9 +40,9 @@ func newStanzaID() string {
 
 // slotResult holds the result of an XEP-0363 slot request.
 type slotResult struct {
-	PutURL string            // URL for HTTP PUT
+	PutURL     string // URL for HTTP PUT
 	PutHeaders map[string]string
-	GetURL string            // Public URL to use in the message
+	GetURL     string // Public URL to use in the message
 }
 
 // slotResponse is used to parse the IQ result payload.

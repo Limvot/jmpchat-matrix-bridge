@@ -11,8 +11,8 @@ import (
 
 	"github.com/rs/zerolog"
 	"go.opentelemetry.io/otel/attribute"
-	"mellium.im/xmlstream"
 	"maunium.net/go/mautrix/bridgev2/networkid"
+	"mellium.im/xmlstream"
 )
 
 const carbonsNS = "urn:xmpp:carbons:2"
@@ -50,7 +50,7 @@ func parseInnerMessageFromCarbon(t xmlstream.TokenReadEncoder) (from, to, typeAt
 	depth := 0
 	var bodyBuf strings.Builder
 	bodyDepth := 0 // depth of the direct-child <body> being read; 0 when not inside one
-	msgDepth := 0 // depth of the first inner <message>; its direct children carry the XEP-0359 ids
+	msgDepth := 0  // depth of the first inner <message>; its direct children carry the XEP-0359 ids
 	for {
 		tok, err := t.Token()
 		if err != nil {
@@ -142,14 +142,14 @@ func (x *xmppClient) handleCarbonSent(t xmlstream.TokenReadEncoder, outer *xml.S
 	if ids.Extras.Replace != "" {
 		if toBare := strings.ToLower(bareJID(to)); toBare != "" && typeAttr != "groupchat" && body != "" {
 			x.handleInboundCorrection(correction{
-				claim:    senderClaim{channel: retractChanCarbonSent, msgType: typeAttr, fromFull: from},
-				target:   ids.Extras.Replace,
+				claim:     senderClaim{channel: retractChanCarbonSent, msgType: typeAttr, fromFull: from},
+				target:    ids.Extras.Replace,
 				encrypted: ids.Extras.Encryption != "",
-				corrID:   firstNonEmpty(id, ids.OriginID),
-				body:     body,
-				hasOOB:   false,
-				senderID: string(x.loginID),
-				ts:       time.Now(),
+				corrID:    firstNonEmpty(id, ids.OriginID),
+				body:      body,
+				hasOOB:    false,
+				senderID:  string(x.loginID),
+				ts:        time.Now(),
 			}, networkid.PortalKey{ID: networkid.PortalID(toBare), Receiver: x.loginID}, x.makeEventSender(string(x.loginID)))
 		}
 		return nil
@@ -246,13 +246,13 @@ func (x *xmppClient) handleCarbonReceived(t xmlstream.TokenReadEncoder, outer *x
 	if ids.Extras.Replace != "" {
 		if fromBare := bareJID(from); fromBare != "" && typeAttr != "groupchat" && body != "" {
 			x.handleInboundCorrection(correction{
-				claim:    senderClaim{channel: retractChanCarbonReceived, msgType: typeAttr, fromFull: from},
-				target:   ids.Extras.Replace,
+				claim:     senderClaim{channel: retractChanCarbonReceived, msgType: typeAttr, fromFull: from},
+				target:    ids.Extras.Replace,
 				encrypted: ids.Extras.Encryption != "",
-				corrID:   firstNonEmpty(id, ids.OriginID),
-				body:     body,
-				senderID: fromBare,
-				ts:       time.Now(),
+				corrID:    firstNonEmpty(id, ids.OriginID),
+				body:      body,
+				senderID:  fromBare,
+				ts:        time.Now(),
 			}, networkid.PortalKey{ID: networkid.PortalID(strings.ToLower(fromBare)), Receiver: x.loginID}, x.makeEventSender(fromBare))
 		}
 		return nil

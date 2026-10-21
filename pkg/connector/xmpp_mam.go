@@ -16,11 +16,11 @@ import (
 	"github.com/rs/xid"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
-	"mellium.im/xmpp/stanza"
-	"mellium.im/xmlstream"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/event"
+	"mellium.im/xmlstream"
+	"mellium.im/xmpp/stanza"
 
 	"github.com/williamkray/jmpchat-matrix-bridge/pkg/telemetry"
 )
@@ -41,10 +41,10 @@ type mamPendingEntry struct {
 }
 
 type mamResultItem struct {
-	From      string
-	To        string
-	Type      string
-	StanzaID  string // inner message `id` attribute (or a generated xmp: id)
+	From     string
+	To       string
+	Type     string
+	StanzaID string // inner message `id` attribute (or a generated xmp: id)
 	// ArchiveID is the <result id> (the archive's stanza-id, assigned by our own server); OriginID is
 	// the inner XEP-0359 origin-id. Both are only populated for results that passed the outer-from check.
 	ArchiveID string
@@ -148,7 +148,7 @@ func (x *xmppClient) handleMAMResult(t xmlstream.TokenReadEncoder, start *xml.St
 	var ids messageIDs
 	var bodyBuf strings.Builder
 	bodyDepth := 0 // depth of the direct-child <body> being read; 0 when not inside one
-	msgDepth := 0 // depth of the first inner <message>; its direct children carry the XEP-0359 ids
+	msgDepth := 0  // depth of the first inner <message>; its direct children carry the XEP-0359 ids
 	depth := 1
 	for depth > 0 {
 		tok, err := t.Token()
@@ -454,7 +454,7 @@ func (x *xmppClient) FetchMessages(ctx context.Context, params bridgev2.FetchMes
 		}
 		stanzaID, originID := item.stableIDs()
 		content := mamBackfillContent(item)
-		cm :=&bridgev2.ConvertedMessage{
+		cm := &bridgev2.ConvertedMessage{
 			Parts: []*bridgev2.ConvertedMessagePart{{
 				Type:    event.EventMessage,
 				Content: content,
@@ -478,10 +478,10 @@ func (x *xmppClient) FetchMessages(ctx context.Context, params bridgev2.FetchMes
 	}
 
 	return &bridgev2.FetchMessagesResponse{
-		Messages:  messages,
-		HasMore:   hasMore,
-		Forward:   params.Forward,
-		MarkRead:  false,
+		Messages: messages,
+		HasMore:  hasMore,
+		Forward:  params.Forward,
+		MarkRead: false,
 	}, nil
 }
 

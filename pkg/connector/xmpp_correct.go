@@ -34,7 +34,7 @@ type correction struct {
 	replyID       string
 	replyFallback replyFallback
 	hasOOB        bool
-	encrypted     bool // the correction payload is encrypted: the body is only a fallback text, never applied
+	encrypted     bool   // the correction payload is encrypted: the body is only a fallback text, never applied
 	senderID      string // sender id as stored on rows (bare JID / room/nick / login id)
 	ts            time.Time
 }

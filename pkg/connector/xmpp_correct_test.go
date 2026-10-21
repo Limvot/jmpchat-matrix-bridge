@@ -113,13 +113,15 @@ func (f *fakeCorrEnv) findByRef(_ context.Context, _ networkid.PortalKey, ref st
 	return f.byRef[ref], f.findErr
 }
 func (f *fakeCorrEnv) facts(context.Context, *bridgev2.Portal) portalFacts { return f.pf }
-func (f *fakeCorrEnv) kvGet(_ context.Context, k database.Key) string       { return f.kv[k] }
-func (f *fakeCorrEnv) kvSet(_ context.Context, k database.Key, v string)    { f.kv[k] = v }
+func (f *fakeCorrEnv) kvGet(_ context.Context, k database.Key) string      { return f.kv[k] }
+func (f *fakeCorrEnv) kvSet(_ context.Context, k database.Key, v string)   { f.kv[k] = v }
 func (f *fakeCorrEnv) isRetracted(context.Context, networkid.PortalID, retractedSender, ...string) bool {
 	return f.retracted
 }
-func (f *fakeCorrEnv) bodyText(_ context.Context, _ *bridgev2.Portal, c correction) string { return c.body }
-func (f *fakeCorrEnv) log(context.Context) *zerolog.Logger                                  { return &f.lg }
+func (f *fakeCorrEnv) bodyText(_ context.Context, _ *bridgev2.Portal, c correction) string {
+	return c.body
+}
+func (f *fakeCorrEnv) log(context.Context) *zerolog.Logger { return &f.lg }
 
 func dmFacts() portalFacts { return portalFacts{key: dmPortal(), loginID: retractTestLogin} }
 func mucFacts() portalFacts {
@@ -193,12 +195,12 @@ func TestCorrectionCarbonReceived(t *testing.T) {
 
 func mucCorrection(from, occ, target, corrID string) correction {
 	return correction{
-		claim:      senderClaim{channel: retractChanLive, groupchat: true, msgType: "groupchat", fromFull: from, occupantID: occ},
-		target:     target,
-		corrID:     corrID,
-		body:       "fixed",
-		senderID:   from,
-		ts:         time.Unix(100, 0),
+		claim:    senderClaim{channel: retractChanLive, groupchat: true, msgType: "groupchat", fromFull: from, occupantID: occ},
+		target:   target,
+		corrID:   corrID,
+		body:     "fixed",
+		senderID: from,
+		ts:       time.Unix(100, 0),
 	}
 }
 
@@ -515,8 +517,8 @@ func TestFoldBatchCorrections(t *testing.T) {
 		corrItem("m1", "bob@example.com/p", "", "first", 10),
 		corrItem("c1", "bob@example.com/p", "m1", "second", 20),
 		corrItem("m2", "bob@example.com/p", "", "untouched", 11),
-		corrItem("c3", "mallory@example.com/p", "m2", "hijack", 40),  // other sender: ignored
-		corrItem("c4", "bob@example.com/p", "gone", "orphan", 41),    // original not in the batch: dropped
+		corrItem("c3", "mallory@example.com/p", "m2", "hijack", 40), // other sender: ignored
+		corrItem("c4", "bob@example.com/p", "gone", "orphan", 41),   // original not in the batch: dropped
 		corrItem("m3", "me@example.com/l", "", "mine", 12),
 		corrItem("c5", "me@example.com/l", "m3", "mine fixed", 50),
 		corrItem("c6", "me@example.com/l", "m3", "mine fixed older", 45), // newest by timestamp wins

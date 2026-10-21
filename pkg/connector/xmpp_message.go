@@ -10,10 +10,10 @@ import (
 	"github.com/rs/zerolog"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
+	"mellium.im/xmlstream"
 	"mellium.im/xmpp"
 	"mellium.im/xmpp/jid"
 	"mellium.im/xmpp/stanza"
-	"mellium.im/xmlstream"
 
 	"github.com/williamkray/jmpchat-matrix-bridge/pkg/telemetry"
 )
@@ -90,7 +90,7 @@ func reactionsReader(targetMessageID string, emojis []string) xml.TokenReader {
 		Attr: attrs,
 	}
 	reactionsEnd := xml.EndElement{Name: xml.Name{Space: reactionsNS, Local: "reactions"}}
-	
+
 	var readers []xml.TokenReader
 	readers = append(readers, xmlstream.Token(reactionsStart))
 	for _, emoji := range emojis {
@@ -240,7 +240,7 @@ func sendXMPPOut(ctx context.Context, sess *xmpp.Session, m outMessage) (string,
 		Str("to_jid", to.String()).
 		Str("msg_type", string(msgType)).
 		Msg("DEBUG: sendXMPPMessageWithOOB called")
-	
+
 	// According to XEP-0066, when OOB is present, body should contain URL as fallback
 	// Use user caption if provided, otherwise use OOB URL in body
 	finalBody := body
@@ -258,7 +258,7 @@ func sendXMPPOut(ctx context.Context, sess *xmpp.Session, m outMessage) (string,
 		finalBody = " "
 		log.Debug().Msg("DEBUG: No OOB and no body, set body to single space")
 	}
-	
+
 	// Generate XMPP message ID for this message (required for XEP-0461 replies)
 	var err error
 	if xmppMsgID == "" {
@@ -272,7 +272,7 @@ func sendXMPPOut(ctx context.Context, sess *xmpp.Session, m outMessage) (string,
 		span.SetAttributes(attribute.String("xmpp.stanza.id", xmppMsgID))
 	}
 	log.Debug().Str("xmpp_msg_id", xmppMsgID).Msg("DEBUG: Generated XMPP message ID")
-	
+
 	if msgType == "" {
 		msgType = stanza.NormalMessage
 	}
@@ -334,7 +334,7 @@ func sendXMPPReactionsID(ctx context.Context, sess *xmpp.Session, to jid.JID, ta
 		Str("to_jid", to.String()).
 		Str("msg_type", string(msgType)).
 		Msg("DEBUG: sendXMPPReactions called")
-	
+
 	// Generate XMPP message ID for this reaction message
 	if xmppMsgID == "" {
 		var err error
@@ -356,14 +356,14 @@ func sendXMPPReactionsID(ctx context.Context, sess *xmpp.Session, to jid.JID, ta
 		Type: msgType,
 		ID:   xmppMsgID,
 	}
-	
+
 	// Build the payload: <reactions> element with all <reaction> children, plus <store> hint
 	payload := xmlstream.MultiReader(
 		reactionsReader(targetMessageID, emojis),
 		storeHintReader(),
 		originIDReader(xmppMsgID),
 	)
-	
+
 	err := sess.Send(ctx, msg.Wrap(payload))
 	if err != nil {
 		telemetry.Fail(span, err)

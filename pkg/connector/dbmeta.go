@@ -78,7 +78,7 @@ func (c *JabberConnector) GetDBMetaTypes() database.MetaTypes {
 		Message: func() any {
 			return &MessageMetadata{}
 		},
-		Reaction:   nil,
+		Reaction:  nil,
 		UserLogin: func() any { return &JabberLoginMeta{} },
 	}
 }

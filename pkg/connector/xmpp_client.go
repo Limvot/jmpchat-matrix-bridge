@@ -18,13 +18,6 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
-	"mellium.im/xmpp"
-	"mellium.im/xmpp/disco"
-	"mellium.im/xmlstream"
-	"mellium.im/xmpp/jid"
-	"mellium.im/xmpp/roster"
-	"mellium.im/xmpp/stanza"
-	"mellium.im/xmpp/upload"
 	"maunium.net/go/mautrix"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/database"
@@ -33,24 +26,31 @@ import (
 	"maunium.net/go/mautrix/bridgev2/status"
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/format"
+	"mellium.im/xmlstream"
+	"mellium.im/xmpp"
+	"mellium.im/xmpp/disco"
+	"mellium.im/xmpp/jid"
+	"mellium.im/xmpp/roster"
+	"mellium.im/xmpp/stanza"
+	"mellium.im/xmpp/upload"
 
 	"github.com/williamkray/jmpchat-matrix-bridge/pkg/telemetry"
 )
 
 var (
-	_ bridgev2.NetworkAPI                        = (*xmppClient)(nil)
-	_ bridgev2.IdentifierResolvingNetworkAPI   = (*xmppClient)(nil)
-	_ bridgev2.ReactionHandlingNetworkAPI       = (*xmppClient)(nil)
-	_ bridgev2.BackfillingNetworkAPI           = (*xmppClient)(nil)
+	_ bridgev2.NetworkAPI                             = (*xmppClient)(nil)
+	_ bridgev2.IdentifierResolvingNetworkAPI          = (*xmppClient)(nil)
+	_ bridgev2.ReactionHandlingNetworkAPI             = (*xmppClient)(nil)
+	_ bridgev2.BackfillingNetworkAPI                  = (*xmppClient)(nil)
 	_ bridgev2.PersonalFilteringCustomizingNetworkAPI = (*xmppClient)(nil)
 )
 
 type xmppClient struct {
-	loginID     networkid.UserLoginID
-	meta        *JabberLoginMeta
-	log         zerolog.Logger
-	login       *bridgev2.UserLogin
-	conn        *JabberConnector
+	loginID networkid.UserLoginID
+	meta    *JabberLoginMeta
+	log     zerolog.Logger
+	login   *bridgev2.UserLogin
+	conn    *JabberConnector
 	// queueHook, when set (tests only), receives remote events instead of the bridgev2 queue.
 	queueHook func(bridgev2.RemoteEvent) bridgev2.EventHandlingResult
 	// noticeHook, when set (tests only), receives portal notices instead of the bridge bot.
@@ -65,20 +65,20 @@ type xmppClient struct {
 	sessionStartedAt atomic.Int64
 	// signalHook, bridgedHook and betweenHook (tests only) replace the signal send, the "row exists"
 	// check after a bridged message and the message window query of read receipts.
-	signalHook  func(ctx context.Context, s outSignal) error
+	signalHook func(ctx context.Context, s outSignal) error
 	// doublePuppetHook (tests only) replaces the "user has a double puppet" check of own read receipts.
 	doublePuppetHook func() bool
-	bridgedHook func(key networkid.PortalKey, id networkid.MessageID) bool
-	betweenHook func(key networkid.PortalKey, start, end time.Time) ([]*database.Message, error)
+	bridgedHook      func(key networkid.PortalKey, id networkid.MessageID) bool
+	betweenHook      func(key networkid.PortalKey, start, end time.Time) ([]*database.Message, error)
 	// statusHook, when set (tests only), receives message statuses instead of the Matrix connector.
 	statusHook func(ms *bridgev2.MessageStatus, info *bridgev2.MessageStatusEventInfo)
 	// rejected dedupes rejection reports per Matrix event (xmpp_error_stanza.go).
 	rejected rejectedReports
 	// mucNoticeHook / mucNickSaveHook / mucSendJoinHook (tests only) replace the MUC nick notices,
 	// the auto-nick persistence and the join presence send.
-	mucNoticeHook    func(roomBare, text string)
-	mucNickSaveHook  func(roomBare, base, nick string) error
-	mucSendJoinHook  func(roomBare, nick string) error
+	mucNoticeHook     func(roomBare, text string)
+	mucNickSaveHook   func(roomBare, base, nick string) error
+	mucSendJoinHook   func(roomBare, nick string) error
 	mucJoinTokensHook func(roomBare string, toks []xml.Token) // the join payload (incl. the bookmark password)
 	// mucJoinHistHook, mucLeftHook, mucRejoinPortalsHook and mucNewestMsgHook (tests only) observe the
 	// join history request, replace the "left" flag persistence, the portal listing and the newest
@@ -92,8 +92,8 @@ type xmppClient struct {
 	mucJoinTracks map[string]*mucJoinTrack
 	// mucJoinGen counts sessions for join state (bumped by resetMUCJoinState); guarded by mucPendingJoinMu.
 	mucJoinGen uint64
-	mu          sync.Mutex
-	session     *xmpp.Session
+	mu         sync.Mutex
+	session    *xmpp.Session
 	// Connection health (xmpp_conn_health.go). authFailed is set after a final SASL failure and only
 	// cleared by a new client (re-login); authFailures/authCond are guarded by mu.
 	authFailed      atomic.Bool
@@ -116,8 +116,8 @@ type xmppClient struct {
 	// sessionCancel cancels the context shared by this session's background goroutines (roster
 	// sync/backfill, MAM catch-up loop). Guarded by mu; see endSessionLocked.
 	sessionCancel context.CancelFunc
-	uploadJID   *jid.JID // Cached upload service JID (discovered via common subdomains)
-	uploadJIDMu sync.Mutex
+	uploadJID     *jid.JID // Cached upload service JID (discovered via common subdomains)
+	uploadJIDMu   sync.Mutex
 	// roster holds the latest fetched XMPP roster for this login, keyed by bare JID.
 	// Used to map Jabber contact names to Matrix ghost display names and DM room names.
 	roster map[string]string
@@ -157,9 +157,9 @@ type xmppClient struct {
 	lastBackfillOnView   map[string]time.Time
 	lastBackfillOnViewMu sync.Mutex
 	// carbonsEnableCh receives the result of the carbons enable IQ (nil = success, err = server rejected).
-	carbonsEnableCh   chan error
-	carbonsEnableID   string
-	carbonsEnableMu   sync.Mutex
+	carbonsEnableCh chan error
+	carbonsEnableID string
+	carbonsEnableMu sync.Mutex
 	// reconnectCancel stops ReconnectLoop; set in LoadUserLogin, called in Disconnect (which LogoutRemote uses).
 	reconnectCancel context.CancelFunc
 	// callSessions tracks in-flight XEP-0353 Jingle Message Initiation calls, keyed by session id,
@@ -183,9 +183,9 @@ type xmppClient struct {
 const maxConcurrentAvatarFetches = 4
 
 const (
-	mucFeatureNS       = "http://jabber.org/protocol/muc"
-	mucRoomInfoFormNS  = "http://jabber.org/protocol/muc#roominfo"
-	mucUserNS          = "http://jabber.org/protocol/muc#user"
+	mucFeatureNS      = "http://jabber.org/protocol/muc"
+	mucRoomInfoFormNS = "http://jabber.org/protocol/muc#roominfo"
+	mucUserNS         = "http://jabber.org/protocol/muc#user"
 )
 
 func (x *xmppClient) Connect(ctx context.Context) {
@@ -949,17 +949,17 @@ func (x *xmppClient) SearchRoster(ctx context.Context, query string) ([]RosterCo
 	if query == "" {
 		return nil, fmt.Errorf("query cannot be empty")
 	}
-	
+
 	// Ensure roster is synced before searching
 	x.ensureRosterSynced(ctx)
-	
+
 	x.rosterMu.RLock()
 	defer x.rosterMu.RUnlock()
-	
+
 	if x.roster == nil || len(x.roster) == 0 {
 		return []RosterContact{}, nil
 	}
-	
+
 	var results []RosterContact
 	for jid, name := range x.roster {
 		jidLower := strings.ToLower(jid)
@@ -972,7 +972,7 @@ func (x *xmppClient) SearchRoster(ctx context.Context, query string) ([]RosterCo
 			})
 		}
 	}
-	
+
 	return results, nil
 }
 
@@ -982,11 +982,11 @@ func (x *xmppClient) ensureRosterSynced(ctx context.Context) {
 	x.rosterMu.RLock()
 	rosterEmpty := !x.rosterLoaded && len(x.roster) == 0
 	x.rosterMu.RUnlock()
-	
+
 	if !rosterEmpty {
 		return
 	}
-	
+
 	// Check if we're connected before attempting sync
 	x.mu.Lock()
 	sess := x.session
@@ -994,7 +994,7 @@ func (x *xmppClient) ensureRosterSynced(ctx context.Context) {
 	if sess == nil {
 		return
 	}
-	
+
 	// Sync roster synchronously so it's available for GetChatInfo
 	x.syncRoster(ctx)
 }
@@ -2143,7 +2143,7 @@ func (x *xmppClient) handleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 			Str("body_len", fmt.Sprintf("%d", len(body))).
 			Bool("has_file", msg.Content.File != nil).
 			Msg("DEBUG: Processing media message - initial values")
-		
+
 		// Matrix encrypted file content has url in content.file.url only (no top-level url).
 		mediaURL := msg.Content.URL
 		if mediaURL == "" && msg.Content.File != nil {
@@ -2152,11 +2152,11 @@ func (x *xmppClient) handleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 		if mediaURL == "" {
 			return nil, bridgev2.WrapErrorInStatus(fmt.Errorf("%w: %s has no URL", bridgev2.ErrUnsupportedMessageType, msg.Content.MsgType)).WithSendNotice(true)
 		}
-		
+
 		// Extract user-provided caption (if any). For OOB messages, we only include actual user text.
 		// Matrix often includes the filename in body for media messages; if body equals filename, treat as no caption.
 		userCaption := strings.TrimSpace(body)
-		
+
 		// Get filename for comparison - check Content.FileName first, then try event content
 		filename := msg.Content.FileName
 		if filename == "" && msg.Event != nil {
@@ -2164,11 +2164,11 @@ func (x *xmppClient) handleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 				filename = mc.FileName
 			}
 		}
-		
+
 		log.Debug().
 			Bool("body_equals_filename", userCaption == filename).
 			Msg("DEBUG: After trimming body, before filename comparison")
-		
+
 		if filename != "" && userCaption == filename {
 			// Body is just the filename (Matrix default), not a user caption
 			log.Debug().Msg("DEBUG: Body equals filename, treating as empty caption")
@@ -2187,7 +2187,7 @@ func (x *xmppClient) handleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 				userCaption = ""
 			}
 		}
-		
+
 		// Fallback caption for when upload fails (includes filename for context)
 		fallbackCaption := userCaption
 		if fallbackCaption == "" {
@@ -2342,7 +2342,7 @@ func (x *xmppClient) handleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 		Str("to_jid", toJID.String()).
 		Str("msg_type", string(msgType)).
 		Msg("DEBUG: About to call sendXMPPMessageWithOOB")
-	
+
 	outMsg := x.withSignalFlags(outMessage{To: toJID, Type: msgType, ID: preID, Body: messageBody, OOBURL: oobURL, ReplyID: replyID, ReplyTo: replyToJID})
 	xmppMsgID, err := sendXMPPOut(ctx, sess, outMsg)
 	if err == nil {
@@ -2354,14 +2354,14 @@ func (x *xmppClient) handleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 		}
 		return nil, bridgev2.WrapErrorInStatus(fmt.Errorf("failed to send XMPP message: %w", err)).WithSendNotice(true)
 	}
-	
+
 	log.Debug().
 		Str("xmpp_msg_id", xmppMsgID).
 		Str("matrix_event_id", string(msg.Event.ID)).
 		Msg("DEBUG: sendXMPPMessageWithOOB completed successfully, storing XMPP message ID in metadata")
 	now := time.Now()
 	id := networkid.MessageID(fmt.Sprintf("matrix:%s", msg.Event.ID))
-	
+
 	// Store XMPP message ID in metadata so replies to Matrix-originated messages work
 	msgMeta := &MessageMetadata{
 		XMPPMessageID: xmppMsgID,
@@ -2384,12 +2384,12 @@ func (x *xmppClient) handleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 
 	resp := &bridgev2.MatrixMessageResponse{
 		DB: &database.Message{
-			Room:       msg.Portal.PortalKey,
-			SenderID:   networkid.UserID(x.loginID),
-			ID:         id,
-			Timestamp:  now,
-			SendTxnID:  msg.InputTransactionID,
-			Metadata:   msgMeta,
+			Room:      msg.Portal.PortalKey,
+			SenderID:  networkid.UserID(x.loginID),
+			ID:        id,
+			Timestamp: now,
+			SendTxnID: msg.InputTransactionID,
+			Metadata:  msgMeta,
 		},
 	}
 	if preID != "" {
@@ -2440,7 +2440,7 @@ func (x *xmppClient) handleMatrixReaction(ctx context.Context, msg *bridgev2.Mat
 	if sess == nil {
 		return nil, fmt.Errorf("not connected to XMPP")
 	}
-	
+
 	toJIDStr := string(msg.Portal.ID)
 	if toJIDStr == "" {
 		return nil, fmt.Errorf("portal has no remote JID")
@@ -2449,7 +2449,7 @@ func (x *xmppClient) handleMatrixReaction(ctx context.Context, msg *bridgev2.Mat
 	if err != nil {
 		return nil, fmt.Errorf("invalid portal JID format: %w", err)
 	}
-	
+
 	// XEP-0444 target id: the room stanza-id in a MUC when known, otherwise the id we sent
 	// (Matrix-originated rows) or the row ID.
 	isMUCPortal := x.portalIsMUC(ctx, msg.Portal)
@@ -2464,7 +2464,7 @@ func (x *xmppClient) handleMatrixReaction(ctx context.Context, msg *bridgev2.Mat
 	if targetMessageID == "" {
 		return nil, fmt.Errorf("could not determine XMPP message ID for reaction target")
 	}
-	
+
 	// Send the reaction using XEP-0444 format. Multiple reactions per user per message:
 	// we only send the new emoji here, so Jabber shows one reaction per user (consistent with
 	// Jabber→Matrix). Future: see README "To-do (unimplemented work)" — multiple reactions per user per message.
@@ -2472,7 +2472,7 @@ func (x *xmppClient) handleMatrixReaction(ctx context.Context, msg *bridgev2.Mat
 	log.Debug().
 		Str("target_message_id", targetMessageID).
 		Msg("DEBUG: Sending Matrix reaction to XMPP using XEP-0444 format")
-	
+
 	// Use groupchat for MUC portals; use chat for 1:1 DMs (matches regular messages and standard 1:1).
 	msgType := stanza.ChatMessage
 	if isMUCPortal {
@@ -2495,7 +2495,7 @@ func (x *xmppClient) handleMatrixReaction(ctx context.Context, msg *bridgev2.Mat
 		}
 		return nil, fmt.Errorf("failed to send reaction to XMPP: %w", err)
 	}
-	
+
 	return &database.Reaction{}, nil
 }
 
