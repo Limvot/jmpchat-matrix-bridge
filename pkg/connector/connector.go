@@ -34,8 +34,14 @@ type JabberConfig struct {
 
 // BackfillConfig holds backfill settings from config.backfill, used by MAM backfill-on-view and full backfill on login / sync-roster.
 type BackfillConfig struct {
-	Enabled            bool `yaml:"enabled"`
-	MaxInitialMessages int  `yaml:"max_initial_messages"`
+	Enabled bool `yaml:"enabled"`
+	// MaxInitialMessages is kept for config compatibility; per-chat backfill is now RSM-paged up
+	// to MaxCatchupMessages instead of "first page of max_initial_messages".
+	MaxInitialMessages int `yaml:"max_initial_messages"`
+	// MaxCatchupMessages bounds how many archived messages a single chat's backfill fetches
+	// (paging through the archive with RSM cursors). The archive is small on this deployment,
+	// so this is effectively "all of it".
+	MaxCatchupMessages int `yaml:"max_catchup_messages"`
 }
 
 // JabberConnector implements the bridgev2 NetworkConnector interface for

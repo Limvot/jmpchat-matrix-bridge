@@ -33,6 +33,7 @@ const (
 	delayNS   = "urn:xmpp:delay"
 	rsmNS     = "http://jabber.org/protocol/rsm"
 	xdataNS   = "jabber:x:data"
+	refNS     = "urn:xmpp:reference:0"
 )
 
 // mamPendingEntry holds the channel and metadata for an in-flight MAM query.
@@ -52,6 +53,10 @@ type mamResultItem struct {
 	ArchiveID string
 	OriginID  string
 	Body      string
+	// OOBURL is the XEP-0066 out-of-band media URL (Cheogram attaches one to every MMS), or the
+	// XEP-0482 media <reference uri=...> when no OOB element is present. Without it backfilled
+	// media only surfaces as a bare link in the body text.
+	OOBURL    string
 	Timestamp time.Time
 	QueryID   string
 	// Retract is set when the archived message is a retraction/moderation (its fallback body is
@@ -156,6 +161,10 @@ func (x *xmppClient) handleMAMResult(t xmlstream.TokenReadEncoder, start *xml.St
 	msgDepth := 0  // depth of the first inner <message>; its direct children carry the XEP-0359 ids
 	bodyDepth := 0 // depth of the inner message's <body> being collected; 0 = not inside one
 	var bodyBuf strings.Builder
+	oobXDepth := 0   // depth of the message's <x xmlns='jabber:x:oob'>; 0 = not inside one
+	oobURLDepth := 0 // depth of the <url> inside the OOB <x>
+	var oobBuf strings.Builder
+	refURL := "" // fallback media URL from <reference uri=...> when there is no OOB element
 	depth := 1
 	for depth > 0 {
 		tok, err := t.Token()
@@ -198,6 +207,22 @@ func (x *xmppClient) handleMAMResult(t xmlstream.TokenReadEncoder, start *xml.St
 			if v.Name.Local == "body" && bodyDepth == 0 && msgDepth > 0 && depth == msgDepth+1 {
 				bodyDepth = depth
 			}
+			// XEP-0066 OOB media URL (Cheogram puts one on every archived MMS) and, as a fallback
+			// for older messages, the XEP-0482/0372 media <reference uri=...>.
+			if msgDepth > 0 && depth == msgDepth+1 {
+				if v.Name.Local == "x" && (v.Name.Space == oobNS || attrValue(v.Attr, "xmlns") == oobNS) && oobXDepth == 0 {
+					oobXDepth = depth
+				}
+				if v.Name.Local == "reference" && refURL == "" &&
+					(v.Name.Space == refNS || attrValue(v.Attr, "xmlns") == refNS) {
+					if uri := attrValue(v.Attr, "uri"); uri != "" {
+						refURL = uri
+					}
+				}
+			}
+			if v.Name.Local == "url" && oobXDepth > 0 && oobURLDepth == 0 && depth == oobXDepth+1 {
+				oobURLDepth = depth
+			}
 			if v.Name.Space == delayNS && v.Name.Local == "delay" {
 				if stamp := attrValue(v.Attr, "stamp"); stamp != "" {
 					// XEP-0082: CCYY-MM-DDThh:mm:ss[.sss]Z
@@ -213,9 +238,18 @@ func (x *xmppClient) handleMAMResult(t xmlstream.TokenReadEncoder, start *xml.St
 			if bodyDepth > 0 {
 				bodyBuf.Write(v)
 			}
+			if oobURLDepth > 0 {
+				oobBuf.Write(v)
+			}
 		case xml.EndElement:
 			if bodyDepth > 0 && depth == bodyDepth {
 				bodyDepth = 0
+			}
+			if oobURLDepth > 0 && depth == oobURLDepth {
+				oobURLDepth = 0
+			}
+			if oobXDepth > 0 && depth == oobXDepth {
+				oobXDepth = 0
 			}
 			depth--
 			if msgDepth > 0 {
@@ -224,6 +258,10 @@ func (x *xmppClient) handleMAMResult(t xmlstream.TokenReadEncoder, start *xml.St
 		}
 	}
 	body := strings.TrimSpace(bodyBuf.String())
+	oobURL := strings.TrimSpace(oobBuf.String())
+	if oobURL == "" {
+		oobURL = refURL
+	}
 	ids.finish()
 	if ids.Retract != nil {
 		body = "" // XEP-0424 fallback text; never bridge it
@@ -240,7 +278,7 @@ func (x *xmppClient) handleMAMResult(t xmlstream.TokenReadEncoder, start *xml.St
 	}
 	sent := x.mam.deliverMessage(queryID, mamResultItem{
 		From: from, To: to, Type: msgType, StanzaID: stanzaID, ArchiveID: archiveID, OriginID: ids.OriginID,
-		Body: body, Timestamp: timestamp, QueryID: queryID,
+		Body: body, OOBURL: oobURL, Timestamp: timestamp, QueryID: queryID,
 		Retract: ids.Retract, Retracted: ids.Tombstone,
 	})
 	if !sent {
@@ -266,8 +304,9 @@ func consumeMAMResult(t xmlstream.TokenReadEncoder) {
 	}
 }
 
-// mamQueryPayload returns a TokenReader for the MAM query element (XEP-0313).
-func mamQueryPayload(queryID, withJID string, start, end *time.Time, max int) xml.TokenReader {
+// mamQueryPayload returns a TokenReader for the MAM query element (XEP-0313). after is the RSM
+// cursor (<result id=...> of the previous page, "" for the first page).
+func mamQueryPayload(queryID, withJID string, start, end *time.Time, max int, after string) xml.TokenReader {
 	qStart := xml.StartElement{
 		Name: xml.Name{Space: mamNS, Local: "query"},
 		Attr: []xml.Attr{{Name: xml.Name{Local: "queryid"}, Value: queryID}},
@@ -298,10 +337,18 @@ func mamQueryPayload(queryID, withJID string, start, end *time.Time, max int) xm
 	formTokens = append(formTokens, xStart.End())
 
 	var rsmTokens []xml.Token
-	if max > 0 {
+	if max > 0 || after != "" {
 		setStart := xml.StartElement{Name: xml.Name{Space: rsmNS, Local: "set"}}
-		maxStart := xml.StartElement{Name: xml.Name{Space: rsmNS, Local: "max"}}
-		rsmTokens = append(rsmTokens, setStart, maxStart, xml.CharData(fmt.Sprintf("%d", max)), maxStart.End(), setStart.End())
+		rsmTokens = append(rsmTokens, setStart)
+		if max > 0 {
+			maxStart := xml.StartElement{Name: xml.Name{Space: rsmNS, Local: "max"}}
+			rsmTokens = append(rsmTokens, maxStart, xml.CharData(fmt.Sprintf("%d", max)), maxStart.End())
+		}
+		if after != "" {
+			afterStart := xml.StartElement{Name: xml.Name{Space: rsmNS, Local: "after"}}
+			rsmTokens = append(rsmTokens, afterStart, xml.CharData(after), afterStart.End())
+		}
+		rsmTokens = append(rsmTokens, setStart.End())
 	}
 
 	readers := make([]xml.TokenReader, 0, 3)
@@ -316,8 +363,9 @@ func mamQueryPayload(queryID, withJID string, start, end *time.Time, max int) xm
 	return xmlstream.MultiReader(readers...)
 }
 
-// fetchMAMItems runs a MAM query and returns the collected items. Used by FetchMessages and by periodic catch-up.
-func (x *xmppClient) fetchMAMItems(ctx context.Context, portalKey networkid.PortalKey, withJID string, start, end time.Time, max int) (items []mamResultItem, err error) {
+// fetchMAMItems runs a single MAM page query (RSM cursor after; "" for the first page) and returns
+// the collected items. Used by FetchMessages and by fetchMAMItemsPaged.
+func (x *xmppClient) fetchMAMItems(ctx context.Context, portalKey networkid.PortalKey, withJID string, start, end time.Time, max int, after string) (items []mamResultItem, err error) {
 	x.mu.Lock()
 	sess := x.session
 	x.mu.Unlock()
@@ -349,7 +397,7 @@ func (x *xmppClient) fetchMAMItems(ctx context.Context, portalKey networkid.Port
 	ch := x.mam.register(queryID, portalKey, true)
 	defer x.mam.closeAndRemove(queryID)
 	iqID := "mam-" + queryID
-	payload := mamQueryPayload(queryID, withJID, &start, &end, max)
+	payload := mamQueryPayload(queryID, withJID, &start, &end, max, after)
 	iq := stanza.IQ{ID: iqID, Type: stanza.SetIQ, To: toJID}
 	if err := sess.Send(ctx, iq.Wrap(payload)); err != nil {
 		return nil, err
@@ -370,6 +418,51 @@ func (x *xmppClient) fetchMAMItems(ctx context.Context, portalKey networkid.Port
 			items = append(items, item)
 		}
 	}
+}
+
+// mamPageSize is the per-request page size. Servers cap MAM pages (prosody: 50 results) and, for a
+// plain RSM <max>, return the OLDEST matching page — so a single query only ever sees the oldest
+// ~50 messages of a chat. fetchMAMItemsPaged walks the archive with RSM after-cursors instead.
+const mamPageSize = 50
+
+// fetchMAMItemsPaged pages through archive results (oldest-first) until the archive is exhausted
+// or maxTotal items have been collected. Partial results are returned on error so callers can
+// still process what arrived before a session died.
+func (x *xmppClient) fetchMAMItemsPaged(ctx context.Context, portalKey networkid.PortalKey, withJID string, start, end time.Time, maxTotal int) ([]mamResultItem, error) {
+	if maxTotal <= 0 {
+		maxTotal = 500
+	}
+	var all []mamResultItem
+	after := ""
+	for page := 0; page < 20; page++ {
+		want := mamPageSize
+		if remaining := maxTotal - len(all); remaining < want {
+			want = remaining
+		}
+		if want <= 0 {
+			break
+		}
+		items, err := x.fetchMAMItems(ctx, portalKey, withJID, start, end, want, after)
+		all = append(all, items...)
+		if err != nil {
+			return all, err
+		}
+		if len(items) < want {
+			break // short page: archive exhausted
+		}
+		lastID := ""
+		for i := len(items) - 1; i >= 0; i-- {
+			if items[i].ArchiveID != "" {
+				lastID = items[i].ArchiveID
+				break
+			}
+		}
+		if lastID == "" {
+			break // nothing to page from
+		}
+		after = lastID
+	}
+	return all, nil
 }
 
 // FetchMessages implements BackfillingNetworkAPI. It uses MAM (XEP-0313) when the server
@@ -428,7 +521,7 @@ func (x *xmppClient) FetchMessages(ctx context.Context, params bridgev2.FetchMes
 		start = end.Add(-365 * 24 * time.Hour)
 	}
 
-	items, err := x.fetchMAMItems(ctx, params.Portal.PortalKey, withJID, start, end, count+1)
+	items, err := x.fetchMAMItems(ctx, params.Portal.PortalKey, withJID, start, end, count+1, "")
 	if err != nil {
 		log.Warn().Err(err).Str("portal_id", portalID).Msg("MAM query failed")
 		telemetry.Fail(span, err)
@@ -473,10 +566,14 @@ func (x *xmppClient) FetchMessages(ctx context.Context, params bridgev2.FetchMes
 			msgID = networkid.MessageID("xmp:" + item.Timestamp.Format("20060102150405.000"))
 		}
 		stanzaID, originID := item.stableIDs()
+		textBody := item.Body
+		if textBody == "" {
+			textBody = item.OOBURL // media-only item; this path is text-only, show the URL
+		}
 		cm := &bridgev2.ConvertedMessage{
 			Parts: []*bridgev2.ConvertedMessagePart{{
 				Type:    event.EventMessage,
-				Content: &event.MessageEventContent{MsgType: event.MsgText, Body: item.Body},
+				Content: &event.MessageEventContent{MsgType: event.MsgText, Body: textBody},
 				DBMetadata: &MessageMetadata{
 					XMPPMessageID:  item.StanzaID,
 					StanzaID:       stanzaID,
@@ -543,9 +640,11 @@ func (x *xmppClient) addPortalIDForMAMCatchUp(portalID string) {
 // runMAMCatchUpOnce runs MAM catch-up for roster contacts and any portal we've seen (e.g. Cheogram groups).
 func (x *xmppClient) runMAMCatchUpOnce(ctx context.Context) {
 	jidSet := make(map[string]struct{})
+	// rosterJIDs (all roster entries), not x.roster (names only): unnamed contacts with a
+	// Matrix room would otherwise never be polled for catch-up.
 	x.rosterMu.RLock()
-	for j := range x.roster {
-		jidSet[strings.ToLower(j)] = struct{}{}
+	for j := range x.rosterJIDs {
+		jidSet[j] = struct{}{}
 	}
 	x.rosterMu.RUnlock()
 	x.knownPortalIDsForMAMMu.Lock()
@@ -606,10 +705,12 @@ func (x *xmppClient) runFullBackfill(ctx context.Context) {
 	if x.login == nil || x.conn.backfillConfig == nil || !x.conn.backfillConfig.Enabled {
 		return
 	}
+	// Iterate rosterJIDs (every roster entry), NOT x.roster (display names only): unnamed
+	// contacts are the majority on this account and were silently never backfilled.
 	x.rosterMu.RLock()
-	jids := make([]string, 0, len(x.roster))
-	for j := range x.roster {
-		jids = append(jids, strings.ToLower(j))
+	jids := make([]string, 0, len(x.rosterJIDs))
+	for j := range x.rosterJIDs {
+		jids = append(jids, j)
 	}
 	x.rosterMu.RUnlock()
 	if len(jids) == 0 {
@@ -621,20 +722,18 @@ func (x *xmppClient) runFullBackfill(ctx context.Context) {
 	log := x.logFor(ctx)
 	span.SetAttributes(attribute.Int("roster.count", len(jids)))
 	log.Info().Int("roster_count", len(jids)).Msg("Full backfill: starting MAM backfill for roster DMs")
-	done, skipped := 0, 0
+	done := 0
 	defer func() {
-		span.SetAttributes(attribute.Int("backfilled", done), attribute.Int("portals.skipped", skipped))
+		span.SetAttributes(attribute.Int("backfilled", done))
 	}()
-	withRoom, filter := x.roomPortalIDs(ctx)
-	known := x.knownMAMSnapshot()
 	for _, bareJID := range jids {
 		if ctx.Err() != nil {
 			break
 		}
-		if filter && !mamEligible(bareJID, withRoom, known) {
-			skipped++
-			continue
-		}
+		// No mamEligible filter here (unlike the 45s catch-up loop): an explicit full backfill
+		// is exactly the "create portals and fill history for every roster chat" operation, and
+		// DB dedup makes reconnect replays harmless. Numbers without archive history produce no
+		// items and no portal.
 		if x.isMUC(ctx, bareJID) {
 			continue
 		}
@@ -671,7 +770,7 @@ func (x *xmppClient) mamCatchUpForPortal(ctx, cycleCtx context.Context, bareJID 
 		lastSync = time.Now().Add(-mamCatchUpWindow)
 	}
 	end := time.Now()
-	items, err := x.fetchMAMItems(ctx, portalKey, bareJID, lastSync, end, 50)
+	items, err := x.fetchMAMItemsPaged(ctx, portalKey, bareJID, lastSync, end, x.mamBackfillMaxTotal())
 	if err != nil {
 		x.logFor(cycleCtx).Debug().Err(err).Str("portal_id", bareJID).Msg("MAM catch-up query failed")
 		_, pspan := telemetry.Start(cycleCtx, "mam.catchup.portal", trace.WithTimestamp(start))
@@ -746,8 +845,8 @@ func (x *xmppClient) mamCatchUpForPortal(ctx, cycleCtx context.Context, bareJID 
 		if existing != nil {
 			continue
 		}
-		// Skip ephemeral/chat state notifications (no body).
-		if item.Body == "" {
+		// Skip ephemeral/chat state notifications (no body and no media).
+		if item.Body == "" && item.OOBURL == "" {
 			continue
 		}
 		senderJID, bodyOut := ResolveCheogramGroupMMSSenderForMAM(item.From, item.Body)
@@ -762,6 +861,7 @@ func (x *xmppClient) mamCatchUpForPortal(ctx, cycleCtx context.Context, bareJID 
 			sender:    sender,
 			id:        msgID,
 			body:      bodyOut,
+			oobURL:    item.OOBURL,
 			timestamp: ts,
 			x:         x,
 			stanzaID:  stanzaID,
@@ -784,7 +884,7 @@ func (x *xmppClient) mamCatchUpForPortal(ctx, cycleCtx context.Context, bareJID 
 }
 
 const mamBackfillWindow = 365 * 24 * time.Hour
-const mamBackfillMaxMessagesDefault = 50
+const mamBackfillMaxTotalDefault = 500
 
 // maybeTriggerBackfillOnNewPortal is called when queueing an inbound remote event. If the portal
 // has no Matrix room yet (MXID empty), the bridge will create one. Trigger MAM backfill in a
@@ -810,7 +910,7 @@ func (x *xmppClient) maybeTriggerBackfillOnNewPortal(ctx context.Context, portal
 		bctx, span := telemetry.StartLinkedRoot(x.log.WithContext(context.Background()), "mam.backfill_on_view", origin,
 			trace.WithAttributes(attribute.String("mam.trigger", "new_portal")))
 		defer span.End()
-		x.doMAMBackfillOnView(bctx, span, string(portalKey.ID), x.mamBackfillMaxMessages())
+		x.doMAMBackfillOnView(bctx, span, string(portalKey.ID), x.mamBackfillMaxTotal())
 	}()
 }
 
@@ -828,14 +928,14 @@ func (x *xmppClient) backfillChatAsync(from context.Context, portalID, trigger s
 		bctx, span := telemetry.StartLinkedRoot(x.log.WithContext(context.Background()), "mam.backfill_on_view", origin,
 			trace.WithAttributes(attribute.String("mam.trigger", trigger)))
 		defer span.End()
-		x.doMAMBackfillOnView(bctx, span, portalID, x.mamBackfillMaxMessages())
+		x.doMAMBackfillOnView(bctx, span, portalID, x.mamBackfillMaxTotal())
 	}()
 }
 
 // mamBackfillOnView fetches historical MAM messages for a DM portal and queues them as remote events.
 // Called from HandleMatrixViewingChat when the framework never triggers FetchMessages (e.g. appservice
 // flow, sync-portal, pm command). Only runs for DMs; MUC uses different MAM semantics.
-// Respects config.backfill.enabled and config.backfill.max_initial_messages.
+// Respects config.backfill.enabled; the per-chat budget is config.backfill.max_catchup_messages.
 func (x *xmppClient) mamBackfillOnView(ctx context.Context, portalID string) {
 	if portalID == "" || x.login == nil {
 		return
@@ -846,20 +946,23 @@ func (x *xmppClient) mamBackfillOnView(ctx context.Context, portalID string) {
 	}
 	ctx, span := telemetry.Start(ctx, "mam.backfill_on_view")
 	defer span.End()
-	x.doMAMBackfillOnView(ctx, span, portalID, x.mamBackfillMaxMessages())
+	x.doMAMBackfillOnView(ctx, span, portalID, x.mamBackfillMaxTotal())
 }
 
-// mamBackfillMaxMessages returns the configured initial backfill size (backfillConfig must be non-nil).
-func (x *xmppClient) mamBackfillMaxMessages() int {
-	if n := x.conn.backfillConfig.MaxInitialMessages; n > 0 {
+// mamBackfillMaxTotal returns the per-chat archive budget for backfill (backfillConfig must be
+// non-nil): how many archived messages to fetch, paging through the archive, before giving up on
+// a chat. Bounded by config.backfill.max_catchup_messages.
+func (x *xmppClient) mamBackfillMaxTotal() int {
+	if n := x.conn.backfillConfig.MaxCatchupMessages; n > 0 {
 		return n
 	}
-	return mamBackfillMaxMessagesDefault
+	return mamBackfillMaxTotalDefault
 }
 
 // doMAMBackfillOnView is the body of mamBackfillOnView; span is the already-started
 // mam.backfill_on_view span (a normal span, or a linked root from the new-portal trigger).
-func (x *xmppClient) doMAMBackfillOnView(ctx context.Context, span trace.Span, portalID string, maxMsgs int) {
+// maxTotal bounds how much history is fetched per chat (RSM-paged).
+func (x *xmppClient) doMAMBackfillOnView(ctx context.Context, span trace.Span, portalID string, maxTotal int) {
 	log := x.logFor(ctx)
 	if span.IsRecording() {
 		span.SetAttributes(attribute.String("xmpp.peer.jid", portalID))
@@ -870,7 +973,7 @@ func (x *xmppClient) doMAMBackfillOnView(ctx context.Context, span trace.Span, p
 	}
 	start := time.Now().Add(-mamBackfillWindow)
 	end := time.Now()
-	items, err := x.fetchMAMItems(ctx, portalKey, portalID, start, end, maxMsgs+1)
+	items, err := x.fetchMAMItemsPaged(ctx, portalKey, portalID, start, end, maxTotal)
 	if err != nil {
 		log.Debug().Err(err).Str("portal_id", portalID).Msg("MAM backfill on view: query failed")
 		telemetry.Fail(span, err)
@@ -887,9 +990,6 @@ func (x *xmppClient) doMAMBackfillOnView(ctx context.Context, span trace.Span, p
 	// Retractions are newer than their originals and the first thing truncation drops, so collect
 	// them from everything fetched.
 	batchRetracted := collectBatchRetractions(items)
-	if len(items) > maxMsgs {
-		items = items[:maxMsgs]
-	}
 	queued := 0
 	defer func() { span.SetAttributes(attribute.Int("queued", queued)) }()
 	for _, item := range items {
@@ -899,7 +999,7 @@ func (x *xmppClient) doMAMBackfillOnView(ctx context.Context, span trace.Span, p
 		if x.queueMAMRetraction(ctx, portalKey, item) {
 			continue
 		}
-		if item.Body == "" || item.Retracted {
+		if (item.Body == "" && item.OOBURL == "") || item.Retracted {
 			continue
 		}
 		if x.mamItemHidden(ctx, portalKey, item, batchRetracted) {
@@ -947,6 +1047,7 @@ func (x *xmppClient) doMAMBackfillOnView(ctx context.Context, span trace.Span, p
 			sender:    sender,
 			id:        msgID,
 			body:      bodyOut,
+			oobURL:    item.OOBURL,
 			timestamp: ts,
 			x:         x,
 			stanzaID:  stanzaID,

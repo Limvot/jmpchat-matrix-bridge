@@ -678,5 +678,5 @@ func (x *xmppClient) queueMAMRetraction(ctx context.Context, portalKey networkid
 // (their fallback text is dropped), server tombstones of retracted originals, body-less items (chat
 // states) and originals removed by a retraction in the same batch are never backfilled.
 func mamItemBackfillable(item mamResultItem, b batchRetractions) bool {
-	return item.Retract == nil && !item.Retracted && item.Body != "" && !b.hides(item)
+	return item.Retract == nil && !item.Retracted && (item.Body != "" || item.OOBURL != "") && !b.hides(item)
 }

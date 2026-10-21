@@ -1834,7 +1834,7 @@ func (x *xmppClient) handleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 				bctx, bspan := telemetry.StartLinkedRoot(x.log.WithContext(context.Background()), "mam.backfill_on_view", origin,
 					trace.WithAttributes(attribute.String("mam.trigger", "send")))
 				defer bspan.End()
-				x.doMAMBackfillOnView(bctx, bspan, toJIDStr, x.mamBackfillMaxMessages())
+				x.doMAMBackfillOnView(bctx, bspan, toJIDStr, x.mamBackfillMaxTotal())
 			}()
 		}
 	}
