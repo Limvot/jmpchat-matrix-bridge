@@ -567,3 +567,7 @@ Code optimization recommendations (duplication, library overlap, configuration, 
 ### Alternative projects (inspiration and reference)
 
 - **[Koishi](https://github.com/jjj333-p/koishi)** — XMPP ↔ Matrix bridge in Python; useful for feature and protocol ideas (e.g. puppeting, media, reply bridging, read receipts) even though the stack differs from this bridge (Go, mautrix bridgev2, mellium).
+
+## License
+
+MIT, see [LICENSE](LICENSE). The main dependencies are used unmodified under their own licenses: [mautrix-go](https://github.com/mautrix/go) and [go.mau.fi/util](https://github.com/mautrix/go-util) (MPL-2.0), [mellium](https://mellium.im/) `xmpp`, `sasl` and `xmlstream` (BSD-2-Clause), and [mrtc-sip-bridge](https://github.com/williamkray/mrtc-sip-bridge) (MIT).
