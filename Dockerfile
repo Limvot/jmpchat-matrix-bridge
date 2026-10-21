@@ -1,5 +1,6 @@
 # Build stage (CGO required: sqlite3, libolm for E2BE, libopus for calls)
-FROM golang:1.26-alpine AS builder
+# Go >= 1.27.3 / 1.26.10: crypto/x509 blocks the compromised eMudhra intermediates (CVE-2026-111943).
+FROM golang:1.27.3-alpine3.24 AS builder
 
 RUN apk add --no-cache ca-certificates gcc g++ musl-dev sqlite-dev olm-dev opus-dev pkgconf
 
@@ -20,15 +21,17 @@ RUN CGO_ENABLED=1 go build -tags "sipcalls nolibopusfile" -ldflags "-s -w \
 	-X main.RepositoryURL=${GIT_REPOSITORY_URL} -X main.BuildTime=${BUILD_TIME}" \
 	-o jmpchat-matrix-bridge ./cmd/jmpchat-matrix-bridge
 
-# Runtime stage
-FROM alpine:3.19
+# Runtime stage (3.24; 3.19 is end-of-life and its CA bundle still trusts the distrusted emSign roots)
+FROM alpine:3.24
 
 ARG GIT_COMMIT=unknown
 ARG GIT_REPOSITORY_URL=unknown
 LABEL org.opencontainers.image.revision=${GIT_COMMIT} \
 	org.opencontainers.image.source=${GIT_REPOSITORY_URL}
 
-RUN apk add --no-cache ca-certificates tzdata sqlite-libs olm opus
+# --upgrade pulls the current CA bundle (>= 20261020: emSign ECC Root CA - G3, Root CA - C1 and ECC Root CA - C3 removed)
+# and any other security fixes newer than the base image.
+RUN apk upgrade --no-cache && apk add --no-cache --upgrade ca-certificates tzdata sqlite-libs olm opus
 
 # Run as non-root
 RUN adduser -D -h /app -s /sbin/nologin bridge && mkdir -p /data && chown bridge:bridge /data
