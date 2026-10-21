@@ -18,8 +18,7 @@ import (
 	"github.com/williamkray/jmpchat-matrix-bridge/pkg/telemetry"
 )
 
-// Wiring of the caps responder, the bookmark PEP event handler and the connect-time capability probe.
-// Nothing here acts on bookmarks yet: the probe and the event handler only log (live data gathering).
+// Wiring of the caps responder, the bookmark PEP event handler and the bookmark fetch.
 
 const (
 	bookmarkFetchTimeout = 15 * time.Second
@@ -53,8 +52,9 @@ func (h capsDiscoHandler) HandleIQ(iq stanza.IQ, t xmlstream.TokenReadEncoder, s
 }
 
 // handlePubSubEvent handles PEP notifications (headline messages) on the Serve goroutine: memory only,
-// no IQ, no DB. For now it only parses bookmark events from our own account and logs counts. Always
-// returns nil (a handler error ends the session).
+// no IQ, no DB. It parses bookmark events from our own account and hands them to the session's event
+// worker through a non-blocking channel send (a full buffer drops the event; the next connect or
+// bookmarks-sync heals it). Always returns nil (a handler error ends the session).
 func (x *xmppClient) handlePubSubEvent(msg stanza.Message, r xmlstream.TokenReadEncoder) error {
 	own, err := jid.Parse(string(x.loginID))
 	if err != nil || !bookmarkEventTrusted(msg, own) {
@@ -78,7 +78,10 @@ func (x *xmppClient) handlePubSubEvent(msg stanza.Message, r xmlstream.TokenRead
 		}
 	}
 	x.log.Info().Int("published", published).Int("retracted", retracted).Int("purged", purged).Bool("truncated", truncated).
-		Msg("Bookmarks: PEP event received (not acted on)")
+		Msg("Bookmarks: PEP event received")
+	if !x.bm.offer(bookmarkBatch{changes: changes, truncated: truncated}) {
+		x.log.Warn().Msg("Bookmarks: PEP event queue full or no session; event dropped (reconnect or bookmarks-sync re-reads the bookmarks)")
+	}
 	return nil
 }
 

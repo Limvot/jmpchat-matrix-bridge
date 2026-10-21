@@ -145,11 +145,11 @@ const pepEvent = `<message xmlns="jabber:client" type="headline" from="%s" to="m
 	`<extensions><x xmlns="urn:ext">ext-payload</x></extensions></conference></item>` +
 	`<retract id="gone@muc.example.com"/></items></event></message>`
 
-func TestPEPBookmarkEventRoutedAndOnlyCounted(t *testing.T) {
+func TestPEPBookmarkEventRoutedQueuedAndOnlyCounted(t *testing.T) {
 	x, logs := headlineClient()
 	serveStanza(t, x, strings.Replace(pepEvent, "%s", "me@example.com", 1))
 	out := logs.String()
-	if !strings.Contains(out, `"message":"Bookmarks: PEP event received (not acted on)"`) || !strings.Contains(out, `"published":1`) || !strings.Contains(out, `"retracted":1`) {
+	if !strings.Contains(out, `"message":"Bookmarks: PEP event received"`) || !strings.Contains(out, `"published":1`) || !strings.Contains(out, `"retracted":1`) {
 		t.Fatalf("log = %s", out)
 	}
 	for _, secret := range []string{"s3cret", "Secret Name", "ext-payload", "room@muc.example.com", "alice"} {

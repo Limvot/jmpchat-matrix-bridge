@@ -323,8 +323,7 @@ func selectBookmarkImports(bms []bookmarkConf, portals []*database.Portal, login
 		}
 		st.Autojoin++
 		id := strings.TrimSpace(b.ID)
-		j, err := jid.Parse(id)
-		if err != nil || j.Localpart() == "" || j.Resourcepart() != "" || IsCheogramDMJID(id) {
+		if !bookmarkRoomValid(id) {
 			st.Invalid++
 			continue
 		}
@@ -341,6 +340,13 @@ func selectBookmarkImports(bms []bookmarkConf, portals []*database.Portal, login
 		toJoin = append(toJoin, b)
 	}
 	return toJoin, st
+}
+
+// bookmarkRoomValid reports whether a bookmark id is a bare room JID we may bridge (not a Cheogram
+// number or group MMS JID, no resource).
+func bookmarkRoomValid(id string) bool {
+	j, err := jid.Parse(id)
+	return err == nil && j.Localpart() != "" && j.Resourcepart() == "" && !IsCheogramDMJID(id)
 }
 
 // bookmarkChange is one effect of a PEP event on the bookmarks node.

@@ -250,6 +250,8 @@ func (x *xmppClient) Connect(ctx context.Context) {
 	x.startMUCAvatars(sessCtx)
 	// Re-join every bridged MUC of this login (own root span, staggered, ends with sessCtx).
 	go x.runMUCAutoRejoin(sessCtx)
+	// Live bookmark changes (PEP events queued by the Serve goroutine are applied here).
+	go x.runBookmarkEventWorker(sessCtx, x.bm.eventChan())
 }
 
 // endSessionLocked cancels the current session's background goroutine context. Requires x.mu held.

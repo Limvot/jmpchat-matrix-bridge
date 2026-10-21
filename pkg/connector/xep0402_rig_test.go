@@ -101,8 +101,13 @@ func newBMRig(t *testing.T, write bool, server ...bookmarkConf) *bmRig {
 	}
 	x.mucLeftHook = func(room string, left bool) error {
 		r.mu.Lock()
+		defer r.mu.Unlock()
 		r.left[room] = left
-		r.mu.Unlock()
+		for _, p := range r.portals {
+			if bookmarkKey(string(p.ID)) == bookmarkKey(room) {
+				p.Metadata = &PortalMetadata{MUCLeft: left}
+			}
+		}
 		return nil
 	}
 	x.mucRejoinPortalsHook = func(context.Context) ([]*database.Portal, error) {
