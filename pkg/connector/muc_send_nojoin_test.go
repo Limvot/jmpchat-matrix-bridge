@@ -12,6 +12,11 @@ import (
 
 const healRoom = "discuss@conference.example.com"
 
+var (
+	healNickMu   sync.Mutex
+	healLastNick string
+)
+
 func newHealClient() (*xmppClient, func() int) {
 	x := &xmppClient{loginID: "alice@example.com", log: zerolog.Nop()}
 	var mu sync.Mutex
@@ -20,6 +25,9 @@ func newHealClient() (*xmppClient, func() int) {
 		mu.Lock()
 		n++
 		mu.Unlock()
+		healNickMu.Lock()
+		healLastNick = nick
+		healNickMu.Unlock()
 		return nil
 	}
 	x.mucRejoinPortalsHook = func(context.Context) ([]*database.Portal, error) { return nil, nil }
@@ -65,12 +73,21 @@ func errStanza(from, cond string) string {
 
 func TestNotAcceptableFromRoomRejoinsOncePerWindow(t *testing.T) {
 	x, count := newHealClient()
-	x.mucOurOccupantJID = map[string]string{healRoom: healRoom + "/alice"}
+	x.mucOurOccupantJID = map[string]string{healRoom: healRoom + "/renamed"}
 	serveStanza(t, x, errStanza(healRoom, "not-acceptable"))
 	waitCount(t, count, 1)
+	healNickMu.Lock()
+	if healLastNick != "renamed" {
+		t.Errorf("heal joined as %q, want the held nick", healLastNick)
+	}
+	healNickMu.Unlock()
 	if x.getMUCOurOccupantJID(healRoom) != "" {
 		t.Error("occupant JID not cleared")
 	}
+	// Joined again (confirmation not simulated by the hook): further errors inside the window do nothing.
+	x.mucOurOccupantJIDMu.Lock()
+	x.mucOurOccupantJID[healRoom] = healRoom + "/alice"
+	x.mucOurOccupantJIDMu.Unlock()
 	serveStanza(t, x, errStanza(healRoom, "not-acceptable"))
 	serveStanza(t, x, errStanza(healRoom, "item-not-found"))
 	waitCount(t, count, 1)
@@ -90,5 +107,57 @@ func TestOccupantForwardedErrorsDoNotRejoin(t *testing.T) {
 	waitCount(t, count, 0)
 	if x.getMUCOurOccupantJID(healRoom) == "" {
 		t.Error("occupant JID cleared by a non-qualifying error")
+	}
+}
+
+func TestHealSkippedWhenNotJoined(t *testing.T) {
+	x, count := newHealClient()
+	serveStanza(t, x, errStanza(healRoom, "not-acceptable"))
+	waitCount(t, count, 0)
+}
+
+const mucUserX = `<x xmlns="http://jabber.org/protocol/muc#user">`
+
+func TestOwnExitClearsOccupantJID(t *testing.T) {
+	ours := healRoom + "/alice"
+	cases := map[string]string{
+		"kick":    `<presence xmlns="jabber:client" type="unavailable" from="` + ours + `">` + mucUserX + `<item affiliation="none" role="none"/><status code="307"/><status code="110"/></x></presence>`,
+		"ban":     `<presence xmlns="jabber:client" type="unavailable" from="` + ours + `">` + mucUserX + `<item affiliation="outcast" role="none"/><status code="301"/></x></presence>`,
+		"destroy": `<presence xmlns="jabber:client" type="unavailable" from="` + ours + `">` + mucUserX + `<item affiliation="none" role="none"/><destroy/></x></presence>`,
+		"error":   `<presence xmlns="jabber:client" type="error" from="` + ours + `"><error type="modify"><not-acceptable xmlns="urn:ietf:params:xml:ns:xmpp-stanzas"/></error></presence>`,
+	}
+	for name, st := range cases {
+		t.Run(name, func(t *testing.T) {
+			x, count := newHealClient()
+			x.mucOurOccupantJID = map[string]string{healRoom: ours}
+			serveStanza(t, x, st)
+			if x.getMUCOurOccupantJID(healRoom) != "" {
+				t.Fatal("occupant JID kept after our exit")
+			}
+			if err := x.joinMUCForPortal(context.Background(), healRoom); err != nil {
+				t.Fatal(err)
+			}
+			if count() != 1 {
+				t.Fatalf("next send sent %d join presences, want 1", count())
+			}
+		})
+	}
+}
+
+func TestOtherExitsKeepOccupantJID(t *testing.T) {
+	ours := healRoom + "/alice"
+	for name, st := range map[string]string{
+		"other kicked": `<presence xmlns="jabber:client" type="unavailable" from="` + healRoom + `/bob">` + mucUserX + `<item role="none"/><status code="307"/></x></presence>`,
+		"own rename":   `<presence xmlns="jabber:client" type="unavailable" from="` + ours + `">` + mucUserX + `<item nick="alice2"/><status code="303"/><status code="110"/></x></presence>`,
+		"conflict":     `<presence xmlns="jabber:client" type="error" from="` + ours + `"><error type="cancel"><conflict xmlns="urn:ietf:params:xml:ns:xmpp-stanzas"/></error></presence>`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			x, _ := newHealClient()
+			x.mucOurOccupantJID = map[string]string{healRoom: ours}
+			serveStanza(t, x, st)
+			if x.getMUCOurOccupantJID(healRoom) == "" {
+				t.Fatal("occupant JID cleared")
+			}
+		})
 	}
 }

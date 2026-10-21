@@ -882,6 +882,10 @@ func (x *xmppClient) handlePresence(t xmlstream.TokenReadEncoder, start *xml.Sta
 	}
 
 	if typeVal == "error" {
+		if !hasConflict && ourNick != "" {
+			// An error bounced from our own occupant JID: the room no longer has us (memory only).
+			x.noteOwnMUCExit(roomBare, fromJID.String(), info, "presence error")
+		}
 		if hasConflict {
 			// State change only; the retry send and notices run in a goroutine with its own span.
 			next, tried, gen, handled := x.onMUCJoinConflict(roomBare, ourNick)
@@ -902,6 +906,16 @@ func (x *xmppClient) handlePresence(t xmlstream.TokenReadEncoder, start *xml.Sta
 	// the nick) follow it, so our echoes are still recognized (memory only).
 	if sawMUCUser && typeVal == "unavailable" && info.hasStatus("303") && info.newNick != "" {
 		x.noteOwnMUCNickChange(roomBare, fromJID.String(), info)
+		return nil
+	}
+	// Our own occupant became unavailable without a rename: kicked (307), banned (301), removed by an
+	// affiliation change (321) or members-only switch (322), room shutdown (332) or destroyed. Forget the
+	// occupant JID so the next send or view joins again instead of assuming we are still in.
+	if typeVal == "unavailable" {
+		if info.hasStatus("303") {
+			return nil // a rename without a usable new nick: we are still in, under a name we cannot follow
+		}
+		x.noteOwnMUCExit(roomBare, fromJID.String(), info, "unavailable")
 		return nil
 	}
 	x.mucPendingJoinMu.Lock()

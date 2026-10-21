@@ -312,3 +312,20 @@ func mucAllTakenNotice(prefix, room string, tried []string) string {
 	return fmt.Sprintf("Could not join %s: nicks %s are all taken. Use `%s muc-nick %s <nick>` and `%s join %s` to try again.",
 		room, strings.Join(quoted, ", "), prefix, room, prefix, room)
 }
+
+// noteOwnMUCExit forgets the occupant JID recorded for roomBare when occupant is it (or the presence
+// carries the self-presence status 110): the room no longer counts us as an occupant (kick, ban,
+// affiliation or members-only removal, shutdown, destroy, or a presence error from our occupant JID).
+// The next send or view then joins again. Serve goroutine, memory only.
+func (x *xmppClient) noteOwnMUCExit(roomBare, occupant string, info presenceInfo, why string) bool {
+	x.mucOurOccupantJIDMu.Lock()
+	ours := x.mucOurOccupantJID[roomBare]
+	if ours == "" || (ours != occupant && !info.hasStatus("110")) {
+		x.mucOurOccupantJIDMu.Unlock()
+		return false
+	}
+	delete(x.mucOurOccupantJID, roomBare)
+	x.mucOurOccupantJIDMu.Unlock()
+	x.log.Info().Str("room", roomBare).Str("reason", why).Strs("status", info.statusCodes).Msg("No longer in MUC room, will re-join on next send or view")
+	return true
+}

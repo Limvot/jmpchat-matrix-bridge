@@ -75,12 +75,17 @@ func TestMUCNickChangeOwnDetection(t *testing.T) {
 	if ours := x.getMUCOurOccupantJID(renameRoom); ours != renameRoom+"/fresh" {
 		t.Fatalf("110 rename not followed: %q", ours)
 	}
-	// A plain leave (no 303) or a rename without a new nick leaves the record alone.
-	presenceStanza(t, x, "unavailable", renameRoom+"/fresh", `<x xmlns="http://jabber.org/protocol/muc#user"><status code="110"/></x>`)
+	// A rename without a new nick leaves the record alone.
 	presenceStanza(t, x, "unavailable", renameRoom+"/fresh", `<x xmlns="http://jabber.org/protocol/muc#user"><status code="303"/><status code="110"/></x>`)
 	if ours := x.getMUCOurOccupantJID(renameRoom); ours != renameRoom+"/fresh" {
 		t.Fatalf("record changed: %q", ours)
 	}
+	// A plain own leave (no 303) means we are out: the record is dropped so the next send re-joins.
+	presenceStanza(t, x, "unavailable", renameRoom+"/fresh", `<x xmlns="http://jabber.org/protocol/muc#user"><status code="110"/></x>`)
+	if ours := x.getMUCOurOccupantJID(renameRoom); ours != "" {
+		t.Fatalf("own leave kept the record: %q", ours)
+	}
+	x.mucOurOccupantJID[renameRoom] = renameRoom + "/fresh"
 	// An invalid new nick is ignored, not fatal.
 	presenceStanza(t, x, "unavailable", renameRoom+"/fresh", renameBody("a b/c", "303", "110"))
 }

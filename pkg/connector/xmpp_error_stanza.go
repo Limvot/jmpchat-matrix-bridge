@@ -371,6 +371,11 @@ func (x *xmppClient) healMUCAfterError(me messageError) {
 	if room == "" {
 		return
 	}
+	// Only a room we think we are in needs healing: otherwise the next send or view joins anyway, and a
+	// 1:1 contact's server answering item-not-found/recipient-unavailable never spawns a lookup.
+	if x.getMUCOurOccupantJID(room) == "" {
+		return
+	}
 	go x.healMUC(room)
 }
 
@@ -395,10 +400,12 @@ func (x *xmppClient) healMUC(room string) {
 	if !isMUC || !x.mucHealAllowed(room, time.Now()) {
 		return
 	}
+	// Re-join with the nick we held (a shared nick another client renamed is not renamed back).
 	x.mucOurOccupantJIDMu.Lock()
+	nick := resourceOf(x.mucOurOccupantJID[room])
 	delete(x.mucOurOccupantJID, room)
 	x.mucOurOccupantJIDMu.Unlock()
-	if err := x.joinMUC(ctx, room, nil); err != nil {
+	if err := x.joinMUCNick(ctx, room, nil, false, nick); err != nil {
 		telemetry.Fail(span, err)
 		log.Warn().Err(err).Str("room", room).Msg("MUC heal: re-join after not-an-occupant error failed")
 		return
