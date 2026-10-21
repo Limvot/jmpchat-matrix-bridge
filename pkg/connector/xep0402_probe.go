@@ -133,43 +133,11 @@ func (x *xmppClient) logBookmarkGate(ctx context.Context, s bookmarkSupport) {
 		Msg("Bookmarks capability gate")
 }
 
-// runBookmarkProbe runs once per session in its own goroutine with its own root span (never on Serve).
-// It runs the capability gate (disco#info of our own bare JID) and, when reading is supported, fetches
-// the bookmarks once and dumps them at debug level. Data gathering only: nothing acts on the result.
+// runBookmarkProbe runs once per session in its own goroutine with its own root span (never on Serve):
+// the capability gate and one fetch that fills the cache (bookmarkStartup). Superseded by the startup
+// coordinator in P4.
 func (x *xmppClient) runBookmarkProbe(sessCtx context.Context) {
 	ctx, span := telemetry.Start(sessCtx, "xmpp.bookmarks.probe", trace.WithSpanKind(trace.SpanKindProducer))
 	defer span.End()
-	log := x.logFor(ctx)
-	x.mu.Lock()
-	sess := x.session
-	x.mu.Unlock()
-	own, err := jid.Parse(string(x.loginID))
-	if sess == nil || err != nil {
-		return
-	}
-	info, err := x.discoInfoTraced(ctx, sess, own.Bare())
-	if err != nil {
-		telemetry.Fail(span, err)
-		log.Warn().Err(err).Msg("Bookmarks: capability check failed (disco#info of own account); will retry on the next session")
-		return
-	}
-	s := bookmarkSupportFromInfo(info)
-	if span.IsRecording() {
-		span.SetAttributes(attribute.Bool("xmpp.bookmarks.read", s.Read), attribute.Bool("xmpp.bookmarks.write", s.Write), attribute.Bool("xmpp.bookmarks.compat", s.Compat))
-	}
-	x.logBookmarkGate(ctx, s)
-	if !s.Read {
-		return
-	}
-	bms, skipped, err := x.fetchBookmarks(ctx, sess)
-	if err != nil {
-		telemetry.Fail(span, err)
-		log.Warn().Err(err).Msg("Bookmarks: fetch failed")
-		return
-	}
-	log.Debug().Int("count", len(bms)).Int("skipped", skipped).Msg("Bookmarks: fetched")
-	for _, b := range bms {
-		// Room JID, autojoin and nick only: never the password, name or extensions.
-		log.Debug().Str("room", b.ID).Bool("autojoin", b.Autojoin).Str("nick", b.Nick).Msg("Bookmark")
-	}
+	x.bookmarkStartup(ctx)
 }

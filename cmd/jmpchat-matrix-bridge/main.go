@@ -387,7 +387,7 @@ func cmdMUCLeave(ce *commands.Event) {
 		ce.Reply("Failed to leave room: %v", err)
 		return
 	}
-	ce.Reply("Left **%s**. You can leave the Matrix room from the room menu if desired.%s", roomJID, connector.CommandLoginNotice(ce, login, explicit))
+	ce.Reply("Left **%s**. If you have a bookmark for it, it is kept with auto-join turned off (your other clients stop joining it too). You can leave the Matrix room from the room menu if desired.%s", roomJID, connector.CommandLoginNotice(ce, login, explicit))
 }
 
 func cmdMUCNick(ce *commands.Event) {
@@ -414,7 +414,7 @@ func cmdMUCNick(ce *commands.Event) {
 		ce.Reply("Failed to set MUC nick: %v", err)
 		return
 	}
-	ce.Reply("Preferred nick for **%s** set to **%s**. It will be used on next join (and on 409 retry).%s", roomJID, nick, connector.CommandLoginNotice(ce, login, explicit))
+	ce.Reply("Preferred nick for **%s** set to **%s**. It will be used on next join (and on 409 retry); it takes precedence over the room's bookmark nick, which is left unchanged.%s", roomJID, nick, connector.CommandLoginNotice(ce, login, explicit))
 }
 
 func cmdMUCNickDefault(ce *commands.Event) {

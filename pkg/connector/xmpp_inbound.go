@@ -909,8 +909,14 @@ func (x *xmppClient) handlePresence(t xmlstream.TokenReadEncoder, start *xml.Sta
 		delete(x.mucPendingJoin, roomBare)
 		x.log.Debug().Str("room", roomBare).Str("occupant_jid", fromJID.String()).Msg("MUC join confirmed, stored our occupant JID")
 		// Confirmed with an alternative nick after a 409: remember it and tell the user (goroutine).
-		if track := x.takeMUCJoinTrackLocked(roomBare); track != nil && track.conflicted && ourNick != track.base {
-			go x.announceMUCNickChange(roomBare, track.base, track.tried[0], ourNick)
+		if track := x.takeMUCJoinTrackLocked(roomBare); track != nil {
+			if track.conflicted && ourNick != track.base {
+				go x.announceMUCNickChange(roomBare, track.base, track.tried[0], ourNick)
+			}
+			// The explicit join command also creates/enables the XEP-0402 bookmark (goroutine, own span).
+			if track.writeBookmark {
+				go x.bookmarkAfterJoin(roomBare, track.base, ourNick, track.conflicted)
+			}
 		}
 		// Queue ChatResync so the bridge re-fetches GetChatInfo (and can refresh room/ghost info after rejoin).
 		if x.login != nil {

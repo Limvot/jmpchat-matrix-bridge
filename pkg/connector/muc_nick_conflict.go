@@ -25,6 +25,10 @@ type mucJoinTrack struct {
 	tried      []string    // nicks that were answered with 409 in this chain
 	conflicted bool        // at least one 409 happened (so a confirmed join is announced)
 	hist       *mucHistory // history request of the first join, repeated by the 409 retries
+	// writeBookmark: the join was asked for by the explicit join command, so once it is confirmed the
+	// room's XEP-0402 bookmark is created/enabled (xep0402_write.go). Auto-rejoin, imports, sending and
+	// viewing never write.
+	writeBookmark bool
 }
 
 // chooseMUCNick picks the base (preferred) nick and the nick to actually join with. explicit is the
@@ -81,7 +85,7 @@ func (x *xmppClient) mucNickChoice(ctx context.Context, roomJIDStr string) (base
 
 // startMUCJoinTrack registers a fresh join chain and marks nick as pending. hist is the history
 // request of the join (nil = none); 409 retries of the chain send the same one.
-func (x *xmppClient) startMUCJoinTrack(roomBare, base, nick string, hist *mucHistory) {
+func (x *xmppClient) startMUCJoinTrack(roomBare, base, nick string, hist *mucHistory, writeBookmark bool) {
 	x.mucPendingJoinMu.Lock()
 	defer x.mucPendingJoinMu.Unlock()
 	if x.mucPendingJoin == nil {
@@ -91,7 +95,7 @@ func (x *xmppClient) startMUCJoinTrack(roomBare, base, nick string, hist *mucHis
 		x.mucJoinTracks = make(map[string]*mucJoinTrack)
 	}
 	x.mucPendingJoin[roomBare] = nick
-	x.mucJoinTracks[roomBare] = &mucJoinTrack{base: base, hist: hist}
+	x.mucJoinTracks[roomBare] = &mucJoinTrack{base: base, hist: hist, writeBookmark: writeBookmark}
 }
 
 // resetMUCJoinState drops every pending join and retry chain and starts a new generation. Called

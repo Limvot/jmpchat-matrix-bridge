@@ -173,7 +173,9 @@ func (x *xmppClient) handleMatrixMessageRemove(ctx context.Context, msg *bridgev
 		msgType = stanza.MessageType("groupchat")
 		// Be in the room before retracting (same as sending).
 		if x.getMUCOurOccupantJID(portalID) == "" {
-			if joinErr := x.JoinMUC(ctx, portalID); joinErr != nil {
+			if joinErr := x.joinMUCForPortal(ctx, portalID); errors.Is(joinErr, errMUCLeft) {
+				return bridgev2.WrapErrorInStatus(fmt.Errorf("you left this room; use `%s join %s` to rejoin it", x.mucCmdPrefix(), portalID)).WithSendNotice(true)
+			} else if joinErr != nil {
 				log.Warn().Err(joinErr).Msg("Failed to join MUC before retraction; it may be rejected")
 			} else {
 				select {

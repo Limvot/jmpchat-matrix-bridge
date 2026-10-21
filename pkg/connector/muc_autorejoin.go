@@ -208,3 +208,37 @@ func (x *xmppClient) setMUCLeft(ctx context.Context, roomBare string, left bool)
 	portal.Metadata = meta
 	return portal.Save(ctx)
 }
+
+// lookupMUCPortal returns the existing portal of a room for this login (nil when there is none).
+func (x *xmppClient) lookupMUCPortal(ctx context.Context, roomBare string) (*database.Portal, error) {
+	if x.mucRejoinPortalsHook != nil {
+		ps, err := x.mucRejoinPortalsHook(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for _, p := range ps {
+			if p != nil && p.Receiver == x.loginID && bookmarkKey(string(p.ID)) == bookmarkKey(roomBare) {
+				return p, nil
+			}
+		}
+		return nil, nil
+	}
+	if x.conn == nil || x.conn.br == nil {
+		return nil, nil
+	}
+	portal, err := x.conn.br.GetExistingPortalByKey(ctx, networkid.PortalKey{ID: networkid.PortalID(roomBare), Receiver: x.loginID})
+	if err != nil || portal == nil {
+		return nil, err
+	}
+	return portal.Portal, nil
+}
+
+// isMUCLeft reports whether the room's portal is marked as left (false when there is no portal).
+func (x *xmppClient) isMUCLeft(ctx context.Context, roomBare string) bool {
+	p, err := x.lookupMUCPortal(ctx, roomBare)
+	if err != nil || p == nil {
+		return false
+	}
+	meta, _ := p.Metadata.(*PortalMetadata)
+	return meta != nil && meta.MUCLeft
+}

@@ -218,7 +218,7 @@ func TestRememberedNickUsedOnRejoin(t *testing.T) {
 	r := newNickRig()
 	r.x.login = nil
 	base, nick := chooseMUCNick("", "", string(r.x.loginID), "alice_1", "alice")
-	r.x.startMUCJoinTrack(nickRoom, base, nick, nil)
+	r.x.startMUCJoinTrack(nickRoom, base, nick, nil, false)
 	if err := r.x.sendMUCJoin(context.Background(), nickRoom, nick, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -229,7 +229,7 @@ func TestRememberedNickUsedOnRejoin(t *testing.T) {
 		t.Fatalf("sent=%v notices=%v", r.sent, r.notices)
 	}
 	// If the remembered nick now conflicts, the next try is alice_2 (alice_1 counts as tried).
-	r.x.startMUCJoinTrack(nickRoom, base, nick, nil)
+	r.x.startMUCJoinTrack(nickRoom, base, nick, nil, false)
 	r.conflict(t, "alice_1")
 	r.wait(t)
 	if r.sent[len(r.sent)-1] != "alice_2" {
@@ -240,7 +240,7 @@ func TestRememberedNickUsedOnRejoin(t *testing.T) {
 func TestMUCNickNoticeNamesFirstTriedNick(t *testing.T) {
 	r := newNickRig()
 	base, nick := chooseMUCNick("", "", string(r.x.loginID), "alice_1", "alice")
-	r.x.startMUCJoinTrack(nickRoom, base, nick, nil)
+	r.x.startMUCJoinTrack(nickRoom, base, nick, nil, false)
 	if err := r.x.sendMUCJoin(context.Background(), nickRoom, nick, nil); err != nil {
 		t.Fatal(err)
 	}

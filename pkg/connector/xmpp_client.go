@@ -128,6 +128,8 @@ type xmppClient struct {
 	avatarRefreshingMu sync.Mutex
 	// mucAv is the MUC occupant avatar table, queue and worker state (xep0054_muc.go).
 	mucAv mucAvatarState
+	// bm is the XEP-0402 bookmark state of this session (xep0402_state.go).
+	bm bookmarkState
 }
 
 // maxConcurrentAvatarFetches caps simultaneous background vCard avatar fetches.
@@ -181,6 +183,7 @@ func (x *xmppClient) Connect(ctx context.Context) {
 	x.sessionCancel = cancelSess
 	// Join state belongs to the previous session: forget it before anything of this one can join.
 	x.resetMUCJoinState()
+	x.bm.reset()
 	span.SetAttributes(attribute.String("xmpp.connect.result", "connected"))
 
 	if x.login != nil {
@@ -1536,26 +1539,51 @@ func (x *xmppClient) getPreferredMUCNick(ctx context.Context, roomJIDStr string)
 	return nick
 }
 
-// JoinMUC sends a MUC join presence (XEP-0045) so the bridge user can send/receive groupchat.
-// Nick is chosen from room-specific preferred, default preferred, or login localpart.
+// errMUCLeft is returned by joinMUCForPortal for a room the user left (explicit leave command, or a
+// bookmark that another client set to not auto-join): only the join command brings it back.
+var errMUCLeft = errors.New("room was left; use the join command to return")
+
+// JoinMUC is the explicit join command (MUCJoiner): it ends an earlier "leave", sends the join presence
+// and, once the join is confirmed, creates/enables the room's XEP-0402 bookmark. Nick: see chooseMUCNick.
 func (x *xmppClient) JoinMUC(ctx context.Context, roomJIDStr string) error {
 	ctx, span := telemetry.Start(ctx, "xmpp.muc.join", trace.WithSpanKind(trace.SpanKindProducer))
 	defer span.End()
 	if span.IsRecording() {
 		span.SetAttributes(attribute.String("xmpp.room.jid", roomJIDStr))
 	}
-	// A join the user asked for (join command, sending, viewing the room) ends an earlier "leave".
 	if err := x.setMUCLeft(ctx, roomJIDStr, false); err != nil {
 		x.logFor(ctx).Warn().Err(err).Str("room", roomJIDStr).Msg("Failed to clear MUC left flag")
 	}
-	err := x.joinMUC(ctx, roomJIDStr, nil)
+	err := x.joinMUCOpts(ctx, roomJIDStr, nil, true)
 	telemetry.Fail(span, err)
 	return err
 }
 
-// joinMUC sends the join presence. hist is the optional XEP-0045 history request (nil = none, the
-// room's default history applies).
+// joinMUCForPortal re-asserts membership of a bridged room when the user views it, sends into it or
+// retracts in it. It is not a new "I want this room" intent: it never clears the left flag (a room the
+// user left, here or via a bookmark on another client, stays left: errMUCLeft) and never writes a bookmark.
+func (x *xmppClient) joinMUCForPortal(ctx context.Context, roomJIDStr string) error {
+	if x.isMUCLeft(ctx, roomJIDStr) {
+		return errMUCLeft
+	}
+	ctx, span := telemetry.Start(ctx, "xmpp.muc.join", trace.WithSpanKind(trace.SpanKindProducer))
+	defer span.End()
+	if span.IsRecording() {
+		span.SetAttributes(attribute.String("xmpp.room.jid", roomJIDStr))
+	}
+	err := x.joinMUCOpts(ctx, roomJIDStr, nil, false)
+	telemetry.Fail(span, err)
+	return err
+}
+
+// joinMUC sends the join presence without any bookmark write (auto-rejoin, imports, events). hist is the
+// optional XEP-0045 history request (nil = none, the room's default history applies).
 func (x *xmppClient) joinMUC(ctx context.Context, roomJIDStr string, hist *mucHistory) error {
+	return x.joinMUCOpts(ctx, roomJIDStr, hist, false)
+}
+
+// joinMUCOpts is joinMUC; writeBookmark marks the join chain so that its confirmation writes the bookmark.
+func (x *xmppClient) joinMUCOpts(ctx context.Context, roomJIDStr string, hist *mucHistory, writeBookmark bool) error {
 	roomJID, err := jid.Parse(roomJIDStr)
 	if err != nil {
 		return fmt.Errorf("invalid MUC JID %q: %w", roomJIDStr, err)
@@ -1565,7 +1593,7 @@ func (x *xmppClient) joinMUC(ctx context.Context, roomJIDStr string, hist *mucHi
 		return fmt.Errorf("MUC JID with resource: %w", err)
 	}
 	// Track pending join so presence handler can store our occupant JID (and detect 409).
-	x.startMUCJoinTrack(roomJIDStr, base, nick, hist)
+	x.startMUCJoinTrack(roomJIDStr, base, nick, hist, writeBookmark)
 	if err := x.sendMUCJoin(ctx, roomJIDStr, nick, hist); err != nil {
 		x.dropMUCJoinTrack(roomJIDStr)
 		return err
@@ -1637,6 +1665,8 @@ func (x *xmppClient) LeaveMUC(ctx context.Context, roomJIDStr string) error {
 		if ferr := x.setMUCLeft(ctx, roomJIDStr, true); ferr != nil {
 			x.logFor(ctx).Warn().Err(ferr).Str("room", roomJIDStr).Msg("Failed to persist MUC left flag; the room may be re-joined on reconnect")
 		}
+		// Keep the bookmark with autojoin off (never fails the leave, never creates one).
+		x.bookmarkAfterLeave(ctx, roomJIDStr)
 	}
 	telemetry.Fail(span, err)
 	return err
@@ -1702,7 +1732,9 @@ func (x *xmppClient) HandleMatrixViewingChat(ctx context.Context, msg *bridgev2.
 
 	// For MUC portals, join the room on XMPP so we can send and receive groupchat.
 	if x.portalIsMUC(ctx, msg.Portal) {
-		if err := x.JoinMUC(ctx, string(msg.Portal.ID)); err != nil {
+		if err := x.joinMUCForPortal(ctx, string(msg.Portal.ID)); errors.Is(err, errMUCLeft) {
+			log.Debug().Str("portal_id", string(msg.Portal.ID)).Msg("Not joining MUC on view: the room was left")
+		} else if err != nil {
 			log.Warn().Err(err).Str("portal_id", string(msg.Portal.ID)).Msg("Failed to join MUC on view; messages may not send until joined")
 		}
 	}
@@ -1842,7 +1874,9 @@ func (x *xmppClient) handleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 
 	// For MUC portals, ensure we're in the room before sending (join on view may not have run yet).
 	if x.portalIsMUC(ctx, msg.Portal) {
-		if joinErr := x.JoinMUC(ctx, toJIDStr); joinErr != nil {
+		if joinErr := x.joinMUCForPortal(ctx, toJIDStr); errors.Is(joinErr, errMUCLeft) {
+			return nil, bridgev2.WrapErrorInStatus(fmt.Errorf("you left this room; use `%s join %s` to rejoin it", x.mucCmdPrefix(), toJIDStr)).WithSendNotice(true)
+		} else if joinErr != nil {
 			log.Warn().Err(joinErr).Str("portal_id", toJIDStr).Msg("Failed to join MUC before send; message may be rejected")
 		} else {
 			// Give the MUC server time to process our presence before sending (cross-server MUCs can be slow).
