@@ -24,7 +24,7 @@ func CmdAvatarProbe(ce *commands.Event) {
 		prefix = ce.Bridge.Config.CommandPrefix
 	}
 	login, args, explicit := CommandLogin(ce, 1)
-	if len(args) != 1 {
+	if len(args) == 0 {
 		ce.Reply("Usage: `%s avatar-probe [<login-jid>] <room@service/nick | jid>`. Sends only IQ get queries to that JID.", prefix)
 		return
 	}
@@ -32,7 +32,8 @@ func CmdAvatarProbe(ce *commands.Event) {
 		ce.Reply("You must be logged in. Use `%s login` first.", prefix)
 		return
 	}
-	target, err := jid.Parse(strings.TrimSpace(args[0]))
+	// A MUC nick (the resourcepart) may contain spaces ("room@service/Some Nick"), so rejoin the args.
+	target, err := jid.Parse(strings.TrimSpace(strings.Join(args, " ")))
 	if err != nil || target.Localpart() == "" {
 		ce.Reply("Invalid JID. Use `room@service/nick` or `user@domain`.")
 		return
