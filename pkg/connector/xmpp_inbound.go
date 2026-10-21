@@ -444,6 +444,7 @@ func (x *xmppClient) handleMessageWithOOB(t xmlstream.TokenReadEncoder, start *x
 			stanzaID:       ids.stanzaIDBy(string(x.loginID)), // archive id assigned by our own server (untrusted `by` ignored)
 			originID:       ids.OriginID,
 			timestamp:      time.Now(),
+			markable:       ids.Extras.Markable,
 			x:              x, // Store reference to xmppClient for database access
 		})
 	}
@@ -633,6 +634,7 @@ func (x *xmppClient) handleGroupchatWithOOB(t xmlstream.TokenReadEncoder, start 
 			stanzaID:       ids.stanzaIDBy(roomJID), // only the room's own stanza-id is believed
 			originID:       ids.OriginID,
 			occupantID:     ids.OccupantID,
+			markable:       ids.Extras.Markable,
 			timestamp:      time.Now(),
 			x:              x,
 		})
@@ -987,6 +989,7 @@ type jabberRemoteMessage struct {
 	originID       string
 	occupantID     string // XEP-0421, groupchat only
 	backfillSource string // "mam" for events that came out of the archive
+	markable       bool   // the message carried XEP-0333 <markable/> (stored in MessageMetadata.Markable)
 	timestamp      time.Time
 	x              *xmppClient // Reference to xmppClient for database access
 	spanCtx        trace.SpanContext // trace context set by queueRemoteEvent before queueing (zero when tracing is off)
@@ -1217,6 +1220,7 @@ func (m *jabberRemoteMessage) dbMeta() *MessageMetadata {
 		StanzaID:       m.stanzaID,
 		OccupantID:     m.occupantID,
 		BackfillSource: m.backfillSource,
+		Markable:       m.markable,
 	}
 	if m.originID != string(m.id) {
 		meta.OriginID = m.originID
@@ -1245,6 +1249,11 @@ func (m *jabberRemoteMessage) ConvertMessage(ctx context.Context, portal *bridge
 	for _, part := range cm.Parts {
 		if part != nil && part.DBMetadata == nil {
 			part.DBMetadata = m.dbMeta()
+		}
+		if part != nil && part.Content != nil && (part.Content.MsgType.IsMedia() || part.Content.URL != "" || part.Content.File != nil) {
+			if meta, ok := part.DBMetadata.(*MessageMetadata); ok {
+				meta.Media = true
+			}
 		}
 	}
 	return cm, nil

@@ -2249,6 +2249,7 @@ func (x *xmppClient) handleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 	// Store XMPP message ID in metadata so replies to Matrix-originated messages work
 	msgMeta := &MessageMetadata{
 		XMPPMessageID: xmppMsgID,
+		Media:         oobURL != "",
 	}
 	log.Debug().
 		Str("matrix_event_id", string(msg.Event.ID)).

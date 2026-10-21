@@ -56,6 +56,8 @@ type mamResultItem struct {
 	// dropped); Retracted marks an archived original that the server tombstoned (<retracted>).
 	Retract   *retractInfo
 	Retracted bool
+	// Extras are the XEP-0308/0085/0333/0184/subject/E2EE signals of the archived message.
+	Extras messageExtras
 }
 
 // stableIDs returns the stanza-id/origin-id to persist for an archived message: the archive id of a
@@ -214,6 +216,7 @@ func (x *xmppClient) handleMAMResult(t xmlstream.TokenReadEncoder, start *xml.St
 		From: from, To: to, Type: msgType, StanzaID: stanzaID, ArchiveID: archiveID, OriginID: ids.OriginID,
 		Body: body, Timestamp: timestamp, QueryID: queryID,
 		Retract: ids.Retract, Retracted: ids.Tombstone,
+		Extras: ids.Extras,
 	})
 	return nil
 }
@@ -450,6 +453,7 @@ func (x *xmppClient) FetchMessages(ctx context.Context, params bridgev2.FetchMes
 					StanzaID:       stanzaID,
 					OriginID:       originID,
 					BackfillSource: "mam",
+					Markable:       item.Extras.Markable,
 				},
 			}},
 		}
@@ -734,6 +738,7 @@ func (x *xmppClient) mamCatchUpForPortal(ctx, cycleCtx context.Context, bareJID 
 			x:         x,
 			stanzaID:  stanzaID,
 			originID:  originID,
+			markable:  item.Extras.Markable,
 
 			backfillSource: "mam",
 		})
@@ -919,6 +924,7 @@ func (x *xmppClient) doMAMBackfillOnView(ctx context.Context, span trace.Span, p
 			x:         x,
 			stanzaID:  stanzaID,
 			originID:  originID,
+			markable:  item.Extras.Markable,
 
 			backfillSource: "mam",
 		})

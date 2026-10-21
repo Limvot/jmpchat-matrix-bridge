@@ -40,13 +40,19 @@ type messageIDs struct {
 	Retract   *retractInfo
 	Tombstone bool
 	scan      *retractScan
+
+	// Extras holds the XEP-0308/0085/0333/0184/subject/E2EE signals (see messageExtras); filled while
+	// tracking, the subject is complete once its end element was tracked.
+	Extras       messageExtras
+	subjectDepth int // depth of the <subject> being read; 0 when not inside one
+	subjectBuf   []byte
 }
 
 // track feeds a start element of any depth to the identifier and retraction scanners; depth is the
 // element's depth and childDepth the depth of direct children of the <message>.
 func (m *messageIDs) track(se xml.StartElement, depth, childDepth int) {
 	if depth == childDepth {
-		m.observe(se)
+		m.observe(se, depth)
 	}
 	if m.scan == nil {
 		m.scan = &retractScan{}
@@ -56,6 +62,10 @@ func (m *messageIDs) track(se xml.StartElement, depth, childDepth int) {
 
 // trackChars feeds character data to the retraction scanner (reason text).
 func (m *messageIDs) trackChars(cd xml.CharData) {
+	// A rune is at most 4 bytes: this only bounds the buffer, capSubject cuts to the rune cap.
+	if m.subjectDepth > 0 && len(m.subjectBuf) < 4*maxSubjectRunes+4 {
+		m.subjectBuf = append(m.subjectBuf, cd...)
+	}
 	if m.scan != nil {
 		m.scan.chars(cd)
 	}
@@ -63,6 +73,12 @@ func (m *messageIDs) trackChars(cd xml.CharData) {
 
 // trackEnd feeds an end element (depth of the element that closes) to the retraction scanner.
 func (m *messageIDs) trackEnd(depth int) {
+	if m.subjectDepth > 0 && depth == m.subjectDepth {
+		s := capSubject(string(m.subjectBuf))
+		m.Extras.Subject = &s
+		m.subjectDepth = 0
+		m.subjectBuf = m.subjectBuf[:0]
+	}
 	if m.scan != nil {
 		m.scan.end(depth)
 	}
@@ -82,7 +98,11 @@ func (m *messageIDs) finish() {
 // observe inspects a start element that is a direct child of the message (the caller checks the
 // depth). Matching is on the resolved namespace, not on a literal xmlns attribute, so children that
 // inherit their namespace (forwarded carbons/MAM) are still found.
-func (m *messageIDs) observe(se xml.StartElement) {
+func (m *messageIDs) observe(se xml.StartElement, depth int) {
+	if m.Extras.observe(se) {
+		m.subjectDepth = depth
+		m.subjectBuf = m.subjectBuf[:0]
+	}
 	switch {
 	case se.Name.Space == sidNS && se.Name.Local == "stanza-id":
 		by, id := attrValue(se.Attr, "by"), attrValue(se.Attr, "id")

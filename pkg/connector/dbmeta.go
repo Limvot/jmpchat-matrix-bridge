@@ -55,6 +55,13 @@ type MessageMetadata struct {
 	// BackfillSource is set for messages fetched via MAM (XEP-0313) backfill/catch-up.
 	BackfillSource string `json:"backfill_source,omitempty"` // e.g. "mam"
 
+	// Markable: the inbound message carried XEP-0333 <markable/>; only such messages may be marked displayed.
+	Markable bool `json:"markable,omitempty"`
+
+	// Media: the row is a file/media part (inbound OOB/URL media or outbound upload); corrections never
+	// turn media into text (Phase D). Unknown (false) for rows stored before this field existed.
+	Media bool `json:"media,omitempty"`
+
 	// Future extensibility (not yet used):
 	// IsPuppeted bool `json:"is_puppeted,omitempty"` // True if sent via double-puppeting
 }

@@ -182,6 +182,7 @@ func (x *xmppClient) handleCarbonSent(t xmlstream.TokenReadEncoder, outer *xml.S
 		x:         x,
 		stanzaID:  ids.stanzaIDBy(string(x.loginID)),
 		originID:  ids.OriginID,
+		markable:  ids.Extras.Markable,
 	})
 	return nil
 }
@@ -255,6 +256,7 @@ func (x *xmppClient) handleCarbonReceived(t xmlstream.TokenReadEncoder, outer *x
 		x:         x,
 		stanzaID:  ids.stanzaIDBy(string(x.loginID)),
 		originID:  ids.OriginID,
+		markable:  ids.Extras.Markable,
 	})
 	return nil
 }
