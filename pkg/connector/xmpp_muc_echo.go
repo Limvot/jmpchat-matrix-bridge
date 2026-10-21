@@ -6,8 +6,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rs/zerolog"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/database"
+	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/id"
 )
 
@@ -262,4 +264,75 @@ func (x *xmppClient) persistEchoIDs(mxid id.EventID, stanzaID, occupantID string
 	if err := x.conn.br.DB.Message.Update(ctx, row); err != nil {
 		x.log.Warn().Err(err).Msg("Failed to store MUC echo ids on sent message")
 	}
+}
+
+// ownMUCReplayExists reports whether a groupchat message from our own occupant JID (one that is NOT a
+// registered echo, see handleOwnMUCEcho) is a replay of a message already bridged in this portal and
+// sent by the user: MUC history on (re)join or any later re-delivery of a message the BRIDGE sent
+// after its echo-table entry expired. Those rows are Matrix-originated (`matrix:` id with the XMPP
+// ids in metadata), so bridgev2's duplicate check by message id does not catch them.
+//
+// Matching, room-scoped and restricted to rows whose sender is the user (so another occupant can
+// never make one of our messages disappear): the trusted room stanza-id against stanza_id, then the
+// origin-id and the `id` attribute against origin_id / xmpp_message_id, plus the origin-id as a
+// direct row id (a message from another client of the user bridged earlier, whose id attribute the
+// room rewrote). A genuinely new message from another client carries fresh ids and matches nothing.
+// DB access: portal event loop only, never on the Serve goroutine.
+func ownMUCReplayExists(ctx context.Context, db *database.Database, portal networkid.PortalKey, self networkid.UserID, stanzaID, originID, idAttr string) (bool, error) {
+	if db == nil {
+		return false, nil
+	}
+	ownRow := func(id networkid.MessageID) (bool, error) {
+		parts, err := db.Message.GetAllPartsByID(ctx, portal.Receiver, id)
+		if err != nil {
+			return false, err
+		}
+		for _, p := range parts {
+			if p.Room == portal && p.SenderID == self {
+				return true, nil
+			}
+		}
+		return false, nil
+	}
+	check := func(keys []string, ref string) (bool, error) {
+		if ref == "" {
+			return false, nil
+		}
+		ids, err := aliasMessageIDs(ctx, db, portal, keys, ref)
+		if err != nil {
+			return false, err
+		}
+		for _, id := range ids {
+			if ok, err := ownRow(id); ok || err != nil {
+				return ok, err
+			}
+		}
+		return false, nil
+	}
+	if ok, err := check([]string{metaKeyStanzaID}, stanzaID); ok || err != nil {
+		return ok, err
+	}
+	for _, ref := range []string{originID, idAttr} {
+		if ok, err := check([]string{metaKeyOriginID, metaKeyXMPPID}, ref); ok || err != nil {
+			return ok, err
+		}
+	}
+	if originID != "" && originID != idAttr {
+		return ownRow(networkid.MessageID(originID))
+	}
+	return false, nil
+}
+
+// isOwnMUCReplay is ownMUCReplayExists for an inbound from-me groupchat message. A lookup error is
+// logged and treated as "not a replay" (a duplicate is better than a lost message).
+func (m *jabberRemoteMessage) isOwnMUCReplay(ctx context.Context) bool {
+	if !m.groupchat || !m.sender.IsFromMe || m.x == nil || m.x.conn == nil || m.x.conn.br == nil {
+		return false
+	}
+	dup, err := ownMUCReplayExists(ctx, m.x.conn.br.DB, m.portalKey, networkid.UserID(m.x.loginID), m.stanzaID, m.originID, string(m.id))
+	if err != nil {
+		zerolog.Ctx(ctx).Warn().Err(err).Msg("Own MUC replay lookup failed; bridging the message")
+		return false
+	}
+	return dup
 }

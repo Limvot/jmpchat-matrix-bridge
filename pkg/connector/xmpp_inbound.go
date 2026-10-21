@@ -900,10 +900,12 @@ func (x *xmppClient) handlePresence(t xmlstream.TokenReadEncoder, start *xml.Sta
 	x.mucPendingJoinMu.Lock()
 	pendingNick, pending := x.mucPendingJoin[roomBare]
 	if pending && pendingNick == ourNick && typeVal != "unavailable" {
+		x.mucOurOccupantJIDMu.Lock()
 		if x.mucOurOccupantJID == nil {
 			x.mucOurOccupantJID = make(map[string]string)
 		}
 		x.mucOurOccupantJID[roomBare] = fromJID.String()
+		x.mucOurOccupantJIDMu.Unlock()
 		delete(x.mucPendingJoin, roomBare)
 		x.log.Debug().Str("room", roomBare).Str("occupant_jid", fromJID.String()).Msg("MUC join confirmed, stored our occupant JID")
 		// Confirmed with an alternative nick after a 409: remember it and tell the user (goroutine).
@@ -1209,6 +1211,12 @@ func (m *jabberRemoteMessage) ConvertMessage(ctx context.Context, portal *bridge
 	// would bring it back; the retracted-refs record keeps it out.
 	if m.x != nil && m.x.isRetracted(ctx, m.portalKey.ID, retractedSender{senderID: string(m.sender.Sender), occupantID: m.occupantID, stanzaID: m.stanzaID}, string(m.id), m.stanzaID, m.originID) {
 		zerolog.Ctx(ctx).Debug().Msg("Ignoring replayed message that was retracted")
+		return nil, bridgev2.ErrIgnoringRemoteEvent
+	}
+	// A from-me groupchat message that is a replay of one already bridged (e.g. MUC history after the
+	// echo-table entry of a message the bridge sent expired) must not be bridged a second time.
+	if m.isOwnMUCReplay(ctx) {
+		zerolog.Ctx(ctx).Debug().Msg("Ignoring replayed MUC message from our own nick that is already bridged")
 		return nil, bridgev2.ErrIgnoringRemoteEvent
 	}
 	cm, err := m.convertMessage(ctx, portal, intent)
