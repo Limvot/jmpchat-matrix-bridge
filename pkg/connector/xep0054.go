@@ -14,6 +14,7 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -23,6 +24,7 @@ import (
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/networkid"
 	"mellium.im/xmlstream"
+	"mellium.im/xmpp"
 	"mellium.im/xmpp/jid"
 	"mellium.im/xmpp/stanza"
 
@@ -128,7 +130,7 @@ func (x *xmppClient) fetchVCardPhoto(ctx context.Context, to jid.JID, spanPeer s
 			attribute.String("xmpp.peer.jid", spanPeer),
 		)
 	}
-	if err := sess.UnmarshalIQElement(ctx, payload, iq, &res); err != nil {
+	if err := sendVCardGet(ctx, sess, payload, iq, &res); err != nil {
 		telemetry.Fail(span, err)
 		return nil, "", "", fmt.Errorf("vcard fetch %s: %w", to, err)
 	}
@@ -151,6 +153,67 @@ func (x *xmppClient) fetchVCardPhoto(ctx context.Context, to jid.JID, spanPeer s
 	}
 	sum := sha1.Sum(decoded)
 	return decoded, strings.TrimSpace(res.Photo.Type), hex.EncodeToString(sum[:]), nil
+}
+
+// iqStanzaError is a stanza error reply to an IQ together with the reply's from attribute (who
+// answered). errors.As(err, &stanza.Error{}) still works through Unwrap.
+type iqStanzaError struct {
+	from string
+	err  stanza.Error
+}
+
+func (e *iqStanzaError) Error() string { return e.err.Error() }
+func (e *iqStanzaError) Unwrap() error { return e.err }
+
+// iqErrorFrom returns the from attribute of a stanza error reply wrapped in err ("" if unknown).
+func iqErrorFrom(err error) string {
+	var ie *iqStanzaError
+	if errors.As(err, &ie) {
+		return ie.from
+	}
+	return ""
+}
+
+// sendVCardGet is UnmarshalIQElement, except that an error reply keeps its from attribute
+// (iqStanzaError), which the MUC breaker uses to tell a room refusal from an occupant's answer.
+func sendVCardGet(ctx context.Context, sess *xmpp.Session, payload xml.TokenReader, iq stanza.IQ, v *vcardResult) (e error) {
+	resp, err := sess.SendIQElement(ctx, payload, iq)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if cerr := resp.Close(); e == nil {
+			e = cerr
+		}
+	}()
+	tok, err := resp.Token()
+	if err != nil {
+		return err
+	}
+	start, ok := tok.(xml.StartElement)
+	if !ok {
+		return fmt.Errorf("vcard: expected IQ start token, got %T", tok)
+	}
+	if _, err := stanza.UnmarshalIQError(resp, start); err != nil {
+		var se stanza.Error
+		if errors.As(err, &se) {
+			return &iqStanzaError{from: attrValue(start.Attr, "from"), err: se}
+		}
+		return err
+	}
+	d := xml.NewTokenDecoder(xmlstream.Inner(resp))
+	t, err := d.Token()
+	if err == io.EOF {
+		return nil // empty result: no vCard, no photo
+	}
+	if err != nil {
+		return err
+	}
+	inner, ok := t.(xml.StartElement)
+	if !ok {
+		return nil
+	}
+	return d.DecodeElement(v, &inner)
 }
 
 // cachedContactAvatar returns the ghost's already-known avatar (from GhostMetadata.AvatarHash)
@@ -211,7 +274,8 @@ func (x *xmppClient) queueAvatarRefresh(bareJID string) {
 // or leaves (unchanged) the ghost avatar, then stamps AvatarFetchedAt/AvatarHash. Runs on its own
 // goroutine (via queueAvatarRefresh) so it never blocks GetUserInfo or the presence handler.
 func (x *xmppClient) doAvatarRefresh(bareJID string) {
-	ctx, span := telemetry.Start(context.Background(), "xmpp.avatar.refresh")
+	// The ctx carries the client logger so framework errors (avatar upload, profile set) are logged.
+	ctx, span := telemetry.Start(x.log.WithContext(context.Background()), "xmpp.avatar.refresh")
 	defer span.End()
 	log := x.logFor(ctx)
 	if span.IsRecording() {

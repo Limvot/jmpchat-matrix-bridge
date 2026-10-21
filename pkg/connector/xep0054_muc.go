@@ -55,7 +55,8 @@ const (
 	mucAvatarWaitPause   = 60 * time.Second
 	mucAvatarFailRetry   = 6 * time.Hour
 	mucAvatarRoomErrMax  = 5
-	mucAvatarStatsPeriod = 60 * time.Second
+	mucAvatarStatsPeriod = 5 * time.Minute  // info-level stats summary: at most this often, only when changed
+	mucAvatarFailClasses = 32               // cap on distinct failure classes counted for the stats line
 	mucContactRefreshAge = 10 * time.Minute // contact rule: min age of a contact fetch before a room-triggered refresh
 	mucContactReqCap     = 1024             // cap on the room-triggered contact refresh record
 )
@@ -116,7 +117,7 @@ type mucMXC struct {
 }
 
 type mucAvatarStats struct {
-	enqueued, coalesced, droppedFull, fetched, applied, removed, failed, rejected int
+	enqueued, coalesced, droppedFull, fetched, applied, removed, failed, rejected, skippedDisabled int
 }
 
 // avatarGhost is the slice of *bridgev2.Ghost the worker uses (fakeable in tests).
@@ -157,7 +158,9 @@ type mucAvatarState struct {
 	histOrder      []string // keys of history-only entries, oldest first (may hold stale keys)
 	histN          int      // number of live table entries that are history-only
 	stats          mucAvatarStats
-	lastStats      mucAvatarStats
+	failBy         map[string]int // failure class ("cancel/item-not-found", "timeout", ...) -> count
+	statsVer       uint64         // bumped on every stats change
+	lastStatsVer   uint64
 	lastStatsAt    time.Time
 	contactReq     map[string]mucContactReq // room-triggered contact refreshes, kept across sessions
 
@@ -263,6 +266,9 @@ func (s *mucAvatarState) initLocked() {
 	if s.contactReq == nil {
 		s.contactReq = make(map[string]mucContactReq)
 	}
+	if s.failBy == nil {
+		s.failBy = make(map[string]int)
+	}
 }
 
 // reset starts a fresh session: a rejoin re-sends every presence, so the table, queue and
@@ -308,10 +314,12 @@ func (s *mucAvatarState) shouldEnqueueLocked(rec *mucOccupant) bool {
 func (s *mucAvatarState) enqueueLocked(key string) {
 	if _, ok := s.pending[key]; ok {
 		s.stats.coalesced++
+		s.statsVer++
 		return
 	}
 	if len(s.pending) >= mucAvatarMaxPending {
 		s.stats.droppedFull++
+		s.statsVer++
 		return
 	}
 	if len(s.queue) >= 2*mucAvatarMaxPending { // compact stale keys left by deletions
@@ -326,6 +334,7 @@ func (s *mucAvatarState) enqueueLocked(key string) {
 	s.pending[key] = struct{}{}
 	s.queue = append(s.queue, key)
 	s.stats.enqueued++
+	s.statsVer++
 	select {
 	case s.wake <- struct{}{}:
 	default:
@@ -538,7 +547,71 @@ func (s *mucAvatarState) putMXC(e mucMXC, keys ...string) {
 func (s *mucAvatarState) bump(f func(*mucAvatarStats)) {
 	s.mu.Lock()
 	f(&s.stats)
+	s.statsVer++
 	s.mu.Unlock()
+}
+
+// noteFailure counts a failed fetch under its class (bounded number of classes).
+func (s *mucAvatarState) noteFailure(class string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.initLocked()
+	s.stats.failed++
+	s.statsVer++
+	if _, ok := s.failBy[class]; !ok && len(s.failBy) >= mucAvatarFailClasses {
+		class = "other"
+	}
+	s.failBy[class]++
+}
+
+// avatarFailClass is the stats key of a fetch error: "<type>/<condition>" for a stanza error,
+// "timeout" for an unanswered IQ, "other" otherwise. Never holds JIDs or text from the peer
+// beyond the RFC 6120 condition name.
+func avatarFailClass(err error) string {
+	if typ, cond := avatarErrInfo(err); typ != "" || cond != "" {
+		return typ + "/" + cond
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "timeout"
+	}
+	return "other"
+}
+
+// mucRoomRefusal reports whether a failed occupant vCard fetch says the ROOM refuses to forward
+// IQs to occupants (counts toward the per-room breaker), as opposed to an answer about the
+// occupant (its server has no vCard, does not implement it, is unreachable, the occupant left),
+// which only sets the occupant's failure window. In a big public room the latter are common and
+// must not disable fetching for everyone else.
+//
+// A room refusal is an auth/cancel stanza error that either is attributed to the room (reply from
+// the room's bare JID, or error@by naming the room or its service) with a condition that is not
+// occupant-specific, or carries a room policy condition (not-allowed, not-acceptable) that no
+// other entity claims (error@by naming a different domain).
+func mucRoomRefusal(err error, room string) bool {
+	var se stanza.Error
+	if !errors.As(err, &se) {
+		return false // timeouts and transport errors say nothing about the room's policy
+	}
+	if se.Type != stanza.Cancel && se.Type != stanza.Auth {
+		return false
+	}
+	switch se.Condition {
+	case stanza.ItemNotFound, stanza.RecipientUnavailable, stanza.RemoteServerNotFound, stanza.RemoteServerTimeout:
+		return false // about the occupant or the route to its server
+	}
+	roomDomain := room
+	if i := strings.IndexByte(room, '@'); i >= 0 {
+		roomDomain = room[i+1:]
+	}
+	by := se.By.String()
+	byRoom := by != "" && (strings.EqualFold(bareOf(by), room) || strings.EqualFold(by, roomDomain))
+	if byRoom || strings.EqualFold(iqErrorFrom(err), room) {
+		return true
+	}
+	if by != "" {
+		return false // another entity (the occupant's server) generated it
+	}
+	return se.Condition == stanza.NotAllowed || se.Condition == stanza.NotAcceptable
 }
 
 // mucAvatarAction is the worker's decision for one job.
@@ -608,22 +681,36 @@ func (s *mucAvatarState) runWorker(ctx context.Context) {
 	}
 }
 
-// flushStats logs the counters at most once per mucAvatarStatsPeriod and only if they changed.
+// flushStats logs the cumulative counters at info, at most once per mucAvatarStatsPeriod and only
+// if they changed. Counts and room JIDs only (never bytes, URLs or real JIDs).
 func (s *mucAvatarState) flushStats(ctx context.Context) {
 	s.mu.Lock()
 	now := s.nowT()
-	if now.Sub(s.lastStatsAt) < mucAvatarStatsPeriod || s.stats == s.lastStats {
+	if s.statsVer == s.lastStatsVer || (!s.lastStatsAt.IsZero() && now.Sub(s.lastStatsAt) < mucAvatarStatsPeriod) {
 		s.mu.Unlock()
 		return
 	}
 	st := s.stats
-	s.lastStats = st
+	s.lastStatsVer = s.statsVer
 	s.lastStatsAt = now
+	failBy := zerolog.Dict()
+	for k, v := range s.failBy {
+		failBy = failBy.Int(k, v)
+	}
+	disabled := make([]string, 0, len(s.roomDisabled))
+	for r, d := range s.roomDisabled {
+		if d {
+			disabled = append(disabled, r)
+		}
+	}
+	occupants, history, queued := len(s.occ), s.histN, len(s.pending)
 	s.mu.Unlock()
-	s.log(ctx).Debug().
+	s.log(ctx).Info().
 		Int("enqueued", st.enqueued).Int("coalesced", st.coalesced).Int("dropped_full", st.droppedFull).
 		Int("fetched", st.fetched).Int("applied", st.applied).Int("removed", st.removed).
-		Int("failed", st.failed).Int("rejected", st.rejected).
+		Int("failed", st.failed).Int("rejected", st.rejected).Int("skipped_room_disabled", st.skippedDisabled).
+		Dict("failures", failBy).Strs("rooms_disabled", disabled).
+		Int("occupants", occupants).Int("history_only", history).Int("queued", queued).
 		Msg("MUC avatar stats")
 }
 
@@ -706,6 +793,10 @@ func (s *mucAvatarState) process(ctx context.Context, key string, snap mucOccSna
 	if act == mucActFetch {
 		s.mu.Lock()
 		disabled := s.roomDisabled[snap.room]
+		if disabled {
+			s.stats.skippedDisabled++
+			s.statsVer++
+		}
 		s.mu.Unlock()
 		if disabled {
 			return
@@ -963,6 +1054,7 @@ func (s *mucAvatarState) fetchAndApply(ctx context.Context, key string, snap muc
 	}
 	source := "occupant"
 	data, hash, err := s.fetch(ctx, occJID, key)
+	primaryErr := err // the room breaker only ever looks at the answer to the occupant JID
 	var primaryType, primaryCond string
 	if err != nil && !errors.Is(err, errAvatarRejected) && snap.realJID != "" {
 		if realJID, rerr := jid.Parse(snap.realJID); rerr == nil {
@@ -981,6 +1073,7 @@ func (s *mucAvatarState) fetchAndApply(ctx context.Context, key string, snap muc
 	if err != nil && ctx.Err() != nil {
 		return // session ended mid-fetch: not the occupant's fault, record nothing
 	}
+	s.noteRoomAnswer(ctx, snap.room, primaryErr)
 	if err != nil {
 		if errors.Is(err, errAvatarRejected) {
 			s.bump(func(st *mucAvatarStats) { st.rejected++ })
@@ -991,7 +1084,7 @@ func (s *mucAvatarState) fetchAndApply(ctx context.Context, key string, snap muc
 		}
 		typ, cond := avatarErrInfo(err)
 		s.markFail(key, adv)
-		s.bump(func(st *mucAvatarStats) { st.failed++ })
+		s.noteFailure(avatarFailClass(err))
 		telemetry.Fail(trace.SpanFromContext(ctx), err)
 		setOutcome(source, "error")
 		ev := log.Debug().Err(err).Str("occupant", key).Str("source", source).
@@ -1000,31 +1093,13 @@ func (s *mucAvatarState) fetchAndApply(ctx context.Context, key string, snap muc
 			ev = ev.Str("primary_error_type", primaryType).Str("primary_condition", primaryCond)
 		}
 		ev.Msg("MUC avatar fetch failed")
-		switch typ {
-		case "wait":
+		if typ == "wait" {
 			s.mu.Lock()
 			s.pausedUntil = s.nowT().Add(mucAvatarWaitPause)
 			s.mu.Unlock()
-		case "cancel":
-			s.mu.Lock()
-			s.roomCancelErrs[snap.room]++
-			disable := s.roomCancelErrs[snap.room] >= mucAvatarRoomErrMax && !s.roomDisabled[snap.room]
-			if disable {
-				s.roomDisabled[snap.room] = true
-			}
-			s.mu.Unlock()
-			if disable {
-				log.Debug().Str("room", snap.room).Msg("MUC avatar fetching disabled for room")
-			}
 		}
 		return
 	}
-	// The IQ was answered: the room is not refusing us.
-	s.mu.Lock()
-	if s.roomCancelErrs != nil {
-		delete(s.roomCancelErrs, snap.room)
-	}
-	s.mu.Unlock()
 	if hash == "" {
 		s.bump(func(st *mucAvatarStats) { st.fetched++ })
 		s.markDone(key, adv)
@@ -1063,6 +1138,40 @@ func (s *mucAvatarState) fetchAndApply(ctx context.Context, key string, snap muc
 		Msg("Fetched MUC avatar (vCard)")
 	if ghost.AvatarApplied() {
 		s.markDone(key, adv)
+	}
+}
+
+// noteRoomAnswer feeds the per-room breaker with the answer to the occupant-JID query (never the
+// real-JID fallback, which is the member's own server). A room refusal (mucRoomRefusal) counts;
+// an answered query (photo, no photo, or a photo we rejected) proves the room forwards and resets
+// the count; any other error (about the occupant, or a timeout) leaves it alone. After
+// mucAvatarRoomErrMax consecutive refusals fetching is disabled for the room until the next session.
+func (s *mucAvatarState) noteRoomAnswer(ctx context.Context, room string, primaryErr error) {
+	if primaryErr == nil || errors.Is(primaryErr, errAvatarRejected) {
+		s.mu.Lock()
+		if s.roomCancelErrs != nil {
+			delete(s.roomCancelErrs, room)
+		}
+		s.mu.Unlock()
+		return
+	}
+	if !mucRoomRefusal(primaryErr, room) {
+		return
+	}
+	s.mu.Lock()
+	s.initLocked()
+	s.roomCancelErrs[room]++
+	n := s.roomCancelErrs[room]
+	disable := n >= mucAvatarRoomErrMax && !s.roomDisabled[room]
+	if disable {
+		s.roomDisabled[room] = true
+		s.statsVer++
+	}
+	s.mu.Unlock()
+	if disable {
+		typ, cond := avatarErrInfo(primaryErr)
+		s.log(ctx).Info().Str("room", room).Int("refusals", n).Str("error_type", typ).Str("condition", cond).
+			Msg("MUC avatar fetching disabled for room (room refuses occupant vCard queries)")
 	}
 }
 
@@ -1120,7 +1229,9 @@ func (x *xmppClient) startMUCAvatars(sessCtx context.Context) {
 		s.refreshContact = x.queueAvatarRefresh
 	}
 	s.mu.Unlock()
-	go s.runWorker(sessCtx)
+	// The worker ctx carries the client logger, so framework errors inside Ghost.UpdateInfo (avatar
+	// upload, profile set; logged via zerolog.Ctx) are not silently dropped.
+	go s.runWorker(x.log.WithContext(sessCtx))
 }
 
 // loadContactAvatar reads the 1:1 contact ghost row for a bare real JID (worker only). It reads a

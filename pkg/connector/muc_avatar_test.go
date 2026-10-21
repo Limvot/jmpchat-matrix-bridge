@@ -483,7 +483,7 @@ func TestWorkerWaitErrorPauses(t *testing.T) {
 func TestWorkerCancelErrorsDisableRoom(t *testing.T) {
 	h := newHarness()
 	h.fetchFn = func(string) ([]byte, string, error) {
-		return nil, "", stanza.Error{Type: stanza.Cancel, Condition: stanza.ServiceUnavailable}
+		return nil, "", stanza.Error{Type: stanza.Cancel, Condition: stanza.NotAllowed}
 	}
 	for i := 0; i < mucAvatarRoomErrMax; i++ {
 		occ := fmt.Sprintf("room@muc.example.com/n%d", i)
