@@ -3,10 +3,11 @@
 # What it does:
 #   - builds the bridge with the same CGO configuration as the upstream Docker
 #     image (E2BE via libolm + SIP call support via libopus)
-#   - a one-shot init unit that, on first boot:
+#   - a one-shot init unit that, on every boot:
 #       1. installs config.yaml generated from `services.jmpchat-matrix-bridge.settings`
-#          (only if missing — the state copy becomes the source of truth afterwards,
-#          since generated tokens/provisioning secrets persist there)
+#          (first boot) or deep-merges the template into the existing state copy
+#          (later boots: settings changes take effect; generated secrets like
+#          as_token/hs_token are preserved — see mergePy for the merge rules)
 #       2. generates the appservice registration with the bridge's own `-g`
 #          (only if missing — `-g` rotates both tokens on every run, so it must
 #          not be re-run while the registration is installed on the homeserver)
@@ -30,13 +31,59 @@ with lib; let
   yamlGenerator = pkgs.formats.yaml {};
   baseConfig = yamlGenerator.generate "jmpchat-matrix-bridge-config.yaml" cfg.settings;
 
+  # Deep-merges the Nix template into the state config on every boot, so that
+  # settings changes in the NixOS config take effect after the first install.
+  # Rules:
+  #   - template values win (deep for dicts, whole-value for lists/scalars)
+  #   - keys only present in the state config (generated secrets like
+  #     appservice.as_token/hs_token) are kept
+  #   - a template value of exactly "generate" is a generation placeholder:
+  #     it only fills a missing key, never overwrites a generated one
+  #   - the file is only rewritten when the merge actually changed something
+  mergePy = pkgs.writeText "jmpchat-matrix-bridge-merge-config.py" ''
+    import sys
+    import yaml
+
+    state_path, template_path = sys.argv[1], sys.argv[2]
+
+    def deep_merge(dst, src):
+        for k, v in src.items():
+            if isinstance(v, dict) and isinstance(dst.get(k), dict):
+                deep_merge(dst[k], v)
+            elif v == "generate" and k in dst:
+                pass
+            else:
+                dst[k] = v
+
+    with open(template_path) as f:
+        template = yaml.safe_load(f) or {}
+    with open(state_path) as f:
+        state = yaml.safe_load(f) or {}
+
+    deep_merge(state, template)
+
+    new = yaml.safe_dump(state, sort_keys=False, default_flow_style=False)
+    with open(state_path) as f:
+        old = f.read()
+    if old != new:
+        with open(state_path, "w") as f:
+            f.write(new)
+        print(f"jmpchat-matrix-bridge: merged Nix template into {state_path}")
+    else:
+        print("jmpchat-matrix-bridge: state config up to date")
+  '';
+
+  pythonEnv = pkgs.python3.withPackages (p: [ p.pyyaml ]);
+
   initScript = pkgs.writeShellScript "jmpchat-matrix-bridge-init" ''
     set -euo pipefail
 
-    # 1. Materialize the config exactly once; the state copy becomes the source of
-    #    truth afterwards (tokens/provisioning secrets are generated into it).
+    # 1. Install the config on first boot; on later boots merge the Nix template
+    #    into the state copy so settings changes take effect (secrets preserved).
     if [ ! -f ${stateDir}/config.yaml ]; then
       install -D -m 0600 -o ${cfg.user} -g ${cfg.group} ${baseConfig} ${stateDir}/config.yaml
+    else
+      ${pythonEnv}/bin/python ${mergePy} ${stateDir}/config.yaml ${baseConfig}
     fi
 
     # 2. Generate the registration + upsert its tokens into the state config.
