@@ -31,14 +31,17 @@ type mucJoinTrack struct {
 	writeBookmark bool
 }
 
-// chooseMUCNick picks the base (preferred) nick and the nick to actually join with. explicit is the
-// per-room muc-nick, def the muc-nick-default. An automatically chosen alternative (autoNick) is only
+// chooseMUCNick picks the base (preferred) nick and the nick to actually join with. Precedence of the
+// base: explicit (the per-room muc-nick) > bookmarkNick (the room's XEP-0402 bookmark) > def (the
+// muc-nick-default) > login localpart. 409 alternatives derive from the base (bookmarkNick_1, ...). An automatically chosen alternative (autoNick) is only
 // reused while it was derived from the same base: changing muc-nick or muc-nick-default makes the
 // bridge try the new preferred nick again.
-func chooseMUCNick(explicit, def, loginID, autoNick, autoBase string) (base, nick string) {
+func chooseMUCNick(explicit, bookmarkNick, def, loginID, autoNick, autoBase string) (base, nick string) {
 	switch {
 	case explicit != "":
 		base = explicit
+	case bookmarkNick != "":
+		base = bookmarkNick
 	case def != "":
 		base = def
 	default:
@@ -80,7 +83,7 @@ func (x *xmppClient) mucNickChoice(ctx context.Context, roomJIDStr string) (base
 			def = meta.DefaultMUCNick
 		}
 	}
-	return chooseMUCNick(explicit, def, string(x.loginID), autoNick, autoBase)
+	return chooseMUCNick(explicit, x.bookmarkNick(roomJIDStr), def, string(x.loginID), autoNick, autoBase)
 }
 
 // startMUCJoinTrack registers a fresh join chain and marks nick as pending. hist is the history

@@ -132,12 +132,3 @@ func (x *xmppClient) logBookmarkGate(ctx context.Context, s bookmarkSupport) {
 		Bool("compat_seen", s.Compat).
 		Msg("Bookmarks capability gate")
 }
-
-// runBookmarkProbe runs once per session in its own goroutine with its own root span (never on Serve):
-// the capability gate and one fetch that fills the cache (bookmarkStartup). Superseded by the startup
-// coordinator in P4.
-func (x *xmppClient) runBookmarkProbe(sessCtx context.Context) {
-	ctx, span := telemetry.Start(sessCtx, "xmpp.bookmarks.probe", trace.WithSpanKind(trace.SpanKindProducer))
-	defer span.End()
-	x.bookmarkStartup(ctx)
-}

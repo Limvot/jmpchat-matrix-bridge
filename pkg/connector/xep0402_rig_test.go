@@ -1,6 +1,7 @@
 package connector
 
 import (
+	"bytes"
 	"context"
 	"encoding/xml"
 	"fmt"
@@ -197,4 +198,22 @@ func wellFormed(s string) error {
 			}
 		}
 	}
+}
+
+// bmLogBuf is a goroutine-safe log sink.
+type bmLogBuf struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (l *bmLogBuf) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *bmLogBuf) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
 }

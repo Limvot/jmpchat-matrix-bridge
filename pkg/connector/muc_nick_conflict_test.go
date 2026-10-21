@@ -183,20 +183,28 @@ func TestMUCNickStale409Ignored(t *testing.T) {
 
 func TestChooseMUCNick(t *testing.T) {
 	cases := []struct {
-		name                          string
-		explicit, def, auto, autoBase string
-		wantBase, wantNick            string
+		name                                    string
+		explicit, bookmark, def, auto, autoBase string
+		wantBase, wantNick                      string
 	}{
-		{"login localpart", "", "", "", "", "alice", "alice"},
-		{"default", "", "dflt", "", "", "dflt", "dflt"},
-		{"explicit beats default", "mine", "dflt", "", "", "mine", "mine"},
-		{"remembered auto reused on rejoin", "", "", "alice_1", "alice", "alice", "alice_1"},
-		{"auto for explicit base", "mine", "", "mine_2", "mine", "mine", "mine_2"},
-		{"default changed: auto dropped", "", "new", "alice_1", "alice", "new", "new"},
-		{"explicit set: auto dropped", "mine", "", "alice_1", "alice", "mine", "mine"},
+		{"login localpart", "", "", "", "", "", "alice", "alice"},
+		{"default", "", "", "dflt", "", "", "dflt", "dflt"},
+		{"explicit beats default", "mine", "", "dflt", "", "", "mine", "mine"},
+		{"remembered auto reused on rejoin", "", "", "", "alice_1", "alice", "alice", "alice_1"},
+		{"auto for explicit base", "mine", "", "", "mine_2", "mine", "mine", "mine_2"},
+		{"default changed: auto dropped", "", "", "new", "alice_1", "alice", "new", "new"},
+		{"explicit set: auto dropped", "mine", "", "", "alice_1", "alice", "mine", "mine"},
+		// Bookmark nick: explicit > bookmark > auto (valid for that base) > default > localpart.
+		{"bookmark beats default and localpart", "", "bm", "dflt", "", "", "bm", "bm"},
+		{"explicit beats bookmark", "mine", "bm", "dflt", "", "", "mine", "mine"},
+		{"bookmark beats auto of another base", "", "bm", "", "alice_1", "alice", "bm", "bm"},
+		{"auto derived from the bookmark nick is reused", "", "bm", "", "bm_1", "bm", "bm", "bm_1"},
+		{"bookmark nick changed: stale auto dropped", "", "bm2", "", "bm_1", "bm", "bm2", "bm2"},
+		{"bookmark removed: auto of bookmark base dropped", "", "", "", "bm_1", "bm", "alice", "alice"},
+		{"explicit with auto derived from the bookmark base", "mine", "bm", "", "bm_1", "bm", "mine", "mine"},
 	}
 	for _, c := range cases {
-		base, nick := chooseMUCNick(c.explicit, c.def, "alice@example.com", c.auto, c.autoBase)
+		base, nick := chooseMUCNick(c.explicit, c.bookmark, c.def, "alice@example.com", c.auto, c.autoBase)
 		if base != c.wantBase || nick != c.wantNick {
 			t.Errorf("%s: got (%s,%s) want (%s,%s)", c.name, base, nick, c.wantBase, c.wantNick)
 		}
@@ -217,7 +225,7 @@ func TestRememberedNickUsedOnRejoin(t *testing.T) {
 	// here verify joinMUC sends exactly that nick and tracks base separately.
 	r := newNickRig()
 	r.x.login = nil
-	base, nick := chooseMUCNick("", "", string(r.x.loginID), "alice_1", "alice")
+	base, nick := chooseMUCNick("", "", "", string(r.x.loginID), "alice_1", "alice")
 	r.x.startMUCJoinTrack(nickRoom, base, nick, nil, false)
 	if err := r.x.sendMUCJoin(context.Background(), nickRoom, nick, nil); err != nil {
 		t.Fatal(err)
@@ -239,7 +247,7 @@ func TestRememberedNickUsedOnRejoin(t *testing.T) {
 
 func TestMUCNickNoticeNamesFirstTriedNick(t *testing.T) {
 	r := newNickRig()
-	base, nick := chooseMUCNick("", "", string(r.x.loginID), "alice_1", "alice")
+	base, nick := chooseMUCNick("", "", "", string(r.x.loginID), "alice_1", "alice")
 	r.x.startMUCJoinTrack(nickRoom, base, nick, nil, false)
 	if err := r.x.sendMUCJoin(context.Background(), nickRoom, nick, nil); err != nil {
 		t.Fatal(err)

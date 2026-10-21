@@ -58,6 +58,7 @@ type xmppClient struct {
 	mucNoticeHook    func(roomBare, text string)
 	mucNickSaveHook  func(roomBare, base, nick string) error
 	mucSendJoinHook  func(roomBare, nick string) error
+	mucJoinTokensHook func(roomBare string, toks []xml.Token) // the join payload (incl. the bookmark password)
 	// mucJoinHistHook, mucLeftHook, mucRejoinPortalsHook and mucNewestMsgHook (tests only) observe the
 	// join history request, replace the "left" flag persistence, the portal listing and the newest
 	// bridged message lookup of the MUC auto-rejoin (muc_autorejoin.go).
@@ -249,8 +250,6 @@ func (x *xmppClient) Connect(ctx context.Context) {
 	x.startMUCAvatars(sessCtx)
 	// Re-join every bridged MUC of this login (own root span, staggered, ends with sessCtx).
 	go x.runMUCAutoRejoin(sessCtx)
-	// Bookmark capability gate + one read-only fetch (own root span, logs only).
-	go x.runBookmarkProbe(sessCtx)
 }
 
 // endSessionLocked cancels the current session's background goroutine context. Requires x.mu held.
@@ -1605,10 +1604,30 @@ func (x *xmppClient) joinMUCOpts(ctx context.Context, roomJIDStr string, hist *m
 	return nil
 }
 
-// sendMUCJoin sends the XEP-0045 join presence for room/nick.
+// mucJoinTokens is the <x xmlns='http://jabber.org/protocol/muc'/> payload of a join presence: the room
+// password (from the room's bookmark; never logged) and the optional history request.
+func mucJoinTokens(hist *mucHistory, password string) []xml.Token {
+	mucX := xml.StartElement{Name: xml.Name{Space: "http://jabber.org/protocol/muc", Local: "x"}}
+	toks := []xml.Token{mucX}
+	if password != "" {
+		pw := xml.StartElement{Name: xml.Name{Local: "password"}}
+		toks = append(toks, pw, xml.CharData(password), pw.End())
+	}
+	if hist != nil {
+		h := xml.StartElement{Name: xml.Name{Local: "history"}, Attr: hist.attrs()}
+		toks = append(toks, h, h.End())
+	}
+	return append(toks, mucX.End())
+}
+
+// sendMUCJoin sends the XEP-0045 join presence for room/nick (409 retries come through here too).
 func (x *xmppClient) sendMUCJoin(ctx context.Context, roomJIDStr, nick string, hist *mucHistory) error {
 	if x.mucJoinHistHook != nil {
 		x.mucJoinHistHook(roomJIDStr, hist)
+	}
+	toks := mucJoinTokens(hist, x.bookmarkPassword(roomJIDStr))
+	if x.mucJoinTokensHook != nil {
+		x.mucJoinTokensHook(roomJIDStr, toks)
 	}
 	if x.mucSendJoinHook != nil {
 		return x.mucSendJoinHook(roomJIDStr, nick)
@@ -1627,14 +1646,7 @@ func (x *xmppClient) sendMUCJoin(ctx context.Context, roomJIDStr, nick string, h
 	if err != nil {
 		return fmt.Errorf("MUC JID with resource: %w", err)
 	}
-	// XEP-0045: optional <x xmlns='http://jabber.org/protocol/muc'/> so servers treat this as a MUC join.
-	mucX := xml.StartElement{Name: xml.Name{Space: "http://jabber.org/protocol/muc", Local: "x"}}
-	var inner xml.TokenReader
-	if hist != nil {
-		inner = xmlstream.Wrap(nil, xml.StartElement{Name: xml.Name{Local: "history"}, Attr: hist.attrs()})
-	}
-	payload := xmlstream.Wrap(inner, mucX)
-	p := stanza.Presence{To: toJID}.Wrap(payload)
+	p := stanza.Presence{To: toJID}.Wrap(&sliceTokenReader{toks: toks})
 	if err := sess.Send(ctx, p); err != nil {
 		return fmt.Errorf("send MUC join presence: %w", err)
 	}

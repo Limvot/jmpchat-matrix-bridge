@@ -126,20 +126,26 @@ func (x *xmppClient) newestBridgedMessage(ctx context.Context, roomBare string) 
 	return msgs[0].Timestamp
 }
 
-// runMUCAutoRejoin runs once per session in its own goroutine (never on the Serve goroutine) with
-// its own root span. ctx is the session context: when the session ends it is cancelled and the batch
-// stops before the next join. Joins are staggered (mucRejoinInterval) so a login with many rooms does
-// not flood the server, and use the normal joinMUC path (nick choice, 409 handling) with a bounded
-// history request.
+// runMUCAutoRejoin is the startup coordinator, run once per session in its own goroutine (never on the
+// Serve goroutine) with its own root span. ctx is the session context: when the session ends it is
+// cancelled and the batch stops before the next join. Steps:
+//  1. the bookmark capability gate and one fetch (fills the nick/password cache; runs while the initial
+//     delay elapses). When the fetch fails, everything below behaves as before bookmarks existed;
+//  2. the portals to re-join, minus those whose bookmark says autojoin=false (D2: the bookmark wins; they
+//     are marked left and the user gets a notice), only when the fetch succeeded;
+//  3. the autojoin bookmarks that have no Matrix room yet (imports, per-session budget);
+//  4. one staggered (mucRejoinInterval) join loop over the rooms, then the imports, through the normal
+//     joinMUC path (nick choice incl. the bookmark nick, 409 handling) with a bounded history request;
+//  5. the one-time backfill of bookmarks for the bridged rooms that have none (xep0402_backfill.go).
 func (x *xmppClient) runMUCAutoRejoin(sessCtx context.Context) {
 	ctx, span := telemetry.Start(sessCtx, "xmpp.muc.auto_rejoin", trace.WithSpanKind(trace.SpanKindProducer))
 	defer span.End()
 	log := x.logFor(ctx)
 
-	select {
-	case <-ctx.Done():
+	start := time.Now()
+	bms, fetched := x.bookmarkStartup(ctx)
+	if !waitCtx(ctx, mucRejoinInitialDelay-time.Since(start)) {
 		return
-	case <-time.After(mucRejoinInitialDelay):
 	}
 	portals, err := x.listMUCRejoinPortals(ctx)
 	if err != nil {
@@ -148,37 +154,83 @@ func (x *xmppClient) runMUCAutoRejoin(sessCtx context.Context) {
 		return
 	}
 	rooms, skipped := selectMUCRejoinCandidates(ctx, portals, x.loginID, x.isMUC)
+	if fetched {
+		var off []*database.Portal
+		rooms, off = splitBookmarkAutojoinOff(rooms, bms)
+		for _, p := range off {
+			room := string(p.ID)
+			if err := x.setMUCLeft(ctx, room, true); err != nil {
+				log.Warn().Err(err).Str("room", room).Msg("Bookmarks: failed to mark a room left")
+			}
+			x.notifyMUC(ctx, room, bookmarkNotJoinedNotice(x.mucCmdPrefix(), room))
+			log.Info().Str("room", room).Msg("Bookmarks: bookmark has autojoin off; not re-joining, marked left")
+			skipped++
+		}
+	}
 	if len(rooms) > mucRejoinMaxRooms {
 		log.Warn().Int("rooms", len(rooms)).Int("limit", mucRejoinMaxRooms).Msg("MUC auto-rejoin: too many rooms, joining the first ones only")
 		skipped += len(rooms) - mucRejoinMaxRooms
 		rooms = rooms[:mucRejoinMaxRooms]
 	}
-	joined, failed := 0, 0
-	for i, p := range rooms {
-		if i > 0 {
-			select {
-			case <-ctx.Done():
-			case <-time.After(mucRejoinInterval):
+	var imports []bookmarkConf
+	if fetched {
+		var st importStats
+		imports, st = selectBookmarkImports(bms, portals, x.loginID, x.bm.importBudgetLeft())
+		x.bm.takeImportBudget(len(imports))
+		if st.Capped > 0 {
+			log.Warn().Int("imported", len(imports)).Int("autojoin", st.Autojoin).Int("capped", st.Capped).Msg("Bookmarks: import budget reached, the rest is skipped")
+			if x.bm.markBudgetNoticed() {
+				x.notifyManagement(ctx, bookmarkBudgetNotice(x.mucCmdPrefix()))
 			}
 		}
-		if ctx.Err() != nil {
-			skipped += len(rooms) - i
+	}
+	joined, failed, imported := 0, 0, 0
+	total := len(rooms) + len(imports)
+	for i := 0; i < total; i++ {
+		if i > 0 && !waitCtx(ctx, mucRejoinInterval) {
+			skipped += total - i
 			break
 		}
-		room := string(p.ID)
-		hist := mucRejoinHistory(x.newestBridgedMessage(ctx, room), time.Now())
-		if err := x.joinMUC(ctx, room, hist); err != nil {
-			failed++
-			log.Warn().Err(err).Str("room", room).Msg("MUC auto-rejoin: join failed")
+		if ctx.Err() != nil {
+			skipped += total - i
+			break
+		}
+		if i < len(rooms) {
+			room := string(rooms[i].ID)
+			hist := mucRejoinHistory(x.newestBridgedMessage(ctx, room), time.Now())
+			if err := x.joinMUC(ctx, room, hist); err != nil {
+				failed++
+				log.Warn().Err(err).Str("room", room).Msg("MUC auto-rejoin: join failed")
+				continue
+			}
+			joined++
+			log.Debug().Str("room", room).Msg("MUC auto-rejoin: joined")
 			continue
 		}
-		joined++
-		log.Debug().Str("room", room).Msg("MUC auto-rejoin: joined")
+		room := bookmarkKey(imports[i-len(rooms)].ID)
+		if err := x.importBookmarkedRoom(ctx, room); err != nil {
+			failed++
+			log.Warn().Err(err).Str("room", room).Msg("Bookmarks: import join failed")
+			continue
+		}
+		imported++
+		log.Info().Str("room", room).Msg("Bookmarks: imported room")
 	}
 	if span.IsRecording() {
-		span.SetAttributes(attribute.Int("xmpp.muc.rejoin.joined", joined), attribute.Int("xmpp.muc.rejoin.skipped", skipped), attribute.Int("xmpp.muc.rejoin.failed", failed))
+		span.SetAttributes(attribute.Int("xmpp.muc.rejoin.joined", joined), attribute.Int("xmpp.muc.rejoin.skipped", skipped), attribute.Int("xmpp.muc.rejoin.failed", failed),
+			attribute.Int("xmpp.muc.rejoin.imported", imported))
 	}
-	log.Info().Int("joined", joined).Int("skipped", skipped).Int("failed", failed).Msg("MUC auto-rejoin finished")
+	log.Info().Int("joined", joined).Int("imported", imported).Int("skipped", skipped).Int("failed", failed).Msg("MUC auto-rejoin finished")
+	if fetched && ctx.Err() == nil && !x.backfillDone() {
+		if !waitCtx(ctx, bookmarkBackfillSettle) {
+			return
+		}
+		keys := make([]string, 0, len(rooms))
+		for _, p := range rooms {
+			keys = append(keys, bookmarkKey(string(p.ID)))
+		}
+		x.runBookmarkBackfill(ctx, keys, false)
+	}
 }
 
 // setMUCLeft persists the "left" flag of a room in its portal metadata (nothing to do when the room has

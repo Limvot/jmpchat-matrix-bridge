@@ -167,6 +167,12 @@ func main() {
 			Help:          commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Leave a multi-user chat (MUC) room. Usage: `%s leave [_login JID_] <room-jid>`", prefix)},
 		})
 		br.Bridge.Commands.(*commands.Processor).AddHandler(&commands.FullHandler{
+			Func:          withSpan("bookmarks-sync", cmdBookmarksSync),
+			Name:          "bookmarks-sync",
+			RequiresLogin: true,
+			Help:          commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Import the rooms of your XMPP bookmarks (auto-join on) that have no Matrix room yet; never leaves a room or changes a bookmark. `push` also creates bookmarks for the rooms this bridge is already in that have none (existing bookmarks are never modified). Usage: `%s bookmarks-sync [_login JID_] [push]`", prefix)},
+		})
+		br.Bridge.Commands.(*commands.Processor).AddHandler(&commands.FullHandler{
 			Func:          withSpan("muc-nick", cmdMUCNick),
 			Name:          "muc-nick",
 			RequiresLogin: true,
@@ -388,6 +394,49 @@ func cmdMUCLeave(ce *commands.Event) {
 		return
 	}
 	ce.Reply("Left **%s**. If you have a bookmark for it, it is kept with auto-join turned off (your other clients stop joining it too). You can leave the Matrix room from the room menu if desired.%s", roomJID, connector.CommandLoginNotice(ce, login, explicit))
+}
+
+func cmdBookmarksSync(ce *commands.Event) {
+	login, args, explicit := connector.CommandLogin(ce, 0)
+	if login == nil {
+		ce.Reply("You must be logged in. Use `%s login` first.", cmdPrefix(ce))
+		return
+	}
+	push := false
+	for _, a := range args {
+		if strings.EqualFold(a, "push") {
+			push = true
+		} else {
+			ce.Reply("Usage: `%s bookmarks-sync [push]`", cmdPrefix(ce))
+			return
+		}
+	}
+	bs, ok := login.Client.(connector.BookmarkSyncer)
+	if !ok {
+		ce.Reply("Not connected to Jabber. Reconnect (or wait for auto-reconnect) and try again.")
+		return
+	}
+	res, err := bs.SyncBookmarks(ce.Ctx, push)
+	if err != nil {
+		ce.Reply("Bookmark sync failed: %v%s", err, connector.CommandLoginNotice(ce, login, explicit))
+		return
+	}
+	if !res.ReadSupported {
+		ce.Reply("Your server does not support bookmarks (XEP-0402 over PEP); nothing to sync.%s", connector.CommandLoginNotice(ce, login, explicit))
+		return
+	}
+	msg := fmt.Sprintf("Bookmarks: %d total, %d with auto-join. Imported %d new room(s); %d already bridged, %d skipped (not a room), %d over the per-session limit, %d failed. Writing bookmarks is %s%s.",
+		res.Total, res.Autojoin, res.Imported, res.Existing, res.Invalid, res.Capped, res.Failed,
+		map[bool]string{true: "supported", false: "not available"}[res.WriteSupported],
+		map[bool]string{true: " (server mirrors legacy bookmarks)", false: ""}[res.CompatSeen])
+	if push {
+		if res.BackfillRan {
+			msg += fmt.Sprintf(" Push: created %d bookmark(s), %d room(s) already had one (unchanged), %d failed.", res.Created, res.AlreadyHad, res.PushFailed)
+		} else {
+			msg += " Push: not run (the server does not allow private bookmark writes, or the bookmarks could not be read)."
+		}
+	}
+	ce.Reply("%s%s", msg, connector.CommandLoginNotice(ce, login, explicit))
 }
 
 func cmdMUCNick(ce *commands.Event) {
