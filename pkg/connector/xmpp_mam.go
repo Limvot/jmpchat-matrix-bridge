@@ -451,10 +451,11 @@ func (x *xmppClient) FetchMessages(ctx context.Context, params bridgev2.FetchMes
 			msgID = networkid.MessageID("xmp:" + item.Timestamp.Format("20060102150405.000"))
 		}
 		stanzaID, originID := item.stableIDs()
-		cm := &bridgev2.ConvertedMessage{
+		content := mamBackfillContent(item)
+		cm :=&bridgev2.ConvertedMessage{
 			Parts: []*bridgev2.ConvertedMessagePart{{
 				Type:    event.EventMessage,
-				Content: &event.MessageEventContent{MsgType: event.MsgText, Body: item.Body},
+				Content: content,
 				DBMetadata: &MessageMetadata{
 					XMPPMessageID:  item.StanzaID,
 					StanzaID:       stanzaID,
@@ -736,11 +737,13 @@ func (x *xmppClient) mamCatchUpForPortal(ctx, cycleCtx context.Context, bareJID 
 		if ts.IsZero() {
 			ts = time.Now()
 		}
+		encKind, qBody, _ := applyEncryption(item.Extras, bodyOut, "")
 		x.queueRemoteEvent(pctx, &jabberRemoteMessage{
 			portalKey: portalKey,
 			sender:    sender,
 			id:        msgID,
-			body:      bodyOut,
+			encrypted: encKind,
+			body:      qBody,
 			timestamp: ts,
 			x:         x,
 			stanzaID:  stanzaID,
@@ -922,11 +925,13 @@ func (x *xmppClient) doMAMBackfillOnView(ctx context.Context, span trace.Span, p
 		if ts.IsZero() {
 			ts = time.Now()
 		}
+		encKind, qBody, _ := applyEncryption(item.Extras, bodyOut, "")
 		x.queueRemoteEvent(ctx, &jabberRemoteMessage{
 			portalKey: portalKey,
 			sender:    sender,
 			id:        msgID,
-			body:      bodyOut,
+			encrypted: encKind,
+			body:      qBody,
 			timestamp: ts,
 			x:         x,
 			stanzaID:  stanzaID,

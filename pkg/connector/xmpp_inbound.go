@@ -466,7 +466,9 @@ func (x *xmppClient) handleMessageWithOOB(t xmlstream.TokenReadEncoder, start *x
 		}
 	} else {
 		// Regular message (not a reaction, or empty reaction list)
+		encKind, body, oobURL := applyEncryption(ids.Extras, body, oobURL)
 		x.queueRemoteEvent(ctx, &jabberRemoteMessage{
+			encrypted:      encKind,
 			portalKey:      portalKey,
 			sender:         sender,
 			id:             networkid.MessageID(msgID),
@@ -549,6 +551,16 @@ func (x *xmppClient) handleGroupchatWithOOB(t xmlstream.TokenReadEncoder, start 
 			occupantID: ids.OccupantID,
 		}, networkid.PortalKey{ID: networkid.PortalID(room), Receiver: x.loginID},
 			attrValue(start.Attr, "id"), ids, room)
+		return nil
+	}
+	// XEP-0045 section 8.1: a groupchat message with <subject> and no <body> is a subject change (with a
+	// body it is a normal message and the subject is ignored). Bridged as the room topic; never logged.
+	if ids.Extras.Subject != nil && body == "" && oobURL == "" && reactionTarget == "" {
+		if room := bareJID(from); room != "" {
+			ctx, span := startReceiveSpan("subject", "groupchat", from, room, attrValue(start.Attr, "id"), false, false, false)
+			defer span.End()
+			x.queueMUCSubject(ctx, room, *ids.Extras.Subject)
+		}
 		return nil
 	}
 	// Body-less stanzas are only of interest for chat markers (below, after the echo check); everything
@@ -689,7 +701,9 @@ func (x *xmppClient) handleGroupchatWithOOB(t xmlstream.TokenReadEncoder, start 
 			})
 		}
 	} else {
+		encKind, body, oobURL := applyEncryption(ids.Extras, body, oobURL)
 		x.queueRemoteEvent(ctx, &jabberRemoteMessage{
+			encrypted:      encKind,
 			portalKey:      portalKey,
 			sender:         sender,
 			id:             networkid.MessageID(msgID),
@@ -1059,6 +1073,7 @@ type jabberRemoteMessage struct {
 	originID       string
 	occupantID     string // XEP-0421, groupchat only
 	backfillSource string // "mam" for events that came out of the archive
+	encrypted      string // encrypted message kind (encKind*); body and oobURL were cleared, a notice is bridged
 	markable       bool   // the message carried XEP-0333 <markable/> (stored in MessageMetadata.Markable)
 	receipt        *receiptRequest // XEP-0184 request to answer once the message is bridged (live 1:1 only)
 	timestamp      time.Time
@@ -1339,6 +1354,12 @@ func (m *jabberRemoteMessage) convertMessage(ctx context.Context, portal *bridge
 	defer span.End()
 	if span.IsRecording() {
 		span.SetAttributes(attribute.Bool("xmpp.has_oob", m.oobURL != ""))
+	}
+	if m.encrypted != "" {
+		return &bridgev2.ConvertedMessage{Parts: []*bridgev2.ConvertedMessagePart{{
+			Type:    event.EventMessage,
+			Content: encryptedNoticeContent(m.encrypted),
+		}}}, nil
 	}
 	body := strings.TrimSpace(m.body)
 	// Prefer XEP-0066 OOB URL when present (Jabber client sent media with OOB).

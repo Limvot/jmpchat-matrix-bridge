@@ -32,6 +32,7 @@ import (
 	"maunium.net/go/mautrix/bridgev2/simplevent"
 	"maunium.net/go/mautrix/bridgev2/status"
 	"maunium.net/go/mautrix/event"
+	"maunium.net/go/mautrix/format"
 
 	"github.com/williamkray/jmpchat-matrix-bridge/pkg/telemetry"
 )
@@ -1181,6 +1182,21 @@ func (x *xmppClient) getDecoratedDMChatInfo(ctx context.Context, portal *bridgev
 // No customization: use standard bridge behavior for the personal filtering space room.
 func (x *xmppClient) CustomizePersonalFilteringSpace(req *mautrix.ReqCreateRoom) {}
 
+// plainFromFormattedBody converts a Matrix formatted_body (HTML) to the plain text sent as the XMPP body
+// when an event carries no plain body. Never send the raw HTML.
+func plainFromFormattedBody(html string) string {
+	return strings.TrimSpace(format.HTMLToText(html))
+}
+
+// composeMUCTopic is the room topic rule shared by the resync (disco#info) and the live subject
+// (XEP-0045 section 8.1): the subject when non-empty, else the room description.
+func composeMUCTopic(description, subject string) string {
+	if subject != "" {
+		return subject
+	}
+	return description
+}
+
 // getMUCRoomMetadata fetches MUC room name and topic from disco#info (XEP-0030) extended info (XEP-0128 muc#roominfo form).
 // Returns name and topic; empty strings if unavailable or on error.
 func (x *xmppClient) getMUCRoomMetadata(ctx context.Context, roomJID string) (name, topic string) {
@@ -1213,23 +1229,16 @@ func (x *xmppClient) getMUCRoomMetadata(ctx context.Context, roomJID string) (na
 		if formType != mucRoomInfoFormNS {
 			continue
 		}
-		// Prefer room name from form; then description; then subject as topic.
+		// Prefer room name from form; the topic is composeMUCTopic(description, subject).
 		if n, ok := f.GetString("muc#roominfo_roomname"); ok && n != "" {
 			name = n
 		}
 		if n, ok := f.GetString("muc#roomconfig_roomname"); ok && n != "" && name == "" {
 			name = n
 		}
-		if d, ok := f.GetString("muc#roominfo_description"); ok && d != "" {
-			topic = d
-		}
-		if s, ok := f.GetString("muc#roominfo_subject"); ok && s != "" {
-			if topic != "" {
-				topic = topic + " | " + s
-			} else {
-				topic = s
-			}
-		}
+		desc, _ := f.GetString("muc#roominfo_description")
+		subj, _ := f.GetString("muc#roominfo_subject")
+		topic = composeMUCTopic(desc, subj)
 		// Fallback field names used by some servers
 		if name == "" {
 			if n, ok := f.GetString("Room name"); ok && n != "" {
@@ -2054,10 +2063,10 @@ func (x *xmppClient) handleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 
 	body := msg.Content.Body
 	if body == "" && msg.Content.FormattedBody != "" {
-		body = msg.Content.FormattedBody
-		log.Debug().Msg("DEBUG: Using FormattedBody instead of Body")
+		body = plainFromFormattedBody(msg.Content.FormattedBody)
+		log.Debug().Msg("DEBUG: Using FormattedBody (converted to text) instead of Body")
 	}
-	
+
 	log.Debug().
 		Str("resolved_body_len", fmt.Sprintf("%d", len(body))).
 		Msg("DEBUG: Body resolved from Matrix content")

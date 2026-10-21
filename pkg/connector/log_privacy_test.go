@@ -35,6 +35,11 @@ func TestInboundMessageContentNotLogged(t *testing.T) {
 	runHandler(t, x, `<message type="groupchat" from="room@muc.example.com/bob" id="k2"><body>`+secret+` fix muc</body><replace xmlns="urn:xmpp:message-correct:0" id="g1"/></message>`)
 	runHandler(t, x, `<message from="me@example.com"><sent xmlns="urn:xmpp:carbons:2"><forwarded xmlns="urn:xmpp:forward:0"><message xmlns="jabber:client" from="me@example.com/l" to="bob@example.com" type="chat" id="k3"><body>`+secret+` fix carbon</body><replace xmlns="urn:xmpp:message-correct:0" id="c1"/></message></forwarded></sent></message>`)
 
+	// MUC subject (room topic) and encrypted messages (OMEMO fallback body, aesgcm URL): content too.
+	runHandler(t, x, `<message type="groupchat" from="room@muc.example.com/bob" id="t1"><subject>`+secret+` subject</subject></message>`)
+	runHandler(t, x, `<message type="chat" from="bob@example.com/res" id="t2"><encrypted xmlns="eu.siacs.conversations.axolotl"><payload>AA</payload></encrypted><body>`+secret+` omemo fallback</body></message>`)
+	runHandler(t, x, `<message type="chat" from="bob@example.com/res" id="t3"><body>aesgcm://example.com/`+secret+`#key</body></message>`)
+
 	// XEP-0085/0333/0184 signals (DM, MUC, carbons), also with content in an unrelated <body>.
 	x.mucAv.noteGhost("room@muc.example.com/bob")
 	x.signalHook = func(context.Context, outSignal) error { return nil }

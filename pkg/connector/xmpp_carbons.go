@@ -203,11 +203,13 @@ func (x *xmppClient) handleCarbonSent(t xmlstream.TokenReadEncoder, outer *xml.S
 		Str("to", toBare).
 		Int("body_len", len(body)).
 		Msg("Carbon <sent>: queuing message sent from another client")
+	encKind, qBody, _ := applyEncryption(ids.Extras, body, "")
 	x.queueRemoteEvent(ctx, &jabberRemoteMessage{
 		portalKey: portalKey,
 		sender:    sender,
 		id:        msgID,
-		body:      body,
+		encrypted: encKind,
+		body:      qBody,
 		timestamp: time.Now(),
 		x:         x,
 		stanzaID:  ids.stanzaIDBy(string(x.loginID)),
@@ -301,11 +303,13 @@ func (x *xmppClient) handleCarbonReceived(t xmlstream.TokenReadEncoder, outer *x
 		Str("from", fromBare).
 		Int("body_len", len(body)).
 		Msg("Carbon <received>: queuing message received on another client")
+	encKind, qBody, _ := applyEncryption(ids.Extras, body, "")
 	x.queueRemoteEvent(ctx, &jabberRemoteMessage{
 		portalKey: portalKey,
 		sender:    sender,
 		id:        msgID,
-		body:      body,
+		encrypted: encKind,
+		body:      qBody,
 		timestamp: time.Now(),
 		x:         x,
 		stanzaID:  ids.stanzaIDBy(string(x.loginID)),
