@@ -542,6 +542,75 @@ func TestFoldBatchCorrections(t *testing.T) {
 	}
 }
 
+func TestMAMCorrectionIDFallsBackToOriginID(t *testing.T) {
+	it := corrItem("xmp:20231114", "bob@example.com/p", "m1", "x", 1)
+	it.OriginID = "origin-9"
+	if got := mamCorrectionID(it); got != "origin-9" {
+		t.Errorf("generated id must yield the origin-id, got %q", got)
+	}
+	it.StanzaID = "real-id"
+	if got := mamCorrectionID(it); got != "real-id" {
+		t.Errorf("a real id wins like on the live path, got %q", got)
+	}
+	it.StanzaID, it.OriginID = "xmp:1", ""
+	if got := mamCorrectionID(it); got != "" {
+		t.Errorf("no stable id: got %q", got)
+	}
+	x, got := hookClient()
+	it.StanzaID, it.OriginID = "xmp:1", "origin-9"
+	pk := networkid.PortalKey{ID: "bob@example.com", Receiver: retractTestLogin}
+	x.queueMAMCorrection(context.Background(), pk, it)
+	evt := (*got)[0].(*simplevent.Message[*correction])
+	if evt.Data.corrID != "origin-9" {
+		t.Errorf("queued corrID = %q", evt.Data.corrID)
+	}
+}
+
+func TestFoldBatchCorrectionsChainWithoutTimestamps(t *testing.T) {
+	// Equal timestamps, the chained correction (c2 replaces c1) listed first.
+	items := []mamResultItem{
+		corrItem("c2", "bob@example.com/p", "c1", "third", 0),
+		corrItem("m1", "bob@example.com/p", "", "first", 0),
+		corrItem("c1", "bob@example.com/p", "m1", "second", 0),
+	}
+	got, folded := foldBatchCorrectionsDetailed(items)
+	if len(got) != 1 || got[0].Body != "third" {
+		t.Fatalf("got %+v, want the chain end to win", got)
+	}
+	if len(folded) != 2 || folded[0].corr.StanzaID != "c1" || folded[1].corr.StanzaID != "c2" {
+		t.Fatalf("folded = %+v, want chain order c1, c2", folded)
+	}
+}
+
+func TestFoldBatchCorrectionsRecordsKeys(t *testing.T) {
+	m1 := corrItem("m1", "bob@example.com/p", "", "first", 1)
+	c1 := corrItem("xmp:gen", "BOB@example.com/p", "m1", "second", 2)
+	c1.OriginID = "o1"
+	_, folded := foldBatchCorrectionsDetailed([]mamResultItem{m1, c1})
+	keys := foldedCorrectionKeys(retractTestLogin, "bob@example.com", folded)
+	want := correctedKey(retractTestLogin, "bob@example.com", senderScopes("bob@example.com", "")[0], "o1")
+	if keys[want] != "m1" || len(keys) != 1 {
+		t.Fatalf("keys = %v, want %q -> m1", keys, want)
+	}
+	// The same key the live path writes for this correction (id firstNonEmpty(id, origin-id)).
+	live := correction{senderID: "bob@example.com", corrID: "o1"}
+	if correctedKey(retractTestLogin, "bob@example.com", senderScopes(live.senderID, live.occupantID())[0], live.corrID) != want {
+		t.Error("fold key differs from the live key")
+	}
+}
+
+func TestFoldBatchCorrectionsSkipsGroupMMS(t *testing.T) {
+	const group = "+15550000001,+15550000002@cheogram.com"
+	items := []mamResultItem{
+		corrItem("m1", group+"/+15550000001", "", "first", 1),
+		corrItem("c1", group+"/+15550000001", "m1", "second", 2),
+	}
+	got, folded := foldBatchCorrectionsDetailed(items)
+	if len(folded) != 0 || len(got) != 1 || got[0].Body != "first" {
+		t.Fatalf("group MMS correction folded: got=%+v folded=%+v", got, folded)
+	}
+}
+
 // ---- logs ----
 
 func TestCorrectionContentNotLogged(t *testing.T) {

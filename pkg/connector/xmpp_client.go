@@ -83,14 +83,16 @@ type xmppClient struct {
 	session     *xmpp.Session
 	// Connection health (xmpp_conn_health.go). authFailed is set after a final SASL failure and only
 	// cleared by a new client (re-login); authFailures/authCond are guarded by mu.
-	authFailed   atomic.Bool
-	authFailures int
-	authCond     string
+	authFailed      atomic.Bool
+	authFailures    int
+	lastAuthFailure time.Time // when the last counted not-authorized happened
+	authCond        string
 	// stateHook / mgmtNoticeHook / closeConnHook (tests only) replace the bridge state send, the
 	// management room notice and the keepalive's connection close.
 	stateHook      func(status.BridgeState)
 	mgmtNoticeHook func(text string)
 	closeConnHook  func(sess *xmpp.Session)
+	connectHook    func(ctx context.Context) // replaces Connect in ReconnectLoop (tests only)
 	// wakeCh wakes a sleeping ReconnectLoop (session ended); created lazily by wakeChan.
 	wakeOnce sync.Once
 	wakeCh   chan struct{}
@@ -410,6 +412,7 @@ func drainIQPayload(t xmlstream.TokenReadEncoder) {
 func (x *xmppClient) ReconnectLoop(ctx context.Context) {
 	backoff := reconnectBackoffStart
 	const maxBackoff = 5 * time.Minute
+	var sessionStart time.Time // set when a connect succeeded, cleared once the session end was handled
 
 	for {
 		select {
@@ -430,16 +433,44 @@ func (x *xmppClient) ReconnectLoop(ctx context.Context) {
 			continue
 		}
 
+		if !sessionStart.IsZero() {
+			// The session we started has ended. One that died right after bind (session limit,
+			// conflict, policy violation) must not reconnect at once: keep and double the backoff
+			// and wait for it even though the session end woke the loop.
+			lived := time.Since(sessionStart)
+			sessionStart = time.Time{}
+			if lived < minHealthySession {
+				x.log.Debug().Dur("lived", lived).Dur("backoff", backoff).Msg("XMPP session ended shortly after connecting, backing off")
+				t := time.NewTimer(backoff)
+				select {
+				case <-ctx.Done():
+					t.Stop()
+					return
+				case <-t.C:
+				}
+				backoff *= 2
+				if backoff > maxBackoff {
+					backoff = maxBackoff
+				}
+				continue
+			}
+			backoff = reconnectBackoffStart
+		}
+
 		x.log.Debug().Msg("XMPP reconnect loop: attempting connection")
 		// Bound each connect attempt so we don't block forever on a dead server.
 		connectCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
-		x.Connect(connectCtx)
+		if x.connectHook != nil {
+			x.connectHook(connectCtx)
+		} else {
+			x.Connect(connectCtx)
+		}
 		cancel()
 
 		if x.IsLoggedIn() {
 			// Roster sync (and optional full backfill) is started by Connect itself.
-			// Reset backoff on successful connection.
-			backoff = reconnectBackoffStart
+			// The backoff is reset only once the session proved healthy (see above).
+			sessionStart = time.Now()
 			continue
 		}
 

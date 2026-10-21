@@ -418,7 +418,8 @@ func (x *xmppClient) FetchMessages(ctx context.Context, params bridgev2.FetchMes
 	batchRetracted := collectBatchRetractions(items)
 	// Corrections are newer than their originals too: fold them into the originals of this batch (a
 	// BackfillMessage cannot carry an edit) before truncating.
-	items = foldBatchCorrections(items)
+	items, foldedCorrs := foldBatchCorrectionsDetailed(items)
+	x.recordFoldedCorrections(ctx, params.Portal.PortalKey, foldedCorrs)
 	if len(items) > count {
 		items = items[:count]
 	}

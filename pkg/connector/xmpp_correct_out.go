@@ -5,12 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/networkid"
+	"maunium.net/go/mautrix/format"
 	"mellium.im/xmpp/jid"
 	"mellium.im/xmpp/stanza"
 
@@ -28,6 +30,7 @@ var (
 	errEditNotOwn    = errors.New("Only your own messages can be edited on XMPP.")
 	errEditMedia     = errors.New("Editing files or captions is not supported on XMPP.")
 	errEditNoXMPPRef = errors.New("Cannot edit: this message has no XMPP id.")
+	errEditNoText    = errors.New("Cannot edit: the new message has no text.")
 )
 
 // sendOut sends m on the current session (or hands it to the test hook).
@@ -87,7 +90,11 @@ func (x *xmppClient) handleMatrixEdit(ctx context.Context, msg *bridgev2.MatrixE
 	}
 	body := msg.Content.Body
 	if body == "" && msg.Content.FormattedBody != "" {
-		body = msg.Content.FormattedBody
+		// Never send HTML as the XMPP body: derive plain text from the formatted body instead.
+		body = strings.TrimSpace(format.HTMLToText(msg.Content.FormattedBody))
+	}
+	if body == "" {
+		return fail(errEditNoText)
 	}
 	toJID, err := jid.Parse(portalID)
 	if err != nil {
@@ -102,6 +109,9 @@ func (x *xmppClient) handleMatrixEdit(ctx context.Context, msg *bridgev2.MatrixE
 		if err != nil {
 			return fail(fmt.Errorf("failed to send XMPP message: %w", err))
 		}
+		// Tombstone the new id (kept on purpose): our own "* text" message would otherwise come back
+		// through MAM catch-up and be bridged into the room as a new message. Side effect: replies,
+		// reactions or corrections that name this id are ignored (the tombstone marks it retracted).
 		if kv := x.kv(); kv != nil {
 			now := strconv.FormatInt(time.Now().Unix(), 10)
 			for _, sc := range senderScopes(string(x.loginID), "") {

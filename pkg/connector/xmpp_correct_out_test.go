@@ -19,11 +19,13 @@ import (
 )
 
 type outCapture struct {
-	sent []outMessage
-	err  error
+	sent  []outMessage
+	tried []outMessage // every attempt, failed ones included
+	err   error
 }
 
 func (c *outCapture) hook(_ context.Context, m outMessage) (string, error) {
+	c.tried = append(c.tried, m)
 	if c.err != nil {
 		return "", c.err
 	}
@@ -136,7 +138,7 @@ func TestHandleMatrixEditFormattedBodyFallback(t *testing.T) {
 	x := editClient(c)
 	msg := editMsg(editPortal("bob@example.com", database.RoomTypeDM), matrixRow("sent-1", ""), "")
 	msg.Content.FormattedBody = "<b>bold</b>"
-	if err := x.handleMatrixEdit(context.Background(), msg); err != nil || c.sent[0].Body != "<b>bold</b>" {
+	if err := x.handleMatrixEdit(context.Background(), msg); err != nil || c.sent[0].Body != "**bold**" {
 		t.Fatalf("err=%v sent=%+v", err, c.sent)
 	}
 }
@@ -169,6 +171,33 @@ func TestHandleMatrixEditMUCUsesIDAndRegistersEcho(t *testing.T) {
 	err := x.handleMatrixEdit(context.Background(), editMsg(editPortal("room@muc.example.com", database.RoomTypeGroupDM), target, "again"))
 	if err == nil {
 		t.Fatal("send error must surface")
+	}
+	failed := c.tried[len(c.tried)-1]
+	if failed.ID == "" {
+		t.Fatal("the failed attempt must have carried a registered id")
+	}
+	if _, found, _ := x.mucEcho.wait(context.Background(), "room@muc.example.com", failed.ID, time.Millisecond); found {
+		t.Error("a failed send must remove the id from the echo table")
+	}
+}
+
+func TestHandleMatrixEditFormattedBodyOnly(t *testing.T) {
+	c := &outCapture{}
+	x := editClient(c)
+	target := matrixRow("sent-1", "")
+	msg := editMsg(editPortal("bob@example.com", database.RoomTypeDM), target, "")
+	msg.Content.FormattedBody = "<b>bold</b> and <i>it</i>"
+	msg.Content.Format = event.FormatHTML
+	if err := x.handleMatrixEdit(context.Background(), msg); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.sent[0].Body; strings.Contains(got, "<") || !strings.Contains(got, "bold") {
+		t.Errorf("body = %q, want plain text without HTML", got)
+	}
+	empty := editMsg(editPortal("bob@example.com", database.RoomTypeDM), target, "")
+	empty.Content.FormattedBody = "<p></p>"
+	if err := x.handleMatrixEdit(context.Background(), empty); err == nil || len(c.sent) != 1 {
+		t.Errorf("edit without derivable text must be refused: err=%v sent=%d", err, len(c.sent))
 	}
 }
 

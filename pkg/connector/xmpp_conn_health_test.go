@@ -17,6 +17,7 @@ import (
 	"maunium.net/go/mautrix/bridgev2/status"
 	"mellium.im/xmpp"
 	"mellium.im/xmpp/jid"
+	"mellium.im/xmpp/stanza"
 )
 
 type condSASLErr struct{ cond string }
@@ -47,6 +48,15 @@ func TestClassifyAuth(t *testing.T) {
 // TestDialSASLFailureClassified guards the reflection in saslCondition: mellium's saslerr.Error is in an
 // internal package, so a mellium upgrade that moves or renames it must fail here, loudly.
 func TestDialSASLFailureClassified(t *testing.T) {
+	for _, tc := range []struct {
+		cond      string
+		permanent bool
+	}{{"not-authorized", true}, {"temporary-auth-failure", false}, {"account-disabled", true}} {
+		t.Run(tc.cond, func(t *testing.T) { testDialSASLFailure(t, tc.cond, tc.permanent) })
+	}
+}
+
+func testDialSASLFailure(t *testing.T, wantCond string, wantPerm bool) {
 	cert, pool := selfSignedCert(t, "example.com")
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -85,7 +95,7 @@ func TestDialSASLFailureClassified(t *testing.T) {
 		if !readUntil("</auth>") {
 			return
 		}
-		fmt.Fprint(tc, "<failure xmlns='urn:ietf:params:xml:ns:xmpp-sasl'><not-authorized/></failure>")
+		fmt.Fprint(tc, "<failure xmlns='urn:ietf:params:xml:ns:xmpp-sasl'><"+wantCond+"/></failure>")
 		time.Sleep(200 * time.Millisecond)
 	}()
 
@@ -102,7 +112,7 @@ func TestDialSASLFailureClassified(t *testing.T) {
 		t.Fatal("dial succeeded against a failing server")
 	}
 	cond, perm, ok := classifyAuth(err)
-	if !ok || cond != "not-authorized" || !perm {
+	if !ok || cond != wantCond || perm != wantPerm {
 		t.Fatalf("saslCondition no longer recognises mellium's SASL failure (did mellium move internal/saslerr?): err=%v cond=%q ok=%v", err, cond, ok)
 	}
 }
@@ -159,10 +169,14 @@ func TestAuthFailureThreshold(t *testing.T) {
 		x, rec, _ := healthClient(t, func() error { return condSASLErr{"not-authorized"} })
 		notices := make(chan string, 2)
 		x.mgmtNoticeHook = func(s string) { notices <- s }
+		oldB := reconnectBackoffStart
+		reconnectBackoffStart = 30 * time.Millisecond
+		defer func() { reconnectBackoffStart = oldB }()
 		x.Connect(context.Background())
 		if x.authFailed.Load() || rec.count(status.StateBadCredentials) != 0 {
 			t.Fatal("first not-authorized must stay transient")
 		}
+		time.Sleep(40 * time.Millisecond)
 		x.Connect(context.Background())
 		if !x.authFailed.Load() || rec.last().StateEvent != status.StateBadCredentials || rec.last().Error != "jabber-not-authorized" {
 			t.Fatalf("second not-authorized: %+v", rec.last())
@@ -274,6 +288,167 @@ func TestReconnectLoopStopsOnCtxDuringBackoff(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("loop ignored ctx during backoff")
+	}
+}
+
+func TestAuthFailureWindow(t *testing.T) {
+	oldB := reconnectBackoffStart
+	reconnectBackoffStart = 80 * time.Millisecond
+	defer func() { reconnectBackoffStart = oldB }()
+	t.Run("back to back failures count once", func(t *testing.T) {
+		x, rec, _ := healthClient(t, func() error { return condSASLErr{"not-authorized"} })
+		x.mgmtNoticeHook = func(string) {}
+		x.Connect(context.Background()) // bridgev2's own Connect
+		x.Connect(context.Background()) // the reconnect loop's first pass
+		if x.authFailed.Load() || rec.count(status.StateBadCredentials) != 0 {
+			t.Fatal("two not-authorized inside the window must not lock the login out")
+		}
+		time.Sleep(100 * time.Millisecond)
+		x.Connect(context.Background())
+		if !x.authFailed.Load() || rec.last().StateEvent != status.StateBadCredentials {
+			t.Fatalf("a not-authorized after the window must count: %+v", rec.last())
+		}
+	})
+	t.Run("spaced failures count, transient in between", func(t *testing.T) {
+		var fail atomic.Bool
+		fail.Store(true)
+		x, rec, _ := healthClient(t, func() error {
+			if fail.Load() {
+				return condSASLErr{"not-authorized"}
+			}
+			return condSASLErr{"temporary-auth-failure"}
+		})
+		x.mgmtNoticeHook = func(string) {}
+		x.Connect(context.Background())
+		fail.Store(false)
+		x.Connect(context.Background()) // unrelated transient failure inside the window
+		fail.Store(true)
+		x.Connect(context.Background()) // still inside the window of the first counted one
+		if x.authFailed.Load() {
+			t.Fatal("window is measured from the previously counted failure")
+		}
+		time.Sleep(100 * time.Millisecond)
+		x.Connect(context.Background())
+		if !x.authFailed.Load() || rec.last().StateEvent != status.StateBadCredentials {
+			t.Fatalf("state = %+v", rec.last())
+		}
+	})
+}
+
+func TestUnreadableSASLConditionIsTransient(t *testing.T) {
+	cond, permanent, ok := classifyAuth(condSASLErr{saslConditionUnreadable})
+	if !ok || permanent || cond != saslConditionUnreadable {
+		t.Fatalf("cond=%q permanent=%v ok=%v", cond, permanent, ok)
+	}
+	oldB := reconnectBackoffStart
+	reconnectBackoffStart = 0
+	defer func() { reconnectBackoffStart = oldB }()
+	x, rec, _ := healthClient(t, func() error { return condSASLErr{saslConditionUnreadable} })
+	for i := 0; i < 5; i++ {
+		x.Connect(context.Background())
+	}
+	if x.authFailed.Load() || rec.count(status.StateBadCredentials) != 0 {
+		t.Fatal("an unreadable condition must never be a final auth failure")
+	}
+}
+
+func TestReconnectLoopBacksOffAfterShortSession(t *testing.T) {
+	oldB, oldM := reconnectBackoffStart, minHealthySession
+	reconnectBackoffStart, minHealthySession = 100*time.Millisecond, time.Hour
+	defer func() { reconnectBackoffStart, minHealthySession = oldB, oldM }()
+	x := &xmppClient{loginID: "me@example.com", log: zerolog.Nop()}
+	var mu sync.Mutex
+	var times []time.Time
+	x.connectHook = func(context.Context) {
+		mu.Lock()
+		times = append(times, time.Now())
+		mu.Unlock()
+		x.mu.Lock()
+		x.session = &xmpp.Session{}
+		x.mu.Unlock()
+		go func() { // the server kicks the session right after bind
+			time.Sleep(5 * time.Millisecond)
+			x.mu.Lock()
+			x.session = nil
+			x.mu.Unlock()
+			x.wakeReconnect()
+		}()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { x.ReconnectLoop(ctx); close(done) }()
+	deadline := time.After(5 * time.Second)
+	for {
+		mu.Lock()
+		n := len(times)
+		mu.Unlock()
+		if n >= 3 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("loop did not reconnect")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	cancel()
+	<-done
+	mu.Lock()
+	defer mu.Unlock()
+	if d := times[1].Sub(times[0]); d < 95*time.Millisecond {
+		t.Errorf("second connect after %v, want >= first backoff (100ms)", d)
+	}
+	if d := times[2].Sub(times[1]); d < 195*time.Millisecond {
+		t.Errorf("third connect after %v, want the doubled backoff (200ms)", d)
+	}
+}
+
+func TestReconnectLoopResetsBackoffAfterHealthySession(t *testing.T) {
+	oldB, oldM := reconnectBackoffStart, minHealthySession
+	reconnectBackoffStart, minHealthySession = 100*time.Millisecond, time.Millisecond
+	defer func() { reconnectBackoffStart, minHealthySession = oldB, oldM }()
+	x := &xmppClient{loginID: "me@example.com", log: zerolog.Nop()}
+	var calls atomic.Int32
+	x.connectHook = func(context.Context) {
+		calls.Add(1)
+		x.mu.Lock()
+		x.session = &xmpp.Session{}
+		x.mu.Unlock()
+		go func() {
+			time.Sleep(20 * time.Millisecond)
+			x.mu.Lock()
+			x.session = nil
+			x.mu.Unlock()
+			x.wakeReconnect()
+		}()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { x.ReconnectLoop(ctx); close(done) }()
+	time.Sleep(300 * time.Millisecond)
+	cancel()
+	<-done
+	if calls.Load() < 5 {
+		t.Fatalf("only %d connects: a healthy session must reconnect at once", calls.Load())
+	}
+}
+
+func TestKeepaliveErrorReplyProvesAlive(t *testing.T) {
+	keepaliveFast(t)
+	sess := &xmpp.Session{}
+	x := &xmppClient{log: zerolog.Nop(), session: sess}
+	x.lastInbound.Store(time.Now().Add(-time.Hour).UnixNano())
+	var n atomic.Int32
+	x.pingFunc = func(context.Context, *xmpp.Session, jid.JID) error {
+		n.Add(1)
+		return fmt.Errorf("ping: %w", stanza.Error{Type: stanza.Cancel, Condition: stanza.FeatureNotImplemented})
+	}
+	x.closeConnHook = func(*xmpp.Session) { t.Error("closed despite an error reply") }
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	x.runKeepalive(ctx, sess, jid.MustParse("example.com"))
+	if n.Load() < 3 {
+		t.Fatalf("only %d pings", n.Load())
 	}
 }
 

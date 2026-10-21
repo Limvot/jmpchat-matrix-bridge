@@ -14,9 +14,11 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/rs/zerolog"
+	zlog "github.com/rs/zerolog/log"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 	"mellium.im/sasl"
@@ -109,12 +111,19 @@ type dialError struct {
 func (e *dialError) Error() string { return e.msg }
 func (e *dialError) Unwrap() error { return e.err }
 
+// saslConditionUnreadable classifies a SASL failure whose condition could not be read (or carried none).
+// It is not a permanent condition (see classifyAuth), so it can never lock a login out.
+const saslConditionUnreadable = "unknown-condition"
+
+var saslUnreadableOnce sync.Once
+
 // saslCondition reports the SASL failure condition carried by err (e.g. "not-authorized"), if err is a
 // SASL authentication failure.
 //
 // mellium's SASL failure type lives in an internal package (mellium.im/xmpp/internal/saslerr), so it is
 // read through reflection. This depends on mellium internals: a mellium upgrade that moves the type
 // makes this return false, which is guarded by TestDialSASLFailureClassified (Phase C).
+// An unreadable condition maps to a transient classification, never a final auth failure.
 func saslCondition(err error) (cond string, ok bool) {
 	for e := err; e != nil; e = errors.Unwrap(e) {
 		if sc, isSC := e.(interface{ SASLCondition() string }); isSC {
@@ -122,11 +131,17 @@ func saslCondition(err error) (cond string, ok bool) {
 		}
 		v := reflect.ValueOf(e)
 		if v.Kind() == reflect.Struct && v.Type().PkgPath() == "mellium.im/xmpp/internal/saslerr" && v.Type().Name() == "Error" {
-			cond = "not-authorized"
+			cond = saslConditionUnreadable
 			if f := v.FieldByName("Condition"); f.IsValid() && f.CanInterface() {
 				if s, isStr := f.Interface().(fmt.Stringer); isStr && s.String() != "none" {
 					cond = s.String()
 				}
+			}
+			if cond == saslConditionUnreadable {
+				// Never guess "not-authorized" here: that would turn a temporary failure into a lockout.
+				saslUnreadableOnce.Do(func() {
+					zlog.Warn().Msg("SASL failure condition could not be read (mellium internals changed?); treating authentication failures as transient")
+				})
 			}
 			return cond, true
 		}

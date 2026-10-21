@@ -15,6 +15,7 @@ import (
 	"mellium.im/xmpp"
 	"mellium.im/xmpp/jid"
 	"mellium.im/xmpp/ping"
+	"mellium.im/xmpp/stanza"
 
 	"github.com/williamkray/jmpchat-matrix-bridge/pkg/telemetry"
 )
@@ -115,8 +116,14 @@ func (x *xmppClient) handleDialFailure(ctx context.Context, err error) {
 		final := false
 		switch {
 		case cond == "not-authorized":
-			x.authFailures++
-			final = x.authFailures >= authNotAuthorizedLimit
+			// bridgev2's own Connect and the reconnect loop's first pass can fail back to back;
+			// two answers inside reconnectBackoffStart count as one (transient) failure.
+			now := time.Now()
+			if x.authFailures == 0 || now.Sub(x.lastAuthFailure) >= reconnectBackoffStart {
+				x.authFailures++
+				x.lastAuthFailure = now
+				final = x.authFailures >= authNotAuthorizedLimit
+			}
 		case permanent:
 			final = true
 		}
@@ -198,7 +205,10 @@ func (x *xmppClient) runKeepalive(ctx context.Context, sess *xmpp.Session, serve
 		if ctx.Err() != nil {
 			return
 		}
-		if err == nil {
+		var stanzaErr stanza.Error
+		if err == nil || errors.As(err, &stanzaErr) {
+			// Any error reply (service-unavailable, feature-not-implemented, ...) proves the
+			// connection is alive; only timeouts and transport errors count as misses.
 			misses = 0
 			continue
 		}
@@ -233,4 +243,5 @@ func (x *xmppClient) closeConn(sess *xmpp.Session) {
 var (
 	reconnectBackoffStart = 5 * time.Second  // first wait after a failed connect, doubled up to 5 minutes
 	reconnectPoll         = 30 * time.Second // re-check interval while connected (a session end wakes the loop sooner)
+	minHealthySession     = 60 * time.Second // a session that ends sooner keeps (and doubles) the reconnect backoff
 )

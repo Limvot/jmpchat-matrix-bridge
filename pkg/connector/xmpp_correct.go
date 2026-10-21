@@ -328,10 +328,7 @@ func (x *xmppClient) queueMAMCorrection(ctx context.Context, key networkid.Porta
 	if item.Body == "" {
 		return true
 	}
-	corrID := item.StanzaID
-	if strings.HasPrefix(corrID, "xmp:") {
-		corrID = "" // generated, not stable across fetches
-	}
+	corrID := mamCorrectionID(item)
 	ts := item.Timestamp
 	if ts.IsZero() {
 		ts = time.Now()
@@ -348,38 +345,56 @@ func (x *xmppClient) queueMAMCorrection(ctx context.Context, key networkid.Porta
 	return true
 }
 
-// firstNonEmpty returns the first non-empty string, or "".
-func firstNonEmpty(vals ...string) string {
-	for _, v := range vals {
-		if v != "" {
-			return v
-		}
+// mamCorrectionID is the dedupe id of an archived correction, the same value the live path uses
+// (firstNonEmpty(id, origin-id)): a generated "xmp:" stanza id is not stable across fetches and does not
+// count, so a correction that only carries an origin-id still dedupes and live and MAM keys match.
+func mamCorrectionID(item mamResultItem) string {
+	id := item.StanzaID
+	if strings.HasPrefix(id, "xmp:") {
+		id = ""
 	}
-	return ""
+	return firstNonEmpty(id, item.OriginID)
 }
 
-// foldBatchCorrections applies the corrections found in a fetched MAM batch to their originals in the
-// same batch (FetchMessages returns BackfillMessages, which cannot carry edits) and drops every
+// foldedCorrection is one correction applied to an original by foldBatchCorrectionsDetailed.
+type foldedCorrection struct {
+	corr, orig mamResultItem
+}
+
+// foldBatchCorrections is foldBatchCorrectionsDetailed without the applied list.
+func foldBatchCorrections(items []mamResultItem) []mamResultItem {
+	kept, _ := foldBatchCorrectionsDetailed(items)
+	return kept
+}
+
+// foldBatchCorrectionsDetailed applies the corrections found in a fetched MAM batch to their originals
+// in the same batch (FetchMessages returns BackfillMessages, which cannot carry edits) and drops every
 // correction item. A correction applies to the item whose id or origin-id it names, sent by the same
 // lower-cased bare JID; a later correction naming an earlier correction's id follows the chain, and the
-// newest one wins. Corrections whose original is not in the batch are dropped (the original is
-// backfilled in its old form: documented gap). The result keeps the input order.
-func foldBatchCorrections(items []mamResultItem) []mamResultItem {
-	var corrs []int
+// newest one wins. Corrections whose original is not in the batch, and corrections from a Cheogram
+// group MMS JID (the shared from cannot identify the sender; the live path rejects them too) are
+// dropped (the original is backfilled in its old form: documented gap). The kept items keep the input
+// order. MAM result order is implementation-defined (see FetchMessages), so nothing relies on it:
+// corrections are resolved in rounds, a correction becoming applicable only once its target (an
+// original or an already applied correction) is known, so a chain applies in chain order whatever the
+// timestamps say; corrections applicable in the same round go oldest first (input order on ties).
+// The applied corrections are returned so the caller can record their dedupe keys.
+func foldBatchCorrectionsDetailed(items []mamResultItem) ([]mamResultItem, []foldedCorrection) {
+	var pending []int
 	for i, it := range items {
 		if it.Extras.Replace != "" && it.Retract == nil {
-			corrs = append(corrs, i)
+			pending = append(pending, i)
 		}
 	}
-	if len(corrs) == 0 {
-		return items
+	if len(pending) == 0 {
+		return items, nil
 	}
-	isCorr := make(map[int]bool, len(corrs))
-	for _, i := range corrs {
+	isCorr := make(map[int]bool, len(pending))
+	for _, i := range pending {
 		isCorr[i] = true
 	}
-	// Oldest first, input order for equal timestamps.
-	sort.SliceStable(corrs, func(a, b int) bool { return items[corrs[a]].Timestamp.Before(items[corrs[b]].Timestamp) })
+	// Oldest first, input order for equal (or missing) timestamps.
+	sort.SliceStable(pending, func(a, b int) bool { return items[pending[a]].Timestamp.Before(items[pending[b]].Timestamp) })
 
 	type ref struct{ from, id string }
 	byRef := map[ref]int{} // id or origin-id of an original (and of an applied correction) -> original index
@@ -396,28 +411,85 @@ func foldBatchCorrections(items []mamResultItem) []mamResultItem {
 	}
 	out := make([]mamResultItem, len(items))
 	copy(out, items)
-	for _, ci := range corrs {
-		c := items[ci]
-		if c.Body == "" {
-			continue
-		}
-		from := strings.ToLower(bareJID(c.From))
-		oi, ok := byRef[ref{from, c.Extras.Replace}]
-		if !ok {
-			continue
-		}
-		out[oi].Body = c.Body
-		for _, id := range []string{c.StanzaID, c.OriginID} {
-			if id != "" {
-				byRef[ref{from, id}] = oi
+	var folded []foldedCorrection
+	for len(pending) > 0 {
+		var next []int
+		progress := false
+		for _, ci := range pending {
+			c := items[ci]
+			if c.Body == "" {
+				continue
+			}
+			if _, mms := ParseCheogramGroupMMSJID(bareJID(c.From)); mms {
+				continue
+			}
+			from := strings.ToLower(bareJID(c.From))
+			oi, ok := byRef[ref{from, c.Extras.Replace}]
+			if !ok {
+				next = append(next, ci) // maybe the target is a correction applied later
+				continue
+			}
+			progress = true
+			out[oi].Body = c.Body
+			folded = append(folded, foldedCorrection{corr: c, orig: items[oi]})
+			for _, id := range []string{c.StanzaID, c.OriginID} {
+				if id != "" {
+					byRef[ref{from, id}] = oi
+				}
 			}
 		}
+		if !progress {
+			break
+		}
+		pending = next
 	}
-	kept := make([]mamResultItem, 0, len(items)-len(corrs))
+	kept := make([]mamResultItem, 0, len(items)-len(isCorr))
 	for i, it := range out {
 		if !isCorr[i] {
 			kept = append(kept, it)
 		}
 	}
-	return kept
+	return kept, folded
+}
+
+// recordFoldedCorrections stores the dedupe keys of corrections that were folded into their originals
+// (same key and value shape as postHandleCorrection), so a later catch-up that sees the same archived
+// correction drops it instead of editing the freshly backfilled message a second time.
+func (x *xmppClient) recordFoldedCorrections(ctx context.Context, key networkid.PortalKey, folded []foldedCorrection) {
+	kv := x.kv()
+	if kv == nil {
+		return
+	}
+	for k, v := range foldedCorrectionKeys(x.loginID, key.ID, folded) {
+		kv.Set(ctx, k, v)
+	}
+}
+
+// foldedCorrectionKeys maps the dedupe keys of folded corrections to the bridgev2 id of their original.
+func foldedCorrectionKeys(login networkid.UserLoginID, portal networkid.PortalID, folded []foldedCorrection) map[database.Key]string {
+	out := map[database.Key]string{}
+	for _, f := range folded {
+		id := mamCorrectionID(f.corr)
+		if id == "" {
+			continue
+		}
+		origID := f.orig.StanzaID
+		if origID == "" {
+			origID = "xmp:" + f.orig.Timestamp.Format("20060102150405.000")
+		}
+		for _, sc := range senderScopes(bareJID(f.corr.From), "") {
+			out[correctedKey(login, portal, sc, id)] = origID
+		}
+	}
+	return out
+}
+
+// firstNonEmpty returns the first non-empty string, or "".
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
