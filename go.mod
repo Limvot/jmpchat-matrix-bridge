@@ -10,6 +10,7 @@ require (
 	github.com/rs/zerolog v1.35.1
 	github.com/williamkray/mrtc-sip-bridge v0.3.0
 	go.mau.fi/util v0.11.0
+	go.mau.fi/zeroconfig v0.2.0
 	go.opentelemetry.io/otel v1.47.0
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace v1.47.0
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc v1.47.0
@@ -18,7 +19,9 @@ require (
 	go.opentelemetry.io/otel/sdk v1.47.0
 	go.opentelemetry.io/otel/trace v1.47.0
 	golang.org/x/net v0.61.0
+	golang.org/x/sys v0.49.0
 	gopkg.in/yaml.v3 v3.0.1
+	maunium.net/go/mauflag v1.0.0
 	maunium.net/go/mautrix v0.32.0
 	mellium.im/sasl v0.3.2
 	mellium.im/xmlstream v0.15.4
@@ -107,7 +110,6 @@ require (
 	github.com/yuin/goldmark v1.8.6 // indirect
 	github.com/zaf/g711 v1.4.0 // indirect
 	github.com/zeebo/xxh3 v1.1.0 // indirect
-	go.mau.fi/zeroconfig v0.2.0 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/instrumentation/runtime v0.72.0 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc v1.47.0 // indirect
@@ -124,7 +126,6 @@ require (
 	golang.org/x/exp v0.0.0-20261014143641-f0251eb4aa3e // indirect
 	golang.org/x/mod v0.42.0 // indirect
 	golang.org/x/sync v0.24.0 // indirect
-	golang.org/x/sys v0.49.0 // indirect
 	golang.org/x/text v0.43.0 // indirect
 	golang.org/x/time v0.16.0 // indirect
 	golang.org/x/tools v0.52.0 // indirect
@@ -134,6 +135,5 @@ require (
 	google.golang.org/protobuf v1.36.12 // indirect
 	gopkg.in/hraban/opus.v2 v2.0.0-20230925203106-0188a62cb302 // indirect
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect
-	maunium.net/go/mauflag v1.0.0 // indirect
 	mellium.im/reader v0.1.0 // indirect
 )

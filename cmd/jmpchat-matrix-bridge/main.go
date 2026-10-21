@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/williamkray/jmpchat-matrix-bridge/pkg/connector"
@@ -204,7 +205,16 @@ func main() {
 		span.End()
 	}
 	br.InitVersion(Tag, Commit, BuildTime)
-	br.Run()
+	// Same as br.Run(), with the log scrubber installed after the config is loaded and before
+	// mxmain compiles the logger and creates the Matrix client.
+	preflight()
+	br.PreInit()
+	scrubLogging(&br.Config.Logging)
+	br.Init()
+	br.Start()
+	exitCode := br.WaitForInterrupt()
+	br.Stop()
+	os.Exit(exitCode)
 }
 
 func cmdSyncRoster(ce *commands.Event) {

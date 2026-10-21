@@ -238,6 +238,8 @@ For more details, see [End-to-bridge encryption](https://docs.mau.fi/bridges/gen
 
 ## Docker
 
+A read-only config (for example a mounted Secret) works: the bridge notices that it cannot rewrite the file and starts with `--no-update`. A missing config file gives a clear error and exit code 10.
+
 Build the image:
 
 ```bash
@@ -373,7 +375,7 @@ A `bridge.start` span is emitted once at startup (handy as a smoke test). Backgr
 
 ### Privacy
 
-Trace attributes include **full JIDs** (including Cheogram phone-number JIDs), XMPP stanza ids, Matrix room and event ids, timings, file sizes, MIME types and error messages. Message bodies, captions, reaction emoji, filenames and URLs are **never** recorded, and URLs inside error messages are reduced to scheme and host. Log output follows the same rule for message content: bodies, captions and reaction emoji are never logged, only lengths, counts and ids (JIDs, room names and nicks still appear in logs). Anyone with access to your trace backend can still see conversation metadata (who talks to whom, and when), so restrict access accordingly.
+Trace attributes include **full JIDs** (including Cheogram phone-number JIDs), XMPP stanza ids, Matrix room and event ids, timings, file sizes, MIME types and error messages. Message bodies, captions, reaction emoji, filenames and URLs are **never** recorded, and URLs inside error messages are reduced to scheme and host. Log output follows the same rule for message content: bodies, captions and reaction emoji are never logged, only lengths, counts and ids (JIDs, room names and nicks still appear in logs). The Matrix client library logs request bodies at debug level; the bridge replaces the body of event sends, redactions and state events (messages, retraction reasons, topics) with `<content omitted>` in every log writer, with no switch to disable it. Do not run the `trace` log level in production. Anyone with access to your trace backend can still see conversation metadata (who talks to whom, and when), so restrict access accordingly.
 
 ### Log correlation
 
