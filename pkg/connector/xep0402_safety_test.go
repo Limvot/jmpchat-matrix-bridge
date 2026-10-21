@@ -59,9 +59,8 @@ type errFakeTimeout struct{}
 
 func (errFakeTimeout) Error() string { return "timeout" }
 
-// Sending/viewing in a room we are already in re-sends the join presence with the nick we currently
-// hold (e.g. a shared nick another client renamed), never the configured one; the join command still
-// applies the nick choice.
+// Sending/viewing in a room we are already in sends nothing (a re-join would replay the occupant list
+// and history); the join command still applies the nick choice.
 func TestJoinForPortalKeepsCurrentNick(t *testing.T) {
 	r := newBMRig(t, true)
 	r.addPortal(bmRoom, false)
@@ -69,13 +68,13 @@ func TestJoinForPortalKeepsCurrentNick(t *testing.T) {
 	if err := r.x.joinMUCForPortal(context.Background(), bmRoom); err != nil {
 		t.Fatal(err)
 	}
-	if j := r.joins(); len(j) != 1 || j[0] != bmRoom+"|renamed-elsewhere" {
+	if j := r.joins(); len(j) != 0 {
 		t.Fatalf("joins = %v", j)
 	}
 	if err := r.x.JoinMUC(context.Background(), bmRoom); err != nil {
 		t.Fatal(err)
 	}
-	if j := r.joins(); len(j) != 2 || j[1] != bmRoom+"|alice" {
+	if j := r.joins(); len(j) != 1 || j[0] != bmRoom+"|alice" {
 		t.Fatalf("joins = %v", j)
 	}
 }

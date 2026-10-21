@@ -188,6 +188,7 @@ func (x *xmppClient) handleMessageError(me messageError) {
 		Str("by", me.By).
 		Str("text", me.Text).
 		Msg("XMPP message error stanza received (server or room rejected a message)")
+	x.healMUCAfterError(me)
 	if me.ID == "" {
 		return
 	}
@@ -329,4 +330,78 @@ func portalLooksMUC(portal *bridgev2.Portal) bool {
 		return false
 	}
 	return isMUCJID(string(portal.ID))
+}
+
+// mucHealInterval is the minimum time between two self-heal re-joins of the same room.
+const mucHealInterval = 5 * time.Minute
+
+// mucHealCondition reports whether an error condition from a room's bare JID means the room does not
+// consider us an occupant (XEP-0045: not-acceptable for a non-occupant sender).
+func mucHealCondition(cond string) bool {
+	switch cond {
+	case "not-acceptable", "item-not-found", "recipient-unavailable":
+		return true
+	}
+	return false
+}
+
+// mucHealAllowed records a heal attempt for room and reports whether the last one is older than
+// mucHealInterval.
+func (x *xmppClient) mucHealAllowed(room string, now time.Time) bool {
+	x.mucHealMu.Lock()
+	defer x.mucHealMu.Unlock()
+	if x.mucHealAt == nil {
+		x.mucHealAt = make(map[string]time.Time)
+	}
+	if t, ok := x.mucHealAt[room]; ok && now.Sub(t) < mucHealInterval {
+		return false
+	}
+	x.mucHealAt[room] = now
+	return true
+}
+
+// healMUCAfterError runs on the Serve goroutine (memory only): when a MUC room's bare JID reports that
+// we are not an occupant, it hands a single rate-limited re-join to a goroutine. Errors forwarded from
+// an occupant (room/nick) never trigger it.
+func (x *xmppClient) healMUCAfterError(me messageError) {
+	if me.ErrorType == "" || !mucHealCondition(me.Condition) || strings.Contains(me.From, "/") {
+		return
+	}
+	room := bareJID(me.From)
+	if room == "" {
+		return
+	}
+	go x.healMUC(room)
+}
+
+func (x *xmppClient) healMUC(room string) {
+	ctx, cancel := context.WithTimeout(x.log.WithContext(context.Background()), messageErrorTimeout)
+	defer cancel()
+	ctx, span := telemetry.Start(ctx, "xmpp.muc.heal", trace.WithSpanKind(trace.SpanKindConsumer))
+	defer span.End()
+	log := x.logFor(ctx)
+	portal, err := x.lookupMUCPortal(ctx, room)
+	if err != nil {
+		log.Debug().Err(err).Str("room", room).Msg("MUC heal: portal lookup failed")
+		return
+	}
+	isMUC := isMUCJID(room)
+	if portal != nil {
+		isMUC = portalLooksMUC(&bridgev2.Portal{Portal: portal})
+		if meta, _ := portal.Metadata.(*PortalMetadata); meta != nil && meta.MUCLeft {
+			return // left on purpose: only the join command returns
+		}
+	}
+	if !isMUC || !x.mucHealAllowed(room, time.Now()) {
+		return
+	}
+	x.mucOurOccupantJIDMu.Lock()
+	delete(x.mucOurOccupantJID, room)
+	x.mucOurOccupantJIDMu.Unlock()
+	if err := x.joinMUC(ctx, room, nil); err != nil {
+		telemetry.Fail(span, err)
+		log.Warn().Err(err).Str("room", room).Msg("MUC heal: re-join after not-an-occupant error failed")
+		return
+	}
+	log.Info().Str("room", room).Msg("MUC heal: re-joined after the room rejected a message as not-an-occupant")
 }

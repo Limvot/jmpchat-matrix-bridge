@@ -97,6 +97,9 @@ type xmppClient struct {
 	// mucOurOccupantJID maps MUC room JID (bare) to our full occupant JID (room@service/nick) for self-echo filtering.
 	mucOurOccupantJID   map[string]string
 	mucOurOccupantJIDMu sync.RWMutex
+	// mucHealAt: last self-heal re-join per room (see healMUCAfterError); guarded by mucHealMu.
+	mucHealAt map[string]time.Time
+	mucHealMu sync.Mutex
 	// mucEcho pairs our sent MUC messages with the room's echo (room stanza-id, occupant-id); see xmpp_muc_echo.go.
 	mucEcho mucEchoTable
 	// mucPendingJoin maps MUC room JID to the nick we used when sending join presence; cleared when we get our presence or error.
@@ -1590,8 +1593,8 @@ func (x *xmppClient) JoinMUC(ctx context.Context, roomJIDStr string) error {
 	return err
 }
 
-// joinMUCForPortal re-asserts membership of a bridged room when the user views it, sends into it or
-// retracts in it. It is not a new "I want this room" intent: it never clears the left flag (a room the
+// joinMUCForPortal makes sure we are in a bridged room when the user views it, sends into it or
+// retracts in it (a no-op when already joined). It is not a new "I want this room" intent: it never clears the left flag (a room the
 // user left, here or via a bookmark on another client, stays left: errMUCLeft) and never writes a bookmark.
 func (x *xmppClient) joinMUCForPortal(ctx context.Context, roomJIDStr string) error {
 	if x.isMUCLeft(ctx, roomJIDStr) {
@@ -1602,14 +1605,14 @@ func (x *xmppClient) joinMUCForPortal(ctx context.Context, roomJIDStr string) er
 	if span.IsRecording() {
 		span.SetAttributes(attribute.String("xmpp.room.jid", roomJIDStr))
 	}
-	// Already in the room: re-send the join presence (it heals a silent drop by the room) with the nick we
-	// currently hold, never the configured one, so a shared nick that another client of the account
-	// renamed is not renamed back on every send or view. Only the join command re-applies the nick choice.
-	nickOverride := ""
-	if occ := x.getMUCOurOccupantJID(roomJIDStr); occ != "" {
-		nickOverride = resourceOf(occ)
+	// Already in the room (joined and confirmed): send nothing. Re-sending the join presence makes the
+	// room replay the full occupant list and default history, which floods a busy room over a
+	// rate-limited s2s link and delays every message behind it. A room that dropped us silently is
+	// healed by the not-acceptable handling in healMUCAfterError instead.
+	if x.getMUCOurOccupantJID(roomJIDStr) != "" {
+		return nil
 	}
-	err := x.joinMUCNick(ctx, roomJIDStr, nil, false, nickOverride)
+	err := x.joinMUCNick(ctx, roomJIDStr, nil, false, "")
 	telemetry.Fail(span, err)
 	return err
 }
@@ -1936,11 +1939,12 @@ func (x *xmppClient) handleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 
 	// For MUC portals, ensure we're in the room before sending (join on view may not have run yet).
 	if x.portalIsMUC(ctx, msg.Portal) {
+		alreadyJoined := x.getMUCOurOccupantJID(toJIDStr) != ""
 		if joinErr := x.joinMUCForPortal(ctx, toJIDStr); errors.Is(joinErr, errMUCLeft) {
 			return nil, bridgev2.WrapErrorInStatus(fmt.Errorf("you left this room; use `%s join %s` to rejoin it", x.mucCmdPrefix(), toJIDStr)).WithSendNotice(true)
 		} else if joinErr != nil {
 			log.Warn().Err(joinErr).Str("portal_id", toJIDStr).Msg("Failed to join MUC before send; message may be rejected")
-		} else {
+		} else if !alreadyJoined {
 			// Give the MUC server time to process our presence before sending (cross-server MUCs can be slow).
 			select {
 			case <-ctx.Done():
