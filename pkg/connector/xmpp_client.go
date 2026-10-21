@@ -53,6 +53,8 @@ type xmppClient struct {
 	queueHook func(bridgev2.RemoteEvent) bridgev2.EventHandlingResult
 	// noticeHook, when set (tests only), receives portal notices instead of the bridge bot.
 	noticeHook func(portal *bridgev2.Portal, text string)
+	// statusHook, when set (tests only), receives message statuses instead of the Matrix connector.
+	statusHook func(ms *bridgev2.MessageStatus, info *bridgev2.MessageStatusEventInfo)
 	// mucNoticeHook / mucNickSaveHook / mucSendJoinHook (tests only) replace the MUC nick notices,
 	// the auto-nick persistence and the join presence send.
 	mucNoticeHook    func(roomBare, text string)

@@ -62,11 +62,14 @@ func (h *messageLoggingHandler) HandleXMPP(t xmlstream.TokenReadEncoder, start *
 			Str("type", typeVal).
 			Msg("XMPP stanza received: <message> (before mux dispatch)")
 		if typeVal == "error" {
-			// Log error stanzas (e.g. MUC "not in room") for debugging.
-			h.log.Warn().
-				Str("from", from).
-				Str("to", to).
-				Msg("XMPP message error stanza received (server rejected our message or sent an error)")
+			// Rejected message (e.g. MUC "not in room", policy violation): parse the error from the
+			// token stream (memory only), log it and hand off; never on this goroutine beyond that.
+			me, err := parseMessageError(t, start)
+			if err != nil {
+				h.log.Warn().Err(err).Msg("Failed to parse XMPP message error stanza")
+			}
+			h.x.handleMessageError(me)
+			return nil
 		}
 		// Handle normal/chat ourselves so we can parse body + OOB (XEP-0066).
 		if typeVal == "" || typeVal == "normal" || typeVal == "chat" {
