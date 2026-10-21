@@ -19,6 +19,7 @@ import (
 	"mellium.im/xmpp"
 	"mellium.im/xmpp/jid"
 	"mellium.im/xmpp/mux"
+	"mellium.im/xmpp/ping"
 	"mellium.im/xmpp/roster"
 	"mellium.im/xmpp/stanza"
 	"mellium.im/xmlstream"
@@ -49,6 +50,9 @@ type messageLoggingHandler struct {
 }
 
 func (h *messageLoggingHandler) HandleXMPP(t xmlstream.TokenReadEncoder, start *xml.StartElement) error {
+	if h.x != nil {
+		h.x.lastInbound.Store(time.Now().UnixNano()) // keepalive idle check (memory only)
+	}
 	switch start.Name.Local {
 	case "message":
 		from := attrValue(start.Attr, "from")
@@ -649,6 +653,7 @@ func (x *xmppClient) newServeHandler() xmpp.Handler {
 	groupchatType := stanza.MessageType("groupchat")
 	mamFinPayload := xml.Name{Space: mamNS, Local: "fin"}
 	m := mux.New(jabberClientNS,
+		ping.Handle(), // XEP-0199: answer server pings
 		roster.Handle(roster.Handler{Push: x.handleRosterPush}),
 		mux.MessageFunc(stanza.NormalMessage, bodyPayload, x.handleIncomingMessage),
 		mux.MessageFunc(chatType, bodyPayload, x.handleIncomingMessage),
@@ -706,10 +711,10 @@ func (x *xmppClient) serveMessages() {
 		x.session = nil
 		x.endSessionLocked()
 	}
-	login := x.login
 	x.mu.Unlock()
-	if hadSession && login != nil {
-		login.BridgeState.Send(status.BridgeState{StateEvent: status.StateTransientDisconnect})
+	if hadSession {
+		x.sendState(status.BridgeState{StateEvent: status.StateTransientDisconnect})
+		x.wakeReconnect()
 	}
 }
 

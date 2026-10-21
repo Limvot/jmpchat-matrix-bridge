@@ -34,6 +34,7 @@ func TestBridgeCapsFeatureList(t *testing.T) {
 		"urn:xmpp:fallback:0",
 		"urn:xmpp:message-retract:0",
 		"urn:xmpp:message-retract:1",
+		"urn:xmpp:ping",
 		"urn:xmpp:reactions:0",
 		"urn:xmpp:reply:0",
 		"urn:xmpp:sid:0",

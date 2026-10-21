@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rs/xid"
@@ -77,6 +78,23 @@ type xmppClient struct {
 	mucJoinGen uint64
 	mu          sync.Mutex
 	session     *xmpp.Session
+	// Connection health (xmpp_conn_health.go). authFailed is set after a final SASL failure and only
+	// cleared by a new client (re-login); authFailures/authCond are guarded by mu.
+	authFailed   atomic.Bool
+	authFailures int
+	authCond     string
+	// stateHook / mgmtNoticeHook / closeConnHook (tests only) replace the bridge state send, the
+	// management room notice and the keepalive's connection close.
+	stateHook      func(status.BridgeState)
+	mgmtNoticeHook func(text string)
+	closeConnHook  func(sess *xmpp.Session)
+	// wakeCh wakes a sleeping ReconnectLoop (session ended); created lazily by wakeChan.
+	wakeOnce sync.Once
+	wakeCh   chan struct{}
+	// lastInbound is the unix-nano time of the last stanza read from the server (keepalive idle check).
+	lastInbound atomic.Int64
+	// pingFunc (tests only) replaces ping.Send in the keepalive.
+	pingFunc func(ctx context.Context, sess *xmpp.Session, to jid.JID) error
 	// sessionCancel cancels the context shared by this session's background goroutines (roster
 	// sync/backfill, MAM catch-up loop). Guarded by mu; see endSessionLocked.
 	sessionCancel context.CancelFunc
@@ -166,27 +184,28 @@ func (x *xmppClient) Connect(ctx context.Context) {
 	if span.IsRecording() {
 		span.SetAttributes(attribute.String("xmpp.login.jid", string(x.loginID)))
 	}
-	if x.login != nil {
-		x.login.BridgeState.Send(status.BridgeState{StateEvent: status.StateConnecting})
+	if x.authFailed.Load() {
+		// The framework calls Connect directly at startup; a rejected login stays rejected.
+		x.sendBadCredentials(x.authCond)
+		return
 	}
+	x.sendState(status.BridgeState{StateEvent: status.StateConnecting})
 	origin, err := jid.Parse(string(x.loginID))
 	if err != nil {
 		telemetry.Fail(span, err)
 		span.SetAttributes(attribute.String("xmpp.connect.result", "failed"))
-		if x.login != nil {
-			x.login.BridgeState.Send(status.BridgeState{StateEvent: status.StateTransientDisconnect, Message: "invalid JID"})
-		}
+		x.sendState(status.BridgeState{StateEvent: status.StateTransientDisconnect, Message: "invalid JID"})
 		return
 	}
 	sess, err := dialXMPPFunc(ctx, origin, x.meta.Password, x.dialOptions(), log)
 	if err != nil {
 		telemetry.Fail(span, err)
 		span.SetAttributes(attribute.String("xmpp.connect.result", "failed"))
-		if x.login != nil {
-			x.login.BridgeState.Send(status.BridgeState{StateEvent: status.StateTransientDisconnect, Message: "connection failed"})
-		}
+		x.handleDialFailure(ctx, err)
 		return
 	}
+	x.authFailures = 0
+	x.lastInbound.Store(time.Now().UnixNano())
 	x.session = sess
 	// Background goroutines of this session run on sessCtx so they end with the session (Serve loop
 	// exit or Disconnect) instead of leaking one set per reconnect.
@@ -197,9 +216,7 @@ func (x *xmppClient) Connect(ctx context.Context) {
 	x.bm.reset()
 	span.SetAttributes(attribute.String("xmpp.connect.result", "connected"))
 
-	if x.login != nil {
-		x.login.BridgeState.Send(status.BridgeState{StateEvent: status.StateConnected})
-	}
+	x.sendState(status.BridgeState{StateEvent: status.StateConnected})
 
 	// Send initial presence so the server delivers messages to this resource.
 	// Without this, many servers (including Snikket/Prosody) do not push messages to the client.
@@ -262,6 +279,8 @@ func (x *xmppClient) Connect(ctx context.Context) {
 	go x.runMUCAutoRejoin(sessCtx)
 	// Live bookmark changes (PEP events queued by the Serve goroutine are applied here).
 	go x.runBookmarkEventWorker(sessCtx, x.bm.eventChan())
+	// XEP-0199 keepalive: detects a dead connection long before TCP keepalive does.
+	go x.runKeepalive(sessCtx, sess, origin.Domain())
 }
 
 // endSessionLocked cancels the current session's background goroutine context. Requires x.mu held.
@@ -386,7 +405,7 @@ func drainIQPayload(t xmlstream.TokenReadEncoder) {
 // ReconnectLoop keeps the XMPP session alive with exponential backoff.
 // It mirrors the Signal bridge's tryConnect pattern in a simplified form.
 func (x *xmppClient) ReconnectLoop(ctx context.Context) {
-	backoff := 5 * time.Second
+	backoff := reconnectBackoffStart
 	const maxBackoff = 5 * time.Minute
 
 	for {
@@ -396,9 +415,15 @@ func (x *xmppClient) ReconnectLoop(ctx context.Context) {
 			return
 		default:
 		}
+		if x.authFailed.Load() {
+			x.log.Warn().Msg("Stopping XMPP reconnect loop: bad credentials")
+			return
+		}
 		if x.IsLoggedIn() {
-			// Already connected: sleep a bit before checking again.
-			time.Sleep(30 * time.Second)
+			// Already connected: wait (a session end wakes the loop) before checking again.
+			if !x.reconnectWait(ctx, reconnectPoll) {
+				return
+			}
 			continue
 		}
 
@@ -411,17 +436,38 @@ func (x *xmppClient) ReconnectLoop(ctx context.Context) {
 		if x.IsLoggedIn() {
 			// Roster sync (and optional full backfill) is started by Connect itself.
 			// Reset backoff on successful connection.
-			backoff = 5 * time.Second
+			backoff = reconnectBackoffStart
 			continue
 		}
 
+		if x.authFailed.Load() {
+			x.log.Warn().Msg("Stopping XMPP reconnect loop: bad credentials")
+			return
+		}
 		x.log.Debug().Dur("backoff", backoff).Msg("XMPP reconnect loop: connect failed, backing off")
-		time.Sleep(backoff)
+		if !x.reconnectWait(ctx, backoff) {
+			return
+		}
 		backoff *= 2
 		if backoff > maxBackoff {
 			backoff = maxBackoff
 		}
 	}
+}
+
+// reconnectWait sleeps for d, returning early (true) when the loop is woken by a session end and
+// false when ctx is done.
+func (x *xmppClient) reconnectWait(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		x.log.Debug().Msg("Stopping XMPP reconnect loop (context done)")
+		return false
+	case <-x.wakeChan():
+	case <-t.C:
+	}
+	return true
 }
 
 // Disconnect is terminal for this client: the framework only calls it when stopping the bridge,

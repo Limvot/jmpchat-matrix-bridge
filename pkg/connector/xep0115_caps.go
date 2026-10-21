@@ -29,6 +29,7 @@ var bridgeFeatureVars = []string{
 	fallbackNS,
 	retractNS0,
 	retractNS1,
+	"urn:xmpp:ping",
 	reactionsNS,
 	replyNS,
 	sidNS,
