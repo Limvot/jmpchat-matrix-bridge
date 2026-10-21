@@ -22,7 +22,7 @@ import (
 var redactedBody = []byte(`"<content omitted>"`)
 
 // scrubbedPathParts are the request path segments whose bodies carry bridged content.
-var scrubbedPathParts = []string{"/send/", "/redact/", "/state/"}
+var scrubbedPathParts = []string{"/send/", "/redact/", "/state/", "/createRoom", "/profile/"}
 
 // scrubLogging rewrites the logging config in place so each writer goes through a scrubbing wrapper.
 func scrubLogging(cfg *zeroconfig.Config) {
@@ -64,19 +64,44 @@ func (w scrubWriter) WriteLevel(level zerolog.Level, p []byte) (int, error) {
 // scrubLine replaces the req_body field of request log lines whose URL path is an event send,
 // a redaction or a state event. Other lines, and malformed ones, are returned unchanged.
 func scrubLine(p []byte) []byte {
-	const key = `"req_body":`
-	idx := bytes.Index(p, []byte(key))
-	if idx < 0 {
+	if !bytes.Contains(p, []byte(`"req_body"`)) {
 		return p
 	}
-	var head struct {
-		URL string `json:"url"`
-	}
-	if err := json.Unmarshal(p, &head); err != nil {
+	// Locate the top-level req_body by token walking, so a context field whose text merely contains
+	// `"req_body":` cannot misdirect the scrub.
+	dec := json.NewDecoder(bytes.NewReader(p))
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
 		return p
 	}
-	path := head.URL
-	if u, err := url.Parse(head.URL); err == nil {
+	var reqURL string
+	start, end := -1, -1
+	for dec.More() {
+		kt, err := dec.Token()
+		if err != nil {
+			return p
+		}
+		k, _ := kt.(string)
+		// Offset of the value: skip the colon and whitespace after the key in the raw input.
+		off := int(dec.InputOffset())
+		for off < len(p) && (p[off] == ':' || p[off] == ' ' || p[off] == '\t' || p[off] == '\n' || p[off] == '\r') {
+			off++
+		}
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil {
+			return p
+		}
+		switch k {
+		case "url":
+			_ = json.Unmarshal(raw, &reqURL)
+		case "req_body":
+			start, end = off, int(dec.InputOffset())
+		}
+	}
+	if start < 0 {
+		return p
+	}
+	path := reqURL
+	if u, err := url.Parse(reqURL); err == nil {
 		path = u.Path
 	}
 	scrub := false
@@ -89,13 +114,6 @@ func scrubLine(p []byte) []byte {
 	if !scrub {
 		return p
 	}
-	start := idx + len(key)
-	dec := json.NewDecoder(bytes.NewReader(p[start:]))
-	var raw json.RawMessage
-	if err := dec.Decode(&raw); err != nil {
-		return p
-	}
-	end := start + int(dec.InputOffset())
 	out := make([]byte, 0, len(p))
 	out = append(out, p[:start]...)
 	out = append(out, redactedBody...)

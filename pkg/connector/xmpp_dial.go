@@ -39,7 +39,11 @@ const (
 	xmppDirectTLSPort  = 5223 // implicit TLS (XEP-0368 default for overrides)
 	maxXMPPEndpoints   = 8
 	errPrivateOverride = "server override points to a private or loopback address"
+	errPrivateSRV      = "DNS SRV record points to a private or loopback address on a non-standard port"
 )
+
+// dialEndpointTimeout bounds one endpoint: TCP connect, TLS handshake and stream negotiation.
+var dialEndpointTimeout = 15 * time.Second
 
 // dialOptions are the per-login connection settings.
 type dialOptions struct {
@@ -357,6 +361,8 @@ func dialXMPP(ctx context.Context, origin jid.JID, password string, opts dialOpt
 func dialEndpoint(ctx context.Context, ep xmppEndpoint, origin jid.JID, password string, opts dialOptions, log *zerolog.Logger) (*xmpp.Session, error) {
 	t0 := time.Now()
 	domain := origin.Domainpart()
+	ctx, epCancel := context.WithTimeout(ctx, dialEndpointTimeout)
+	defer epCancel()
 
 	// Step 1: resolve the host (IP literals need no lookup).
 	var ips []string
@@ -379,10 +385,18 @@ func dialEndpoint(ctx context.Context, ep xmppEndpoint, origin jid.JID, password
 	if len(ips) == 0 {
 		return nil, fmt.Errorf("%s: DNS lookup: no addresses", ep.label())
 	}
-	if ep.Source == "override" && !opts.AllowPrivate {
+	// The override and SRV targets on non-standard ports must not reach internal services (SSRF).
+	guardMsg := ""
+	switch {
+	case ep.Source == "override":
+		guardMsg = errPrivateOverride
+	case strings.HasPrefix(ep.Source, "srv") && ep.Port != xmppDefaultPort && ep.Port != xmppDirectTLSPort:
+		guardMsg = errPrivateSRV
+	}
+	if guardMsg != "" && !opts.AllowPrivate {
 		for _, ip := range ips {
 			if a, perr := netip.ParseAddr(ip); perr != nil || blockedCardDAVAddr(a) {
-				return nil, errors.New(errPrivateOverride)
+				return nil, errors.New(guardMsg)
 			}
 		}
 	}
@@ -415,7 +429,7 @@ func dialEndpoint(ctx context.Context, ep xmppEndpoint, origin jid.JID, password
 			tc := tls.Client(c, xmppTLSConfig(domain, true))
 			if err = tc.HandshakeContext(ctx); err != nil {
 				_ = c.Close()
-				break // a certificate problem is the same on every IP of this host
+				continue // try the next resolved IP, like the TCP path
 			}
 			conn = tc
 		} else {
@@ -441,6 +455,7 @@ func dialEndpoint(ctx context.Context, ep xmppEndpoint, origin jid.JID, password
 		xmpp.SASL("", password, saslMechanisms...),
 		xmpp.BindResource(),
 	}
+	_ = conn.SetDeadline(time.Now().Add(dialEndpointTimeout))
 	var state xmpp.SessionState
 	if ep.DirectTLS {
 		state |= xmpp.Secure
@@ -461,6 +476,7 @@ func dialEndpoint(ctx context.Context, ep xmppEndpoint, origin jid.JID, password
 		return nil, &dialError{msg: fmt.Sprintf("%s: %v", ep.label(), err), err: err}
 	}
 	streamSpan.End()
+	_ = conn.SetDeadline(time.Time{})
 	if sess.State()&xmpp.Secure == 0 {
 		_ = sess.Close()
 		return nil, fmt.Errorf("%s: session is not secure", ep.label())

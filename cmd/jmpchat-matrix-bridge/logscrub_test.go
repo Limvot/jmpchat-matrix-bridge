@@ -42,7 +42,6 @@ func TestScrubLineRedactReason(t *testing.T) {
 func TestScrubLineKeepsOtherRequests(t *testing.T) {
 	for _, u := range []string{
 		"https://hs.example.com/_matrix/client/v3/join/!r:example.com",
-		"https://hs.example.com/_matrix/client/v3/profile/@u:example.com/displayname",
 		"https://hs.example.com/_matrix/media/v3/upload",
 	} {
 		in := reqLine(u)
@@ -186,4 +185,29 @@ func TestPreflightSkipsExampleConfig(t *testing.T) {
 	preflight()
 	withArgs(t, []string{"bridge", "-c", "-"})
 	preflight()
+}
+
+func TestScrubLineCreateRoomAndProfile(t *testing.T) {
+	for _, u := range []string{
+		"https://hs.example.com/_matrix/client/v3/createRoom",
+		"https://hs.example.com/_matrix/client/v3/profile/@u:example.com/displayname",
+	} {
+		out := scrubLine(reqLine(u))
+		if bytes.Contains(out, []byte(secret)) || !bytes.Contains(out, redactedBody) {
+			t.Fatalf("not scrubbed %s: %s", u, out)
+		}
+	}
+}
+
+func TestScrubLineDecoyField(t *testing.T) {
+	in := []byte(`{"level":"debug","note":"x \"req_body\":{\"a\":1} y","url":"https://hs.example.com/_matrix/client/v3/rooms/!r:example.com/send/m.room.message/t","req_body":{"body":"` + secret + `"},"duration":3}`)
+	out := scrubLine(in)
+	if bytes.Contains(out, []byte(secret)) || !bytes.Contains(out, []byte(`"duration":3`)) || !bytes.Contains(out, []byte(`\"req_body\":{\"a\":1} y`)) {
+		t.Fatalf("unexpected: %s", out)
+	}
+	// A decoy in a field that comes before, with a non-scrubbed URL, stays untouched.
+	other := []byte(`{"note":"\"req_body\":","url":"https://hs.example.com/_matrix/client/v3/join/!r","req_body":{"a":1}}`)
+	if got := scrubLine(other); !bytes.Equal(got, other) {
+		t.Fatalf("changed: %s", got)
+	}
 }

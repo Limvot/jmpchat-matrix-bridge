@@ -242,9 +242,10 @@ func (c *JabberConnector) GetConfig() (example string, data any, upgrader config
 # resource_prefix: "mautrix"
 # Resolve phone numbers and short codes to Cheogram JIDs (SMS/MMS). Set to true to enable.
 cheogram: false
-# Allow a per-login server override (login password-server) to point at private, loopback or
-# link-local addresses. Leave false unless your XMPP server runs on your own network.
-# allow_private_server_override: false
+# Allow a per-login server override (login password-server), and DNS SRV targets on non-standard
+# ports (other than 5222/5223), to point at private, loopback or link-local addresses. Leave false
+# unless your XMPP server runs on your own network.
+allow_private_server_override: false
 `
 	e := c.extension()
 	if e != nil {
@@ -321,6 +322,26 @@ type jabberLoginProcess struct {
 
 // buildLoginMeta builds the metadata and dial options of a new login. In the custom-server flow the
 // server is required ("auto" clears a stored override); the plain flow keeps any stored override.
+// userLogins returns the sender's own logins (nil without a user, e.g. in tests).
+func (j *jabberLoginProcess) userLogins() []*bridgev2.UserLogin {
+	if j.user == nil {
+		return nil
+	}
+	return j.user.GetUserLogins()
+}
+
+// existingDialOptions returns the stored override of the sender's own login with this ID (zero value when
+// there is none), for the plain re-login flow.
+func existingDialOptions(logins []*bridgev2.UserLogin, id networkid.UserLoginID) dialOptions {
+	for _, ul := range logins {
+		if ul != nil && ul.ID == id {
+			meta, _ := ul.Metadata.(*JabberLoginMeta)
+			return meta.dialOptions()
+		}
+	}
+	return dialOptions{}
+}
+
 func buildLoginMeta(password, server string, custom bool) (*JabberLoginMeta, dialOptions, error) {
 	meta := &JabberLoginMeta{Password: password}
 	if !custom {
@@ -397,6 +418,10 @@ func (j *jabberLoginProcess) SubmitUserInput(ctx context.Context, input map[stri
 	if err != nil {
 		return nil, err
 	}
+	if !j.customServer {
+		// Re-login with the plain flow keeps the stored override (CopyFrom), so verify against it too.
+		dialOpts = existingDialOptions(j.userLogins(), networkid.UserLoginID(strings.ToLower(jidStr)))
+	}
 	dialOpts.AllowPrivate = j.conn.allowPrivateServerOverride()
 
 	ctx, span := telemetry.Start(ctx, "bridge.login.submit",
@@ -420,13 +445,13 @@ func (j *jabberLoginProcess) SubmitUserInput(ctx context.Context, input map[stri
 	session, err := dialXMPPFunc(dialCtx, origin, password, dialOpts, &log)
 	if err != nil {
 		telemetry.Fail(span, err)
-		log.Debug().Str("jid", jidStr).Msg("XMPP login: connection or auth failed")
+		log.Debug().Err(err).Str("jid", jidStr).Msg("XMPP login: connection or auth failed")
 		hint := ""
 		if !j.customServer {
 			hint = fmt.Sprintf(" If your provider uses a different connection host, use `%s login password-server`.", j.commandPrefix())
 		}
 		if dialCtx.Err() != nil {
-			return nil, fmt.Errorf("connection timed out (is the server reachable?): %w.%s", err, hint)
+			return nil, fmt.Errorf("connection timed out (is the server reachable?).%s", hint)
 		}
 		// Do not wrap or echo err to avoid leaking server messages or credentials into logs.
 		if _, isSASL := saslCondition(err); isSASL {
@@ -434,6 +459,9 @@ func (j *jabberLoginProcess) SubmitUserInput(ctx context.Context, input map[stri
 		}
 		if strings.Contains(err.Error(), errPrivateOverride) {
 			return nil, fmt.Errorf("%s (allow it with network.allow_private_server_override)", errPrivateOverride)
+		}
+		if strings.Contains(err.Error(), errPrivateSRV) {
+			return nil, fmt.Errorf("%s (allow it with network.allow_private_server_override)", errPrivateSRV)
 		}
 		return nil, fmt.Errorf("could not connect to the XMPP server.%s", hint)
 	}

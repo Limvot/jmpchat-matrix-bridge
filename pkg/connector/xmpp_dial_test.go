@@ -12,11 +12,17 @@ import (
 	"fmt"
 	"math/big"
 	"net"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/rs/zerolog"
+	"go.mau.fi/util/configupgrade"
+	"gopkg.in/yaml.v3"
+	"maunium.net/go/mautrix/bridgev2"
+	"maunium.net/go/mautrix/bridgev2/database"
+	"maunium.net/go/mautrix/bridgev2/networkid"
 	"mellium.im/xmpp"
 	"mellium.im/xmpp/jid"
 )
@@ -330,7 +336,7 @@ func TestDialDirectTLSVerifiesJIDDomain(t *testing.T) {
 		defer cancel()
 		// The endpoint host is an IP literal: it must not be used for verification.
 		ep := xmppEndpoint{Host: "127.0.0.1", Port: uint16(port), DirectTLS: true, Source: "srv-tls"}
-		_, clientErr = dialEndpoint(ctx, ep, origin, "pw", dialOptions{}, nil)
+		_, clientErr = dialEndpoint(ctx, ep, origin, "pw", dialOptions{AllowPrivate: true}, nil)
 		select {
 		case serverErr = <-res:
 		case <-time.After(5 * time.Second):
@@ -399,5 +405,178 @@ func TestLoginFlowsIncludeCustomServer(t *testing.T) {
 	step, err := p.(*jabberLoginProcess).Start(context.Background())
 	if err != nil || step.StepID != "fi.mau.jabber.password_server" || len(step.UserInputParams.Fields) != 3 {
 		t.Fatalf("Start: %+v %v", step, err)
+	}
+}
+
+func TestSRVPrivateNonStandardPortBlocked(t *testing.T) {
+	r := &fakeResolver{hosts: map[string][]string{"srv.example.net": {"10.0.0.5"}}}
+	oldR := xmppResolver
+	xmppResolver = r
+	defer func() { xmppResolver = oldR }()
+	origin := jid.MustParse("user@example.com")
+	for _, src := range []string{"srv", "srv-tls"} {
+		ep := xmppEndpoint{Host: "srv.example.net", Port: 6379, Source: src, DirectTLS: src == "srv-tls"}
+		if _, err := dialEndpoint(context.Background(), ep, origin, "pw", dialOptions{}, nil); err == nil || err.Error() != errPrivateSRV {
+			t.Fatalf("%s: err=%v", src, err)
+		}
+	}
+	// Allowed by config: the guard is skipped (the connect then fails or times out).
+	oldT := dialEndpointTimeout
+	dialEndpointTimeout = 200 * time.Millisecond
+	defer func() { dialEndpointTimeout = oldT }()
+	ep := xmppEndpoint{Host: "srv.example.net", Port: 6379, Source: "srv"}
+	if _, err := dialEndpoint(context.Background(), ep, origin, "pw", dialOptions{AllowPrivate: true}, nil); err == nil || err.Error() == errPrivateSRV {
+		t.Fatalf("guard applied despite AllowPrivate: %v", err)
+	}
+}
+
+func TestSRVPrivateStandardPortAndFallbackAllowed(t *testing.T) {
+	r := &fakeResolver{hosts: map[string][]string{"lan.example.net": {"127.0.0.1"}}}
+	oldR := xmppResolver
+	xmppResolver = r
+	defer func() { xmppResolver = oldR }()
+	oldT := dialEndpointTimeout
+	dialEndpointTimeout = 200 * time.Millisecond
+	defer func() { dialEndpointTimeout = oldT }()
+	origin := jid.MustParse("user@example.com")
+	for _, ep := range []xmppEndpoint{
+		{Host: "lan.example.net", Port: 5222, Source: "srv"},
+		{Host: "lan.example.net", Port: 5223, Source: "srv-tls", DirectTLS: true},
+		{Host: "lan.example.net", Port: 5222, Source: "fallback"},
+	} {
+		_, err := dialEndpoint(context.Background(), ep, origin, "pw", dialOptions{}, nil)
+		if err != nil && (err.Error() == errPrivateSRV || err.Error() == errPrivateOverride) {
+			t.Fatalf("%v blocked: %v", ep, err)
+		}
+	}
+}
+
+func TestDialEndpointTimeoutSilentServer(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Skip("no loopback")
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			defer c.Close()
+		}
+	}()
+	oldT := dialEndpointTimeout
+	dialEndpointTimeout = 300 * time.Millisecond
+	defer func() { dialEndpointTimeout = oldT }()
+	ep := xmppEndpoint{Host: "127.0.0.1", Port: uint16(ln.Addr().(*net.TCPAddr).Port), DirectTLS: true, Source: "srv-tls"}
+	start := time.Now()
+	_, err = dialEndpoint(context.Background(), ep, jid.MustParse("user@example.com"), "pw", dialOptions{}, nil)
+	if err == nil || time.Since(start) > 5*time.Second {
+		t.Fatalf("err=%v after %v", err, time.Since(start))
+	}
+}
+
+func TestDirectTLSTriesNextIPAfterHandshakeFailure(t *testing.T) {
+	// The first IP (IPv6 sorts first) closes during the handshake; the second is a working TLS server.
+	l6, err := net.Listen("tcp", "[::1]:0")
+	if err != nil {
+		t.Skip("no ipv6 loopback")
+	}
+	defer l6.Close()
+	port := l6.Addr().(*net.TCPAddr).Port
+	l4, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(port))
+	if err != nil {
+		t.Skip("port not free on v4")
+	}
+	defer l4.Close()
+	go func() {
+		c, err := l6.Accept()
+		if err == nil {
+			c.Close()
+		}
+	}()
+	cert, pool := selfSignedCert(t, "example.com")
+	served := make(chan error, 1)
+	go func() {
+		c, err := l4.Accept()
+		if err != nil {
+			served <- err
+			return
+		}
+		defer c.Close()
+		served <- tls.Server(c, &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}).Handshake()
+	}()
+	old := xmppTLSConfigHook
+	xmppTLSConfigHook = func(c *tls.Config) { c.RootCAs = pool }
+	defer func() { xmppTLSConfigHook = old }()
+	oldR := xmppResolver
+	xmppResolver = &fakeResolver{hosts: map[string][]string{"h.example.net": {"127.0.0.1", "::1"}}}
+	defer func() { xmppResolver = oldR }()
+	ep := xmppEndpoint{Host: "h.example.net", Port: uint16(port), DirectTLS: true, Source: "fallback"}
+	_, _ = dialEndpoint(context.Background(), ep, jid.MustParse("user@example.com"), "pw", dialOptions{}, nil)
+	select {
+	case e := <-served:
+		if e != nil {
+			t.Fatalf("second IP handshake: %v", e)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("second IP never tried")
+	}
+}
+
+func TestExistingDialOptions(t *testing.T) {
+	mk := func(id string, m *JabberLoginMeta) *bridgev2.UserLogin {
+		return &bridgev2.UserLogin{UserLogin: &database.UserLogin{ID: networkid.UserLoginID(id), Metadata: m}}
+	}
+	logins := []*bridgev2.UserLogin{
+		mk("other@example.com", &JabberLoginMeta{Server: "x.example.net"}),
+		mk("me@example.com", &JabberLoginMeta{Server: "xmpp.example.net", Port: 5223, DirectTLS: true}),
+	}
+	got := existingDialOptions(logins, "me@example.com")
+	if got != (dialOptions{Server: "xmpp.example.net", Port: 5223, DirectTLS: true}) {
+		t.Fatalf("got %+v", got)
+	}
+	if got := existingDialOptions(logins, "none@example.com"); got != (dialOptions{}) {
+		t.Fatalf("got %+v", got)
+	}
+	if got := existingDialOptions(nil, "me@example.com"); got != (dialOptions{}) {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestLoginErrorsAreFixedMessages(t *testing.T) {
+	old := dialXMPPFunc
+	defer func() { dialXMPPFunc = old }()
+	c := &JabberConnector{br: &bridgev2.Bridge{Log: zerolog.Nop()}}
+	for _, e := range []error{
+		errors.New("dial tcp 10.1.2.3:6379: connect: connection refused"),
+		errors.New("srv.example.net:6379: " + errPrivateSRV),
+	} {
+		e := e
+		dialXMPPFunc = func(context.Context, jid.JID, string, dialOptions, *zerolog.Logger) (*xmpp.Session, error) {
+			return nil, e
+		}
+		p := &jabberLoginProcess{conn: c}
+		_, err := p.SubmitUserInput(context.Background(), map[string]string{"jid": "user@example.com", "password": "pw"})
+		if err == nil || strings.Contains(err.Error(), "10.1.2.3") || strings.Contains(err.Error(), "6379") {
+			t.Fatalf("leaked detail: %v", err)
+		}
+	}
+}
+
+func TestPrivateOverrideConfigSurvivesUpgrade(t *testing.T) {
+	c := &JabberConnector{}
+	example, _, upgrader := c.GetConfig()
+	out, err := configupgrade.DoBytes([]byte("allow_private_server_override: true\n"), &configupgrade.StructUpgrader{
+		SimpleUpgrader: func(h configupgrade.Helper) { upgrader.DoUpgrade(h) },
+		Base:           example,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg JabberConfig
+	if err = yaml.Unmarshal(out, &cfg); err != nil || !cfg.AllowPrivateServerOverride {
+		t.Fatalf("setting dropped: %v\n%s", err, out)
 	}
 }
