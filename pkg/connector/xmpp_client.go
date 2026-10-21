@@ -591,38 +591,7 @@ func (x *xmppClient) syncRoster(ctx context.Context) {
 	defer span.End()
 	log := x.logFor(ctx)
 
-	fetchCtx, fetchSpan := telemetry.StartChild(ctx, "xmpp.iq.roster_fetch", trace.WithSpanKind(trace.SpanKindClient))
-	if fetchSpan.IsRecording() {
-		fetchSpan.SetAttributes(attribute.String("xmpp.iq.namespace", "jabber:iq:roster"))
-	}
-	iter := roster.Fetch(fetchCtx, sess)
-	defer func() {
-		if err := iter.Close(); err != nil {
-			log.Debug().Err(err).Msg("Failed to close roster iterator")
-		}
-	}()
-
-	newRoster := make(map[string]string)
-	var entries []rosterEntry
-	itemCount := 0
-	for iter.Next() {
-		item := iter.Item()
-		bare := item.JID.Bare().String()
-		itemCount++
-		log.Info().Str("jid", bare).Str("subscription", item.Subscription).Msg("Roster item from server")
-		if bare == "" {
-			continue
-		}
-		// Normalize to lowercase so lookups match bridge (portal/ghost IDs are typically lowercased).
-		key := strings.ToLower(bare)
-		if item.Name != "" {
-			newRoster[key] = item.Name
-		}
-		entries = append(entries, rosterEntry{jid: key, name: item.Name, remove: item.Subscription == "remove"})
-	}
-	iterErr := iter.Err()
-	telemetry.Fail(fetchSpan, iterErr)
-	fetchSpan.End()
+	newRoster, entries, itemCount, iterErr := x.fetchRoster(ctx, sessionRosterFetcher{sess})
 	if iterErr != nil {
 		telemetry.Fail(span, iterErr)
 		log.Warn().Err(iterErr).Msg("Failed to fetch XMPP roster")
@@ -639,6 +608,63 @@ func (x *xmppClient) syncRoster(ctx context.Context) {
 	// Push updated names to Matrix for all roster contacts that have ghosts/portals.
 	// Otherwise Matrix keeps showing old display names until the user opens the chat.
 	x.refreshRosterGhostsAndPortals(ctx, newRoster)
+}
+
+// fetchRoster runs the roster IQ and returns the items (names by lowercased bare JID, the entries and the
+// raw item count). The response is closed before it returns: mellium's Serve goroutine hands an IQ result
+// to its waiter and then blocks until that response is closed, so every other stanza (including the
+// results other IQ waiters are waiting for) queues behind an open roster iterator. It must therefore
+// never stay open across slow work such as the ghost/portal refresh (DB + Matrix requests).
+func (x *xmppClient) fetchRoster(ctx context.Context, sess rosterFetcher) (names map[string]string, entries []rosterEntry, itemCount int, err error) {
+	log := x.logFor(ctx)
+	fetchCtx, fetchSpan := telemetry.StartChild(ctx, "xmpp.iq.roster_fetch", trace.WithSpanKind(trace.SpanKindClient))
+	defer fetchSpan.End()
+	if fetchSpan.IsRecording() {
+		fetchSpan.SetAttributes(attribute.String("xmpp.iq.namespace", "jabber:iq:roster"))
+	}
+	iter := sess.fetchRoster(fetchCtx)
+	names = make(map[string]string)
+	for iter.Next() {
+		item := iter.Item()
+		bare := item.JID.Bare().String()
+		itemCount++
+		log.Info().Str("jid", bare).Str("subscription", item.Subscription).Msg("Roster item from server")
+		if bare == "" {
+			continue
+		}
+		// Normalize to lowercase so lookups match bridge (portal/ghost IDs are typically lowercased).
+		key := strings.ToLower(bare)
+		if item.Name != "" {
+			names[key] = item.Name
+		}
+		entries = append(entries, rosterEntry{jid: key, name: item.Name, remove: item.Subscription == "remove"})
+	}
+	err = iter.Err()
+	if cerr := iter.Close(); cerr != nil {
+		log.Debug().Err(cerr).Msg("Failed to close roster iterator")
+	}
+	telemetry.Fail(fetchSpan, err)
+	return names, entries, itemCount, err
+}
+
+// rosterIter is the part of *roster.Iter that fetchRoster uses.
+type rosterIter interface {
+	Next() bool
+	Item() roster.Item
+	Err() error
+	Close() error
+}
+
+// rosterFetcher starts a roster fetch (a seam so tests can check that the response is closed early).
+type rosterFetcher interface {
+	fetchRoster(ctx context.Context) rosterIter
+}
+
+// sessionRosterFetcher is the production rosterFetcher over a live session.
+type sessionRosterFetcher struct{ sess *xmpp.Session }
+
+func (f sessionRosterFetcher) fetchRoster(ctx context.Context) rosterIter {
+	return roster.Fetch(ctx, f.sess)
 }
 
 // refreshRosterGhostsAndPortals updates Matrix ghost display names and DM room names
