@@ -48,6 +48,8 @@ func (x *xmppClient) carbonOuterFromOK(outer *xml.StartElement, kind string) boo
 // so we capture from/to/id from the first <message> element we encounter (at any depth).
 func parseInnerMessageFromCarbon(t xmlstream.TokenReadEncoder) (from, to, typeAttr, id, body string, jmi *jingleMessageInfo, ids messageIDs, err error) {
 	depth := 0
+	var bodyBuf strings.Builder
+	bodyDepth := 0 // depth of the direct-child <body> being read; 0 when not inside one
 	msgDepth := 0 // depth of the first inner <message>; its direct children carry the XEP-0359 ids
 	for {
 		tok, err := t.Token()
@@ -70,20 +72,22 @@ func parseInnerMessageFromCarbon(t xmlstream.TokenReadEncoder) (from, to, typeAt
 				typeAttr = attrValue(v.Attr, "type")
 				id = attrValue(v.Attr, "id")
 			}
-			if v.Name.Local == "body" {
-				inner, ierr := t.Token()
-				if ierr != nil {
-					continue
-				}
-				if cd, ok := inner.(xml.CharData); ok {
-					body = strings.TrimSpace(string(cd))
-				}
+			if v.Name.Local == "body" && msgDepth > 0 && depth == msgDepth+1 && bodyDepth == 0 {
+				bodyDepth = depth // only the message's own direct-child <body>, not the XEP-0428 fallback's
+				bodyBuf.Reset()
 			}
 		case xml.CharData:
+			if bodyDepth > 0 {
+				bodyBuf.Write(v)
+			}
 			if msgDepth > 0 {
 				ids.trackChars(v)
 			}
 		case xml.EndElement:
+			if bodyDepth > 0 && depth == bodyDepth {
+				body = strings.TrimSpace(bodyBuf.String())
+				bodyDepth = 0
+			}
 			depth--
 			if msgDepth > 0 {
 				ids.trackEnd(depth + 1)

@@ -63,7 +63,10 @@ func (m *messageIDs) track(se xml.StartElement, depth, childDepth int) {
 // trackChars feeds character data to the retraction scanner (reason text).
 func (m *messageIDs) trackChars(cd xml.CharData) {
 	// A rune is at most 4 bytes: this only bounds the buffer, capSubject cuts to the rune cap.
-	if m.subjectDepth > 0 && len(m.subjectBuf) < 4*maxSubjectRunes+4 {
+	if limit := 4*maxSubjectRunes + 4; m.subjectDepth > 0 && len(m.subjectBuf) < limit {
+		if room := limit - len(m.subjectBuf); len(cd) > room {
+			cd = cd[:room] // capSubject trims a cut rune at the end
+		}
 		m.subjectBuf = append(m.subjectBuf, cd...)
 	}
 	if m.scan != nil {
@@ -74,7 +77,7 @@ func (m *messageIDs) trackChars(cd xml.CharData) {
 // trackEnd feeds an end element (depth of the element that closes) to the retraction scanner.
 func (m *messageIDs) trackEnd(depth int) {
 	if m.subjectDepth > 0 && depth == m.subjectDepth {
-		s := capSubject(string(m.subjectBuf))
+		s := capSubject(strings.ToValidUTF8(string(m.subjectBuf), "")) // drop a rune cut by the byte budget
 		m.Extras.Subject = &s
 		m.subjectDepth = 0
 		m.subjectBuf = m.subjectBuf[:0]

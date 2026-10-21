@@ -146,6 +146,8 @@ func (x *xmppClient) handleMAMResult(t xmlstream.TokenReadEncoder, start *xml.St
 	var from, to, msgType, stanzaID, body string
 	var timestamp time.Time
 	var ids messageIDs
+	var bodyBuf strings.Builder
+	bodyDepth := 0 // depth of the direct-child <body> being read; 0 when not inside one
 	msgDepth := 0 // depth of the first inner <message>; its direct children carry the XEP-0359 ids
 	depth := 1
 	for depth > 0 {
@@ -169,15 +171,9 @@ func (x *xmppClient) handleMAMResult(t xmlstream.TokenReadEncoder, start *xml.St
 				msgType = attrValue(v.Attr, "type")
 				stanzaID = attrValue(v.Attr, "id")
 			}
-			if v.Name.Local == "body" {
-				// Next token(s) are character data
-				inner, ierr := t.Token()
-				if ierr != nil {
-					continue
-				}
-				if cd, ok := inner.(xml.CharData); ok {
-					body = strings.TrimSpace(string(cd))
-				}
+			if v.Name.Local == "body" && msgDepth > 0 && depth == msgDepth+1 && bodyDepth == 0 {
+				bodyDepth = depth // only the message's own direct-child <body>, not the XEP-0428 fallback's
+				bodyBuf.Reset()
 			}
 			if v.Name.Space == delayNS && v.Name.Local == "delay" {
 				if stamp := attrValue(v.Attr, "stamp"); stamp != "" {
@@ -188,10 +184,17 @@ func (x *xmppClient) handleMAMResult(t xmlstream.TokenReadEncoder, start *xml.St
 				}
 			}
 		case xml.CharData:
+			if bodyDepth > 0 {
+				bodyBuf.Write(v)
+			}
 			if msgDepth > 0 {
 				ids.trackChars(v)
 			}
 		case xml.EndElement:
+			if bodyDepth > 0 && depth == bodyDepth {
+				body = strings.TrimSpace(bodyBuf.String())
+				bodyDepth = 0
+			}
 			depth--
 			if msgDepth > 0 {
 				ids.trackEnd(depth + 1)
