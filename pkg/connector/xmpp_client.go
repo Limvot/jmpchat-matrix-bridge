@@ -55,6 +55,8 @@ type xmppClient struct {
 	noticeHook func(portal *bridgev2.Portal, text string)
 	// statusHook, when set (tests only), receives message statuses instead of the Matrix connector.
 	statusHook func(ms *bridgev2.MessageStatus, info *bridgev2.MessageStatusEventInfo)
+	// rejected dedupes rejection reports per Matrix event (xmpp_error_stanza.go).
+	rejected rejectedReports
 	// mucNoticeHook / mucNickSaveHook / mucSendJoinHook (tests only) replace the MUC nick notices,
 	// the auto-nick persistence and the join presence send.
 	mucNoticeHook    func(roomBare, text string)

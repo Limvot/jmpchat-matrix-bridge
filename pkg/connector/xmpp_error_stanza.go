@@ -5,6 +5,7 @@ import (
 	"encoding/xml"
 	"io"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -15,6 +16,7 @@ import (
 	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/bridgev2/status"
 	"maunium.net/go/mautrix/event"
+	"maunium.net/go/mautrix/id"
 
 	"github.com/williamkray/jmpchat-matrix-bridge/pkg/telemetry"
 )
@@ -34,7 +36,35 @@ const (
 	maxErrorFieldLen = 256
 	// messageErrorTimeout bounds the DB/Matrix work of one rejection.
 	messageErrorTimeout = 30 * time.Second
+	// rejectedDedupeTTL is how long a reported rejection suppresses further reports for the same event.
+	rejectedDedupeTTL = 10 * time.Minute
 )
+
+// rejectedReports remembers which Matrix events were already reported as rejected, so repeated error
+// stanzas for the same message (server retries, error per resource) produce one status and one notice.
+type rejectedReports struct {
+	mu   sync.Mutex
+	seen map[id.EventID]time.Time
+}
+
+// first reports whether evt was not reported within rejectedDedupeTTL, and records it.
+func (r *rejectedReports) first(evt id.EventID, now time.Time) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.seen == nil {
+		r.seen = make(map[id.EventID]time.Time)
+	}
+	for k, t := range r.seen {
+		if now.Sub(t) > rejectedDedupeTTL {
+			delete(r.seen, k)
+		}
+	}
+	if t, ok := r.seen[evt]; ok && now.Sub(t) <= rejectedDedupeTTL {
+		return false
+	}
+	r.seen[evt] = now
+	return true
+}
 
 // messageError is the parsed content of an error message stanza.
 type messageError struct {
@@ -165,7 +195,11 @@ func (x *xmppClient) handleMessageError(me messageError) {
 	if room == "" {
 		return
 	}
-	x.mucEcho.discard(room, me.ID)
+	// Rejections of groupchat messages come from the room's bare JID. An error from an occupant
+	// (room/nick) is forwarded by the room on that occupant's behalf and must not touch our echo state.
+	if !strings.Contains(me.From, "/") {
+		x.mucEcho.discard(room, me.ID)
+	}
 	if x.conn == nil || x.conn.br == nil || x.login == nil {
 		return
 	}
@@ -236,6 +270,17 @@ func (x *xmppClient) reportRejectedMessage(ctx context.Context, db *database.Dat
 			portal = &bridgev2.Portal{Portal: p}
 		}
 	}
+	// Spoofing: in a MUC every occupant sees our message ids (the room reflects them) and can send a
+	// type=error private message that the room forwards from room/nick. Only the room itself (bare
+	// JID) may reject a groupchat message.
+	if strings.Contains(me.From, "/") && portalLooksMUC(portal) {
+		log.Debug().Str("id", me.ID).Str("from", me.From).Msg("Ignoring message error from a MUC occupant")
+		return false
+	}
+	if !x.rejected.first(row.MXID, time.Now()) {
+		log.Debug().Str("id", me.ID).Msg("Rejection already reported for this message")
+		return false
+	}
 	text := me.noticeText()
 	ms := &bridgev2.MessageStatus{
 		Step:        status.MsgStepRemote,
@@ -267,5 +312,21 @@ func (x *xmppClient) sendMessageStatus(ctx context.Context, ms *bridgev2.Message
 	if x.conn == nil || x.conn.br == nil || x.conn.br.Matrix == nil || info.RoomID == "" {
 		return
 	}
-	x.conn.br.Matrix.SendMessageStatus(ctx, ms, info)
+	// Connector.SendMessageStatus sends asynchronously; the caller's ctx is canceled on return.
+	x.conn.br.Matrix.SendMessageStatus(context.WithoutCancel(ctx), ms, info)
+}
+
+// portalLooksMUC decides from the stored room type (no IQ) whether portal is a group chat; legacy
+// portals without a type fall back to the JID heuristic.
+func portalLooksMUC(portal *bridgev2.Portal) bool {
+	if portal == nil || portal.Portal == nil {
+		return false
+	}
+	switch portal.RoomType {
+	case database.RoomTypeGroupDM:
+		return true
+	case database.RoomTypeDM:
+		return false
+	}
+	return isMUCJID(string(portal.ID))
 }

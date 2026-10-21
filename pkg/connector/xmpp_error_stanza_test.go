@@ -106,8 +106,14 @@ func TestFindAndReportRejectedMessage(t *testing.T) {
 	}
 	reset := func() { notices, statuses, infos = nil, nil, nil }
 
-	// MUC: from the room bare JID or an occupant.
-	e := messageError{ID: "x-muc", From: "room@conference.example.com", Condition: "policy-violation", Text: "Too fast", ErrorType: "modify"}
+	// MUC: an occupant (room/nick) cannot reject our groupchat message.
+	e := messageError{ID: "x-muc", From: "room@conference.example.com/mallory", Condition: "forbidden", ErrorType: "auth"}
+	if x.reportRejectedMessage(ctx, db, e) || len(statuses) != 0 || len(notices) != 0 {
+		t.Fatal("occupant-sent error must be ignored")
+	}
+
+	// MUC: from the room bare JID.
+	e = messageError{ID: "x-muc", From: "room@conference.example.com", Condition: "policy-violation", Text: "Too fast", ErrorType: "modify"}
 	if !x.reportRejectedMessage(ctx, db, e) {
 		t.Fatal("muc rejection not correlated")
 	}
@@ -117,6 +123,12 @@ func TestFindAndReportRejectedMessage(t *testing.T) {
 	}
 	if len(notices) != 1 || notices[0] != "!room@conference.example.com:hs|Your message was not delivered: policy-violation \u2013 Too fast" {
 		t.Errorf("notices %v", notices)
+	}
+
+	// A repeated error for the same message is reported once.
+	reset()
+	if x.reportRejectedMessage(ctx, db, e) || len(statuses) != 0 || len(notices) != 0 {
+		t.Error("duplicate rejection reported again")
 	}
 
 	// DM by origin id, from a full JID.
@@ -162,5 +174,12 @@ func TestMessageErrorLogAndEchoDiscard(t *testing.T) {
 	}
 	if _, found, _ := x.mucEcho.wait(context.Background(), "room@conference.example.com", "m9", time.Millisecond); found {
 		t.Error("pending echo entry not discarded")
+	}
+
+	// An error forwarded from an occupant (room/nick) leaves the pending echo entry alone.
+	x.mucEcho.register("room@conference.example.com", "m10")
+	serveStanza(t, x, `<message xmlns="jabber:client" type="error" id="m10" from="room@conference.example.com/mallory" to="me@example.com/r"><error type="auth"><forbidden xmlns="urn:ietf:params:xml:ns:xmpp-stanzas"/></error></message>`)
+	if _, found, _ := x.mucEcho.wait(context.Background(), "room@conference.example.com", "m10", time.Millisecond); !found {
+		t.Error("occupant error discarded the pending echo entry")
 	}
 }
