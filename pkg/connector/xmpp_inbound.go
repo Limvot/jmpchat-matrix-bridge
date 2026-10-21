@@ -395,6 +395,7 @@ func (x *xmppClient) handleMessageWithOOB(t xmlstream.TokenReadEncoder, start *x
 			if parsedSender, bodyWithoutPrefix, okBody := ParseCheogramGroupMMSSenderFromBody(body); okBody && parsedSender != "" {
 				senderJID = parsedSender
 				body = bodyWithoutPrefix
+				ids.ReplyFallback = replyFallback{} // offsets indexed the prefixed body
 			} else {
 				senderJID = individuals[0]
 			}
@@ -1316,7 +1317,7 @@ func (m *jabberRemoteMessage) convertMessage(ctx context.Context, portal *bridge
 	bodyText := m.body
 	if replyTarget != nil && m.replyFallback.Valid {
 		bodyText = stripReplyFallback(bodyText, m.replyFallback)
-	} else if m.replyID != "" {
+	} else if m.replyID != "" && !m.replyFallback.Valid {
 		// No XEP-0428 range: strip lines starting with ">" (common Jabber quote format)
 		lines := strings.Split(bodyText, "\n")
 		var cleanLines []string
