@@ -20,6 +20,13 @@ const (
 	refMUCModeration
 	// refMUCSelf: a room stanza-id first; id/origin-id only when the room assigned none.
 	refMUCSelf
+	// refReplyDM: target of a reply/reaction in a 1:1 chat: direct id, then origin-id/xmpp id,
+	// then the account-archive stanza-id (XEP-0461/0444 name the id the client saw).
+	refReplyDM
+	// refReplyMUC: target of a reply/reaction in a groupchat: XEP-0461/0444 name the room-assigned
+	// stanza-id, so that goes first; then the direct id and the sender-chosen aliases for clients
+	// that still reference those. Room-scoped like every lookup here.
+	refReplyMUC
 )
 
 // metadata JSON keys (MessageMetadata) that findMessagesByXMPPRef may match. Only these constants are
@@ -47,6 +54,18 @@ func refLookupPlan(kind refKind) []refStep {
 			{keys: []string{metaKeyStanzaID}},
 			{direct: true},
 			{keys: []string{metaKeyOriginID, metaKeyXMPPID}},
+		}
+	case refReplyMUC:
+		return []refStep{
+			{keys: []string{metaKeyStanzaID}},
+			{direct: true},
+			{keys: []string{metaKeyOriginID, metaKeyXMPPID}},
+		}
+	case refReplyDM:
+		return []refStep{
+			{direct: true},
+			{keys: []string{metaKeyOriginID, metaKeyXMPPID}},
+			{keys: []string{metaKeyStanzaID}},
 		}
 	default:
 		return []refStep{

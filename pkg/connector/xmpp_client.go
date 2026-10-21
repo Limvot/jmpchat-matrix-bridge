@@ -2097,59 +2097,29 @@ func (x *xmppClient) handleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 		return nil, bridgev2.WrapErrorInStatus(fmt.Errorf("%w: %s", bridgev2.ErrUnsupportedMessageType, msg.Content.MsgType)).WithSendNotice(true)
 	}
 
-	// Handle reply (XEP-0461): if msg.ReplyTo exists, extract XMPP message ID from it
-	// msg.ReplyTo is already a *database.Message (the bridge framework resolves it for us)
+	// Handle reply (XEP-0461): msg.ReplyTo is already a *database.Message (resolved by bridgev2).
+	// In a MUC the reply id is the target's room stanza-id; in 1:1 chats the id we sent or the row ID.
+	isMUCPortal := x.portalIsMUC(ctx, msg.Portal)
 	var replyID, replyToJID string
 	if msg.ReplyTo != nil {
-		// Extract XMPP message ID from the database message
-		// For messages originally sent from XMPP: ID is stored in database.Message.ID
-		// For messages originally sent from Matrix: XMPP ID is stored in MessageMetadata.XMPPMessageID
-		var xmppMsgID string
-		dbMsgID := string(msg.ReplyTo.ID)
-		if strings.HasPrefix(dbMsgID, "matrix:") {
-			// Matrix-originated message: check metadata for XMPP message ID
-			if msg.ReplyTo.Metadata != nil {
-				if meta, ok := msg.ReplyTo.Metadata.(*MessageMetadata); ok && meta != nil && meta.XMPPMessageID != "" {
-					xmppMsgID = meta.XMPPMessageID
-					log.Debug().
-						Str("matrix_event_id", dbMsgID).
-						Str("xmpp_msg_id", xmppMsgID).
-						Msg("DEBUG: Found XMPP message ID in metadata for Matrix-originated message")
-				} else {
-					log.Debug().
-						Str("matrix_event_id", dbMsgID).
-						Msg("DEBUG: Matrix-originated message has no XMPP message ID in metadata; sending without XEP-0461 reply")
-				}
-			} else {
-				log.Debug().
-					Str("matrix_event_id", dbMsgID).
-					Msg("DEBUG: Matrix-originated message has no metadata; sending without XEP-0461 reply")
+		ref, roomRef, ok := replyRefForMessage(msg.ReplyTo, isMUCPortal)
+		switch {
+		case !ok:
+			log.Debug().Msg("Reply target has no XMPP id; sending without XEP-0461 reply")
+		default:
+			replyID = ref
+			if isMUCPortal && !roomRef {
+				log.Debug().Msg("Reply target has no room stanza-id; falling back to its message id")
 			}
-		} else {
-			// XMPP-originated message: ID is stored directly in database.Message.ID
-			xmppMsgID = dbMsgID
-		}
-		
-		if xmppMsgID != "" {
-			replyID = xmppMsgID
-			// Get sender JID from the reply target message
-			// SenderID is a networkid.UserID, which for Jabber is the JID
-			senderIDStr := string(msg.ReplyTo.SenderID)
-			if senderIDStr != "" {
+			if senderIDStr := string(msg.ReplyTo.SenderID); senderIDStr != "" {
 				replyToJID = senderIDStr
-				log.Debug().
-					Str("reply_id", replyID).
-					Str("reply_to_jid", replyToJID).
-					Msg("DEBUG: Found reply target, will include XEP-0461 reply element")
-			} else {
-				log.Debug().Str("reply_id", replyID).Msg("DEBUG: Reply target has no sender ID; sending reply without 'to' attribute")
 			}
+			log.Debug().Bool("muc", isMUCPortal).Bool("room_stanza_id", roomRef).Bool("has_to", replyToJID != "").Msg("Reply target resolved")
 		}
 	}
 
 	// Use groupchat for MUC portals; use chat for 1:1 DMs (matches Cheogram and standard 1:1).
 	msgType := stanza.ChatMessage
-	isMUCPortal := x.portalIsMUC(ctx, msg.Portal)
 	if isMUCPortal {
 		msgType = stanza.MessageType("groupchat")
 	}
@@ -2278,37 +2248,17 @@ func (x *xmppClient) handleMatrixReaction(ctx context.Context, msg *bridgev2.Mat
 		return nil, fmt.Errorf("invalid portal JID format: %w", err)
 	}
 	
-	// Extract XMPP message ID from the target message
-	// For messages originally sent from XMPP: ID is stored in database.Message.ID
-	// For messages originally sent from Matrix: XMPP ID is stored in MessageMetadata.XMPPMessageID
-	var targetMessageID string
-	dbMsgID := string(msg.TargetMessage.ID)
-	if strings.HasPrefix(dbMsgID, "matrix:") {
-		// Matrix-originated message: check metadata for XMPP message ID
-		if msg.TargetMessage.Metadata != nil {
-			if meta, ok := msg.TargetMessage.Metadata.(*MessageMetadata); ok && meta != nil && meta.XMPPMessageID != "" {
-				targetMessageID = meta.XMPPMessageID
-				log.Debug().
-					Str("matrix_event_id", dbMsgID).
-					Str("xmpp_msg_id", targetMessageID).
-					Msg("DEBUG: Found XMPP message ID in metadata for Matrix-originated reaction target")
-			} else {
-				log.Debug().
-					Str("matrix_event_id", dbMsgID).
-					Msg("DEBUG: Matrix-originated reaction target has no XMPP message ID in metadata")
-				return nil, fmt.Errorf("target message has no XMPP message ID")
-			}
-		} else {
-			return nil, fmt.Errorf("target message has no metadata")
-		}
-	} else {
-		// XMPP-originated message: ID is stored directly in database.Message.ID
-		targetMessageID = dbMsgID
-		log.Debug().
-			Str("xmpp_msg_id", targetMessageID).
-			Msg("DEBUG: Using XMPP message ID directly for XMPP-originated reaction target")
+	// XEP-0444 target id: the room stanza-id in a MUC when known, otherwise the id we sent
+	// (Matrix-originated rows) or the row ID.
+	isMUCPortal := x.portalIsMUC(ctx, msg.Portal)
+	targetMessageID, roomRef, ok := replyRefForMessage(msg.TargetMessage, isMUCPortal)
+	if !ok {
+		return nil, fmt.Errorf("target message has no XMPP message ID")
 	}
-	
+	if isMUCPortal && !roomRef {
+		log.Debug().Msg("Reaction target has no room stanza-id; falling back to its message id")
+	}
+
 	if targetMessageID == "" {
 		return nil, fmt.Errorf("could not determine XMPP message ID for reaction target")
 	}
@@ -2324,7 +2274,7 @@ func (x *xmppClient) handleMatrixReaction(ctx context.Context, msg *bridgev2.Mat
 	
 	// Use groupchat for MUC portals; use chat for 1:1 DMs (matches regular messages and standard 1:1).
 	msgType := stanza.ChatMessage
-	if x.portalIsMUC(ctx, msg.Portal) {
+	if isMUCPortal {
 		msgType = stanza.MessageType("groupchat")
 	}
 	_, err = sendXMPPReaction(ctx, sess, toJID, targetMessageID, emoji, msgType)

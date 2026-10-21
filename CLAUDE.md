@@ -63,6 +63,8 @@ All bridge logic lives in `pkg/connector/`. The bridgev2 framework handles Matri
 
 ### Protocol Extensions
 
+- **`pkg/connector/xmpp_reply_ref.go`** — Reply/reaction target resolution (XEP-0461/0444): `resolveMessageRef` is room-scoped (`findMessagesByXMPPRef` with `refReplyMUC`: stanza_id, id, origin_id/xmpp_message_id; `refReplyDM`: id, origin_id/xmpp_message_id, stanza_id). MUC vs DM comes from `refIsMUC` (event origin, stored RoomType, JID heuristic; never disco). XEP-0428 reply fallback range (`replyFallback`, code points) is stripped only when the target resolves. Outbound ids: `replyRefForMessage` (MUC: target's room stanza-id, else legacy id).
+
 - **`pkg/connector/xmpp_carbons.go`** — XEP-0280 Message Carbons. Enables on connect, parses `<sent>`/`<received>` forwarded stanzas, queues as remote events.
 
 - **`pkg/connector/muc_autorejoin.go`** — MUC auto-rejoin: `Connect` starts `runMUCAutoRejoin(sessCtx)` (own root span, ends with the session context, 3 s initial delay, 500 ms stagger, max 200 rooms). `selectMUCRejoinCandidates` (pure) takes this login's `GetAllWithMXID` portals with a Matrix room that are MUCs (RoomType GroupDM; unset type -> `isMUC`; never DMs, Cheogram DM/group MMS, or `PortalMetadata.MUCLeft`). Joins go through `joinMUC(ctx, room, hist)`; the batch passes `mucRejoinHistory` (`<history since=newest bridged message, maxstanzas=100>`, since clamped to 7 days; `maxstanzas=20` without anchor), manual `JoinMUC` and 409 retries send no history element. `LeaveMUC` success sets `MUCLeft` (`setMUCLeft`), `JoinMUC` clears it.

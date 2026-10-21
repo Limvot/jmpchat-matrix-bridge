@@ -7,8 +7,11 @@ import (
 	"io"
 	"net/http"
 	"path"
+	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/rs/zerolog"
 	"go.opentelemetry.io/otel/attribute"
@@ -20,6 +23,7 @@ import (
 	"mellium.im/xmpp/stanza"
 	"mellium.im/xmlstream"
 	"maunium.net/go/mautrix/bridgev2"
+	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/bridgev2/simplevent"
 	"maunium.net/go/mautrix/bridgev2/status"
@@ -119,6 +123,10 @@ func parseMessageBodyOOBIDs(t xml.TokenReader) (body, oobURL, replyID string, re
 	depth := 1
 	inBody, inOOB, inURL, inReactions, inReaction := false, false, false, false, false
 	reactionEmojis = []string{}
+	// XEP-0428: a direct-child <fallback for='urn:xmpp:reply:0'> and the <body start end/> inside it.
+	inReplyFallback := false
+	var fbStart, fbEnd int
+	fbValid := false
 	for depth > 0 {
 		tok, err := t.Token()
 		if err != nil {
@@ -129,6 +137,16 @@ func parseMessageBodyOOBIDs(t xml.TokenReader) (body, oobURL, replyID string, re
 			depth++
 			ids.track(v, depth, 2)
 			jmi = detectJingleMessage(jmi, v)
+			if depth == 2 && v.Name.Local == "fallback" && (v.Name.Space == fallbackNS || attrValue(v.Attr, "xmlns") == fallbackNS) &&
+				attrValue(v.Attr, "for") == replyNS {
+				inReplyFallback = true
+			}
+			if depth == 3 && inReplyFallback && !fbValid && v.Name.Local == "body" {
+				s, e, ok := parseFallbackRange(v.Attr)
+				if ok {
+					fbStart, fbEnd, fbValid = s, e, true
+				}
+			}
 			if v.Name.Local == "body" {
 				inBody = true
 			}
@@ -165,6 +183,9 @@ func parseMessageBodyOOBIDs(t xml.TokenReader) (body, oobURL, replyID string, re
 		case xml.EndElement:
 			depth--
 			ids.trackEnd(depth + 1)
+			if depth == 1 && v.Name.Local == "fallback" {
+				inReplyFallback = false
+			}
 			if v.Name.Local == "body" {
 				inBody = false
 			}
@@ -189,11 +210,32 @@ func parseMessageBodyOOBIDs(t xml.TokenReader) (body, oobURL, replyID string, re
 		}
 	}
 	ids.finish()
-	body = strings.TrimSpace(bodyBuf.String())
+	rawBody := bodyBuf.String()
+	body = strings.TrimSpace(rawBody)
+	if fbValid {
+		// Offsets index the raw body; the returned body is trimmed, so shift by the leading blanks.
+		lead := utf8.RuneCountInString(rawBody[:len(rawBody)-len(strings.TrimLeftFunc(rawBody, unicode.IsSpace))])
+		ids.ReplyFallback = replyFallback{Start: fbStart - lead, End: fbEnd - lead, Valid: true}
+	}
 	if ids.Retract != nil {
 		body = "" // XEP-0424 fallback text ("... retracted ..."); never bridge it
 	}
 	return body, strings.TrimSpace(urlBuf.String()), replyID, reactionTarget, reactionEmojis, jmi, ids, nil
+}
+
+// parseFallbackRange reads the XEP-0428 start/end attributes of a <body/> inside a <fallback/>. Both
+// must be present, non-negative integers with start < end; anything else is "no usable range".
+func parseFallbackRange(attrs []xml.Attr) (start, end int, ok bool) {
+	sv, ev := attrValue(attrs, "start"), attrValue(attrs, "end")
+	if sv == "" || ev == "" {
+		return 0, 0, false
+	}
+	start, err1 := strconv.Atoi(sv)
+	end, err2 := strconv.Atoi(ev)
+	if err1 != nil || err2 != nil || start < 0 || end <= start {
+		return 0, 0, false
+	}
+	return start, end, true
 }
 
 // tokenReaderWithPrefix implements xml.TokenReader by yielding one token then delegating to r.
@@ -392,6 +434,7 @@ func (x *xmppClient) handleMessageWithOOB(t xmlstream.TokenReadEncoder, start *x
 			body:           body,
 			oobURL:         oobURL,
 			replyID:        replyID, // XEP-0461 reply ID (XMPP message ID being replied to)
+			replyFallback:  ids.ReplyFallback,
 			reactionTarget: reactionTarget, // XEP-0444 reaction target message ID (empty for non-reactions)
 			reactionEmojis: reactionEmojis, // XEP-0444 reaction emojis (empty for non-reactions)
 			stanzaID:       ids.stanzaIDBy(string(x.loginID)), // archive id assigned by our own server (untrusted `by` ignored)
@@ -563,6 +606,7 @@ func (x *xmppClient) handleGroupchatWithOOB(t xmlstream.TokenReadEncoder, start 
 				body:           "",
 				oobURL:         "",
 				replyID:        "",
+				groupchat:      true,
 				reactionTarget: reactionTarget,
 				reactionEmojis: []string{emoji},
 				timestamp:      time.Now(),
@@ -577,6 +621,8 @@ func (x *xmppClient) handleGroupchatWithOOB(t xmlstream.TokenReadEncoder, start 
 			body:           body,
 			oobURL:         oobURL,
 			replyID:        replyID,
+			replyFallback:  ids.ReplyFallback,
+			groupchat:      true,
 			reactionTarget: reactionTarget,
 			reactionEmojis: reactionEmojis,
 			stanzaID:       ids.stanzaIDBy(roomJID), // only the room's own stanza-id is believed
@@ -779,6 +825,7 @@ func (x *xmppClient) handleIncomingGroupchat(msg stanza.Message, rw xmlstream.To
 		id:             msgID,
 		body:           body,
 		replyID:        "",
+		groupchat:      true,
 		reactionTarget: reactionTarget,
 		reactionEmojis: reactionEmojis,
 		timestamp:      time.Now(),
@@ -894,6 +941,8 @@ type jabberRemoteMessage struct {
 	replyID        string   // XEP-0461 reply ID (XMPP message ID being replied to)
 	reactionTarget string   // XEP-0444 reaction target message ID
 	reactionEmojis []string // XEP-0444 reaction emojis
+	replyFallback  replyFallback // XEP-0428 fallback range of the reply quote (offsets in body code points)
+	groupchat      bool          // the event came from a groupchat stanza (reply/reaction ids are room stanza-ids)
 	// Stable ids stored in MessageMetadata (see dbMeta). stanzaID is only ever set from a stanza-id
 	// whose `by` is a trusted entity (room for groupchat, our account for 1:1 and MAM).
 	stanzaID       string
@@ -1040,60 +1089,18 @@ func (m *jabberRemoteMessage) GetTargetMessage() (target networkid.MessageID) {
 			ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			defer cancel()
 
-			xmppMsgID := networkid.MessageID(m.reactionTarget)
-			dbMsg, err := m.x.conn.br.DB.Message.GetFirstPartByID(ctx, m.x.loginID, xmppMsgID)
-			if err == nil && dbMsg != nil {
-				log.Debug().
-					Str("reaction_target", m.reactionTarget).
-					Str("db_message_id", string(dbMsg.ID)).
-					Msg("Found reaction target via direct GetFirstPartByID lookup")
-				return dbMsg.ID
-			}
-			// If not found via direct lookup, search portal messages (for Matrix-originated messages
-			// or XMPP-originated messages when the bridge stores XMPPMessageID via DBMetadata)
-			searchStart := time.Now().Add(-30 * 24 * time.Hour)
+			isMUC := m.refIsMUC(nil)
 			tryFind := func() networkid.MessageID {
-				dbMessages, err := m.x.conn.br.DB.Message.GetMessagesBetweenTimeQuery(ctx, m.portalKey, searchStart, time.Now())
+				dbMsg, err := resolveMessageRef(ctx, m.x.conn.br.DB, m.portalKey, m.reactionTarget, isMUC)
 				if err != nil {
-					log.Warn().Err(err).Str("reaction_target", m.reactionTarget).Msg("GetMessagesBetweenTimeQuery failed for reaction target lookup")
+					log.Warn().Err(err).Msg("Reaction target lookup failed")
 					return ""
 				}
-				log.Debug().Int("candidate_count", len(dbMessages)).Str("reaction_target", m.reactionTarget).Msg("Searching portal messages for reaction target (Matrix-originated messages have XMPPMessageID in metadata)")
-				for _, msg := range dbMessages {
-					if msg.Metadata != nil {
-						if meta, ok := msg.Metadata.(*MessageMetadata); ok && meta != nil && meta.XMPPMessageID == m.reactionTarget {
-							log.Debug().
-								Str("reaction_target", m.reactionTarget).
-								Str("db_message_id", string(msg.ID)).
-								Msg("Found reaction target via metadata XMPPMessageID match")
-							return msg.ID
-						}
-					}
-					if string(msg.ID) == m.reactionTarget {
-						log.Debug().
-							Str("reaction_target", m.reactionTarget).
-							Str("db_message_id", string(msg.ID)).
-							Msg("Found reaction target via message ID match")
-						return msg.ID
-					}
+				if dbMsg == nil {
+					return ""
 				}
-				// Log a few candidates for debugging (ID and XMPPMessageID from metadata)
-				for i, msg := range dbMessages {
-					if i >= 5 {
-						break
-					}
-					xmppID := ""
-					if msg.Metadata != nil {
-						if meta, ok := msg.Metadata.(*MessageMetadata); ok && meta != nil {
-							xmppID = meta.XMPPMessageID
-						}
-					}
-					log.Debug().
-						Str("candidate_id", string(msg.ID)).
-						Str("candidate_xmpp_id", xmppID).
-						Msg("Reaction target lookup candidate")
-				}
-				return ""
+				log.Debug().Bool("muc", isMUC).Str("db_message_id", string(dbMsg.ID)).Msg("Reaction target resolved")
+				return dbMsg.ID
 			}
 			if found := tryFind(); found != "" {
 				return found
@@ -1107,7 +1114,8 @@ func (m *jabberRemoteMessage) GetTargetMessage() (target networkid.MessageID) {
 			log.Warn().
 				Str("reaction_target", m.reactionTarget).
 				Str("portal_id", string(m.portalKey.ID)).
-				Msg("Reaction target not found: no message with this XMPP ID in portal (reaction will not be bridged to Matrix)")
+				Bool("muc", isMUC).
+				Msg("Reaction target not found in portal (reaction will not be bridged to Matrix)")
 		}
 		return ""
 	}
@@ -1115,8 +1123,6 @@ func (m *jabberRemoteMessage) GetTargetMessage() (target networkid.MessageID) {
 	if m.replyID == "" {
 		return ""
 	}
-	// Look up the database message ID from the XMPP reply ID
-	// This is similar to what we do in ConvertMessage for replies
 	if m.x != nil && m.x.conn != nil && m.x.conn.br != nil {
 		ctx, span := telemetry.StartChild(telemetry.WithParent(context.Background(), m.spanCtx), "bridge.lookup_reaction_target")
 		log := m.x.logFor(ctx)
@@ -1126,50 +1132,17 @@ func (m *jabberRemoteMessage) GetTargetMessage() (target networkid.MessageID) {
 		}()
 		ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()
-		
-		xmppMsgID := networkid.MessageID(m.replyID)
-		dbMsg, err := m.x.conn.br.DB.Message.GetFirstPartByID(ctx, m.x.loginID, xmppMsgID)
-		if err == nil && dbMsg != nil {
-			if m.x != nil {
-				log.Debug().
-					Str("reply_id", m.replyID).
-					Str("db_message_id", string(dbMsg.ID)).
-					Msg("DEBUG: Found target message for reaction via direct lookup")
-			}
+		isMUC := m.refIsMUC(nil)
+		dbMsg, err := resolveMessageRef(ctx, m.x.conn.br.DB, m.portalKey, m.replyID, isMUC)
+		if err != nil {
+			log.Debug().Err(err).Msg("Legacy reply-reaction target lookup failed")
+			return ""
+		}
+		if dbMsg != nil {
+			log.Debug().Bool("muc", isMUC).Str("db_message_id", string(dbMsg.ID)).Msg("Legacy reply-reaction target resolved")
 			return dbMsg.ID
 		}
-		// If not found via direct lookup, search portal messages (for Matrix-originated messages)
-		searchStart := time.Now().Add(-7 * 24 * time.Hour)
-		dbMessages, err := m.x.conn.br.DB.Message.GetMessagesBetweenTimeQuery(ctx, m.portalKey, searchStart, time.Now())
-		if err == nil {
-			for _, msg := range dbMessages {
-				if msg.Metadata != nil {
-					if meta, ok := msg.Metadata.(*MessageMetadata); ok && meta != nil && meta.XMPPMessageID == m.replyID {
-						if m.x != nil {
-							log.Debug().
-								Str("reply_id", m.replyID).
-								Str("db_message_id", string(msg.ID)).
-								Msg("DEBUG: Found target message for reaction via metadata search")
-						}
-						return msg.ID
-					}
-				}
-				if string(msg.ID) == m.replyID {
-					if m.x != nil {
-						log.Debug().
-							Str("reply_id", m.replyID).
-							Str("db_message_id", string(msg.ID)).
-							Msg("DEBUG: Found target message for reaction via ID match")
-					}
-					return msg.ID
-				}
-			}
-		}
-		if m.x != nil {
-			log.Debug().
-				Str("reply_id", m.replyID).
-				Msg("DEBUG: Could not find target message for reaction")
-		}
+		log.Debug().Bool("muc", isMUC).Msg("Legacy reply-reaction target not found")
 	}
 	return ""
 }
@@ -1324,115 +1297,46 @@ func (m *jabberRemoteMessage) convertMessage(ctx context.Context, portal *bridge
 			// If it's not a file attachment, fall through to treat it as a regular text message with a link
 		}
 	}
-	// Strip quoted text from body when a reply is detected (Jabber clients include quoted text prefixed with "> ")
+	// Resolve the reply target first: the XEP-0428 fallback (the quote) is only removed when the
+	// quoted message is known, otherwise the quote stays visible as the only context.
+	var replyTarget *database.Message
+	if m.replyID != "" && m.x != nil && m.x.conn != nil && m.x.conn.br != nil {
+		isMUC := m.refIsMUC(portal)
+		dbMsg, err := resolveMessageRef(ctx, m.x.conn.br.DB, m.portalKey, m.replyID, isMUC)
+		switch {
+		case err != nil:
+			zerolog.Ctx(ctx).Debug().Err(err).Bool("muc", isMUC).Msg("Reply target lookup failed")
+		case dbMsg == nil:
+			zerolog.Ctx(ctx).Debug().Bool("muc", isMUC).Msg("Reply target not found in portal")
+		default:
+			replyTarget = dbMsg
+			zerolog.Ctx(ctx).Debug().Bool("muc", isMUC).Str("db_message_id", string(dbMsg.ID)).Msg("Reply target resolved")
+		}
+	}
 	bodyText := m.body
-	if m.replyID != "" {
-		// Remove lines starting with "> " (common Jabber quote format)
+	if replyTarget != nil && m.replyFallback.Valid {
+		bodyText = stripReplyFallback(bodyText, m.replyFallback)
+	} else if m.replyID != "" {
+		// No XEP-0428 range: strip lines starting with ">" (common Jabber quote format)
 		lines := strings.Split(bodyText, "\n")
 		var cleanLines []string
 		for _, line := range lines {
-			trimmed := strings.TrimSpace(line)
-			// Skip lines that are just quotes (starting with ">")
-			if !strings.HasPrefix(trimmed, ">") {
+			if !strings.HasPrefix(strings.TrimSpace(line), ">") {
 				cleanLines = append(cleanLines, line)
 			}
 		}
-		bodyText = strings.Join(cleanLines, "\n")
-		bodyText = strings.TrimSpace(bodyText)
-		// Log if we stripped anything
-		if bodyText != m.body {
-			zerolog.Ctx(ctx).Debug().
-				Str("original_body", m.body).
-				Str("cleaned_body", bodyText).
-				Msg("DEBUG: Stripped quoted text from reply body")
-		}
+		bodyText = strings.TrimSpace(strings.Join(cleanLines, "\n"))
 	}
-	
+
 	part := &bridgev2.ConvertedMessagePart{
 		Type:    event.EventMessage,
 		Content: &event.MessageEventContent{MsgType: event.MsgText, Body: bodyText},
 	}
 
 	cm := &bridgev2.ConvertedMessage{Parts: []*bridgev2.ConvertedMessagePart{part}}
-	
-	// Handle XEP-0461 reply: look up the Matrix event ID from the XMPP message ID
-	if m.replyID != "" && m.x != nil && m.x.conn != nil && m.x.conn.br != nil {
-		log := zerolog.Ctx(ctx).With().Str("reply_id", m.replyID).Logger()
-		log.Debug().Msg("DEBUG: Found XEP-0461 reply ID, looking up Matrix event ID")
-		
-		// Look up the message by XMPP message ID
-		// First try direct lookup (for XMPP-originated messages)
-		xmppMsgID := networkid.MessageID(m.replyID)
-		log.Debug().
-			Str("xmpp_reply_id", m.replyID).
-			Str("login_id", string(m.x.loginID)).
-			Str("portal_id", string(m.portalKey.ID)).
-			Msg("DEBUG: Attempting to look up message by XMPP reply ID")
-		
-		dbMsg, err := m.x.conn.br.DB.Message.GetFirstPartByID(ctx, m.x.loginID, xmppMsgID)
-		if err != nil {
-			log.Debug().Err(err).Msg("DEBUG: Direct lookup returned error")
-		}
-		if dbMsg == nil {
-			// If not found, search through messages in this portal to find one with matching XMPP ID in metadata
-			// (for Matrix-originated messages that have XMPP ID stored in metadata)
-			log.Debug().Msg("DEBUG: Direct lookup failed, searching portal messages for XMPP ID in metadata")
-			// Query messages in this portal and check metadata
-			// GetMessagesBetweenTimeQuery signature: (ctx, portalKey, startTime, endTime)
-			// Search recent messages (last 7 days) to avoid scanning too many
-			searchStart := time.Now().Add(-7 * 24 * time.Hour)
-			dbMessages, err := m.x.conn.br.DB.Message.GetMessagesBetweenTimeQuery(ctx, m.portalKey, searchStart, time.Now())
-			if err != nil {
-				log.Debug().Err(err).Msg("DEBUG: Failed to query portal messages")
-			} else {
-				log.Debug().Int("message_count", len(dbMessages)).Msg("DEBUG: Searching through portal messages")
-				for _, msg := range dbMessages {
-					if msg.Metadata != nil {
-						if meta, ok := msg.Metadata.(*MessageMetadata); ok && meta != nil {
-							log.Debug().
-								Str("msg_id", string(msg.ID)).
-								Str("meta_xmpp_id", meta.XMPPMessageID).
-								Str("looking_for", m.replyID).
-								Msg("DEBUG: Checking message metadata")
-							if meta.XMPPMessageID == m.replyID {
-								dbMsg = msg
-								log.Debug().
-									Str("matrix_event_id", string(msg.ID)).
-									Msg("DEBUG: Found Matrix-originated message with matching XMPP ID in metadata")
-								break
-							}
-						}
-					}
-					// Also check if the message ID itself matches (for XMPP-originated messages)
-					if string(msg.ID) == m.replyID {
-						dbMsg = msg
-						log.Debug().
-							Str("matrix_event_id", string(msg.ID)).
-							Msg("DEBUG: Found XMPP-originated message with matching ID")
-						break
-					}
-				}
-			}
-		} else {
-			log.Debug().
-				Str("matrix_event_id", string(dbMsg.ID)).
-				Msg("DEBUG: Found message via direct lookup")
-		}
-		
-		if dbMsg != nil {
-			// Use the database message ID directly for ReplyTo
-			// The bridge framework expects the database message ID format (e.g., "matrix:$event_id" or XMPP message ID)
-			cm.ReplyTo = &networkid.MessageOptionalPartID{
-				MessageID: dbMsg.ID,
-			}
-			log.Debug().
-				Str("db_message_id", string(dbMsg.ID)).
-				Msg("DEBUG: Set ReplyTo in ConvertedMessage using database message ID")
-		} else {
-			log.Debug().Msg("DEBUG: Could not find message with XMPP reply ID in database")
-		}
+	if replyTarget != nil {
+		cm.ReplyTo = &networkid.MessageOptionalPartID{MessageID: replyTarget.ID}
 	}
-	
 	return cm, nil
 }
 
