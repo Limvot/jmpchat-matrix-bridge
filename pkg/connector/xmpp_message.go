@@ -271,6 +271,12 @@ func sendXMPPReaction(ctx context.Context, sess *xmpp.Session, to jid.JID, targe
 // msgType should be groupchat for MUC rooms so the server accepts the message.
 // Returns the XMPP message ID that was assigned to the reaction message.
 func sendXMPPReactions(ctx context.Context, sess *xmpp.Session, to jid.JID, targetMessageID string, emojis []string, msgType stanza.MessageType) (string, error) {
+	return sendXMPPReactionsID(ctx, sess, to, targetMessageID, emojis, msgType, "")
+}
+
+// sendXMPPReactionsID is sendXMPPReactions with a caller-chosen stanza id (empty: generate). MUC sends
+// pass an id they registered in the echo table before the send.
+func sendXMPPReactionsID(ctx context.Context, sess *xmpp.Session, to jid.JID, targetMessageID string, emojis []string, msgType stanza.MessageType, xmppMsgID string) (string, error) {
 	ctx, span := telemetry.StartChild(ctx, "xmpp.send_message", trace.WithSpanKind(trace.SpanKindProducer))
 	defer span.End()
 	if span.IsRecording() {
@@ -289,10 +295,13 @@ func sendXMPPReactions(ctx context.Context, sess *xmpp.Session, to jid.JID, targ
 		Msg("DEBUG: sendXMPPReactions called")
 	
 	// Generate XMPP message ID for this reaction message
-	xmppMsgID, err := generateXMPPMessageID()
-	if err != nil {
-		telemetry.Fail(span, err)
-		return "", fmt.Errorf("failed to generate XMPP message ID: %w", err)
+	if xmppMsgID == "" {
+		var err error
+		xmppMsgID, err = generateXMPPMessageID()
+		if err != nil {
+			telemetry.Fail(span, err)
+			return "", fmt.Errorf("failed to generate XMPP message ID: %w", err)
+		}
 	}
 	if span.IsRecording() {
 		span.SetAttributes(attribute.String("xmpp.stanza.id", xmppMsgID))
@@ -314,7 +323,7 @@ func sendXMPPReactions(ctx context.Context, sess *xmpp.Session, to jid.JID, targ
 		originIDReader(xmppMsgID),
 	)
 	
-	err = sess.Send(ctx, msg.Wrap(payload))
+	err := sess.Send(ctx, msg.Wrap(payload))
 	if err != nil {
 		telemetry.Fail(span, err)
 		log.Debug().Err(err).Msg("DEBUG: sendXMPPReactions send failed")
@@ -362,6 +371,11 @@ func retractionPayload(targetRef, stanzaID string) xml.TokenReader {
 // groupchat: the room-assigned stanza-id) and returns the retraction stanza's own id. Span attribute
 // xmpp.retraction=true; ids only, never message content.
 func sendXMPPRetraction(ctx context.Context, sess *xmpp.Session, to jid.JID, targetRef string, msgType stanza.MessageType) (string, error) {
+	return sendXMPPRetractionID(ctx, sess, to, targetRef, msgType, "")
+}
+
+// sendXMPPRetractionID is sendXMPPRetraction with a caller-chosen stanza id (empty: generate).
+func sendXMPPRetractionID(ctx context.Context, sess *xmpp.Session, to jid.JID, targetRef string, msgType stanza.MessageType, stanzaID string) (string, error) {
 	ctx, span := telemetry.StartChild(ctx, "xmpp.send_message", trace.WithSpanKind(trace.SpanKindProducer))
 	defer span.End()
 	if span.IsRecording() {
@@ -371,10 +385,13 @@ func sendXMPPRetraction(ctx context.Context, sess *xmpp.Session, to jid.JID, tar
 			attribute.Bool("xmpp.retraction", true),
 		)
 	}
-	stanzaID, err := generateXMPPMessageID()
-	if err != nil {
-		telemetry.Fail(span, err)
-		return "", err
+	if stanzaID == "" {
+		var err error
+		stanzaID, err = generateXMPPMessageID()
+		if err != nil {
+			telemetry.Fail(span, err)
+			return "", err
+		}
 	}
 	if span.IsRecording() {
 		span.SetAttributes(attribute.String("xmpp.stanza.id", stanzaID))

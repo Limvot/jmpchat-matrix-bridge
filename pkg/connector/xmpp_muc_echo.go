@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/id"
 )
@@ -19,8 +20,10 @@ import (
 //
 // Matching is by exact id: the origin-id (preferred, rooms keep it) or the `id` attribute of a
 // message WE sent and registered before sending. Issue #11 (messages from our own nick sent by other
-// clients are dropped as self-echo) can reuse matchEcho/handleOwnMUCEcho: an echo that does NOT match
-// a registered id is deliberately not handled here, it keeps the existing nick-based handling.
+// clients are dropped as self-echo) is fixed on top of this: only a message that matches a registered
+// id is dropped as our echo; any other message from our own occupant JID was sent by another client
+// of the user and is bridged as sent by the user (mucMessageSender). Every bridge MUC send path
+// (text/media, reactions, retractions) must register its stanza id before sending.
 
 const (
 	// mucEchoTTL is how long an entry is kept (it also serves redactions that come after the echo).
@@ -199,6 +202,22 @@ func (x *xmppClient) mucEchoPostSave(room, msgID string) func(context.Context, *
 			x.logFor(ctx).Warn().Err(err).Msg("Failed to store MUC echo ids on sent message")
 		}
 	}
+}
+
+// isOwnMUCOccupant reports whether occupantFull is our own occupant JID in the room (memory only).
+func (x *xmppClient) isOwnMUCOccupant(room, occupantFull string) bool {
+	ours := x.getMUCOurOccupantJID(room)
+	return ours != "" && occupantFull == ours
+}
+
+// mucMessageSender is the bridged sender of a groupchat message: the user themselves (is_from_me,
+// double puppet, like 1:1 carbons) when it comes from our own occupant JID, else the occupant's ghost.
+// Only called for messages that are not registered echoes (issue #11).
+func (x *xmppClient) mucMessageSender(room, occupantFull string) bridgev2.EventSender {
+	if x.isOwnMUCOccupant(room, occupantFull) {
+		return x.makeEventSender(string(x.loginID))
+	}
+	return x.makeEventSender(occupantFull)
 }
 
 // handleOwnMUCEcho is called on the Serve goroutine for every inbound groupchat message (memory

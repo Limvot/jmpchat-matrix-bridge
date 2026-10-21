@@ -189,7 +189,20 @@ func (x *xmppClient) handleMatrixMessageRemove(ctx context.Context, msg *bridgev
 	if err != nil {
 		return bridgev2.WrapErrorInStatus(err).WithSendNotice(true)
 	}
-	if _, err := sendXMPPRetraction(ctx, sess, toJID, ref, msgType); err != nil {
+	// MUC: register the stanza id before sending (any echo of this stanza is ours).
+	var preID string
+	if isMUC {
+		var idErr error
+		preID, idErr = generateXMPPMessageID()
+		if idErr != nil {
+			return bridgev2.WrapErrorInStatus(idErr).WithSendNotice(true)
+		}
+		x.mucEcho.register(portalID, preID)
+	}
+	if _, err := sendXMPPRetractionID(ctx, sess, toJID, ref, msgType, preID); err != nil {
+		if preID != "" {
+			x.mucEcho.discard(portalID, preID)
+		}
 		return bridgev2.WrapErrorInStatus(fmt.Errorf("failed to send XMPP retraction: %w", err)).WithSendNotice(true)
 	}
 	log.Debug().Bool("muc", isMUC).Str("retract_target", ref).Msg("Sent XMPP retraction")

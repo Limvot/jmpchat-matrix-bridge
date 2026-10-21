@@ -533,10 +533,11 @@ func (x *xmppClient) handleGroupchatWithOOB(t xmlstream.TokenReadEncoder, start 
 	if x.handleOwnMUCEcho(roomJID, occupantFull, attrValue(start.Attr, "id"), ids) {
 		return nil
 	}
-	// Skip bridging our own messages (self-echo): same check as handleIncomingGroupchat (wrapper handles groupchat so mux path is not used).
-	if occupantFull == x.getMUCOurOccupantJID(roomJID) {
-		x.log.Debug().Str("room", roomJID).Str("occupant", occupantFull).Msg("Skipping MUC self-echo (our own message)")
-		return nil
+	// A message from our own occupant JID that is NOT a registered echo was sent by another client of
+	// the user (issue #11): it is bridged as sent by the user, like a 1:1 carbon (see mucOwnSender).
+	fromMe := x.isOwnMUCOccupant(roomJID, occupantFull)
+	if fromMe {
+		x.log.Debug().Str("room", roomJID).Msg("MUC message from our own nick that is not an echo; bridging as sent by the user")
 	}
 	msgID := attrValue(start.Attr, "id")
 	if msgID == "" {
@@ -555,8 +556,10 @@ func (x *xmppClient) handleGroupchatWithOOB(t xmlstream.TokenReadEncoder, start 
 	}
 	x.addPortalIDForMAMCatchUp(string(portalKey.ID))
 	// Ensure MUC ghost has display name set to nick (not full JID) before queueing.
-	x.ensureMUCGhostTraced(ctx, occupantFull)
-	sender := x.makeEventSender(occupantFull)
+	sender := x.mucMessageSender(roomJID, occupantFull)
+	if !fromMe {
+		x.ensureMUCGhostTraced(ctx, occupantFull)
+	}
 
 	// Body-style reaction (parseBodyReaction) is not used here; we only have XEP-0444 from parseMessageBodyAndOOB.
 	// If the client sent body-style (id🤔> quote), body will be non-empty and reactionTarget empty; check for that.
@@ -794,11 +797,12 @@ func (x *xmppClient) handleIncomingGroupchat(msg stanza.Message, rw xmlstream.To
 			Str("emoji", emoji).
 			Msg("MUC body-based reaction detected, bridging as reaction")
 	}
-	// Skip bridging our own messages (self-echo): compare sender to our stored occupant JID for this room.
-	if occupantFull == x.getMUCOurOccupantJID(roomJID) {
-		x.log.Debug().Str("room", roomJID).Str("occupant", occupantFull).Msg("Skipping MUC self-echo (our own message)")
+	// Exact echoes of messages this bridge sent are dropped; anything else from our own occupant JID
+	// was sent by another client of the user and is bridged as the user (issue #11).
+	if x.handleOwnMUCEcho(roomJID, occupantFull, msg.ID, messageIDs{}) {
 		return nil
 	}
+	fromMe := x.isOwnMUCOccupant(roomJID, occupantFull)
 
 	x.log.Info().
 		Str("room", roomJID).
@@ -813,13 +817,15 @@ func (x *xmppClient) handleIncomingGroupchat(msg stanza.Message, rw xmlstream.To
 	}
 	x.addPortalIDForMAMCatchUp(string(portalKey.ID))
 	// Ensure MUC ghost has display name set to nick (not full JID) before queueing.
-	x.ensureMUCGhostTraced(context.Background(), occupantFull)
+	if !fromMe {
+		x.ensureMUCGhostTraced(context.Background(), occupantFull)
+	}
 	x.maybeTriggerBackfillOnNewPortal(context.Background(), portalKey)
 	msgID := networkid.MessageID(msg.ID)
 	if msgID == "" {
 		msgID = networkid.MessageID("xmp:" + time.Now().Format("20060102150405.000"))
 	}
-	sender := x.makeEventSender(occupantFull)
+	sender := x.mucMessageSender(roomJID, occupantFull)
 	x.queueRemoteEvent(context.Background(), &jabberRemoteMessage{
 		portalKey:      portalKey,
 		sender:         sender,

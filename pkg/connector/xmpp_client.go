@@ -2277,8 +2277,21 @@ func (x *xmppClient) handleMatrixReaction(ctx context.Context, msg *bridgev2.Mat
 	if isMUCPortal {
 		msgType = stanza.MessageType("groupchat")
 	}
-	_, err = sendXMPPReaction(ctx, sess, toJID, targetMessageID, emoji, msgType)
+	// MUC: register the stanza id before sending so the room's echo is recognised as ours.
+	var preID string
+	if isMUCPortal {
+		var idErr error
+		preID, idErr = generateXMPPMessageID()
+		if idErr != nil {
+			return nil, fmt.Errorf("failed to generate XMPP message ID: %w", idErr)
+		}
+		x.mucEcho.register(toJIDStr, preID)
+	}
+	_, err = sendXMPPReactionsID(ctx, sess, toJID, targetMessageID, []string{emoji}, msgType, preID)
 	if err != nil {
+		if preID != "" {
+			x.mucEcho.discard(toJIDStr, preID)
+		}
 		return nil, fmt.Errorf("failed to send reaction to XMPP: %w", err)
 	}
 	
