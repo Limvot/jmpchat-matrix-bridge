@@ -370,6 +370,7 @@ func (x *xmppClient) handleMessageWithOOB(t xmlstream.TokenReadEncoder, start *x
 			x.handleInboundCorrection(correction{
 				claim:         senderClaim{channel: retractChanLive, msgType: attrValue(start.Attr, "type"), fromFull: from},
 				target:        ids.Extras.Replace,
+				encrypted: ids.Extras.Encryption != "",
 				corrID:        firstNonEmpty(attrValue(start.Attr, "id"), ids.OriginID),
 				body:          body,
 				replyID:       replyID,
@@ -613,6 +614,7 @@ func (x *xmppClient) handleGroupchatWithOOB(t xmlstream.TokenReadEncoder, start 
 		x.handleInboundCorrection(correction{
 			claim:         senderClaim{channel: retractChanLive, groupchat: true, msgType: "groupchat", fromFull: from, occupantID: ids.OccupantID},
 			target:        ids.Extras.Replace,
+			encrypted: ids.Extras.Encryption != "",
 			corrID:        firstNonEmpty(attrValue(start.Attr, "id"), ids.OriginID),
 			body:          body,
 			replyID:       replyID,

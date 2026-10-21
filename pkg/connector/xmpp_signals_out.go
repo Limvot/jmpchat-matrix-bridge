@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/xml"
 	"fmt"
+	"strings"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -59,6 +60,9 @@ func signalPayload(s outSignal) xml.TokenReader {
 	case sigChatState:
 		return xmlstream.MultiReader(emptyElement(chatStatesNS, s.Value), emptyElement(hintsNS, "no-store"))
 	case sigDisplayed:
+		if s.Type == stanza.MessageType("groupchat") {
+			return emptyElement(markersNS, "displayed", idAttr(s.Value)) // no <store/>: the room would archive every read marker
+		}
 		return xmlstream.MultiReader(emptyElement(markersNS, "displayed", idAttr(s.Value)), storeHintReader())
 	default:
 		return emptyElement(receiptsNS, "received", idAttr(s.Value))
@@ -252,27 +256,53 @@ func (x *xmppClient) HandleMatrixReadReceipt(ctx context.Context, msg *bridgev2.
 	if err != nil {
 		return nil
 	}
-	sig := outSignal{To: to, Type: stanza.ChatMessage, Kind: sigDisplayed, Value: ref}
 	if isMUC {
-		sig.Type = stanza.MessageType("groupchat")
-		id, err := generateXMPPMessageID()
-		if err != nil {
-			return nil
-		}
-		// Register before sending so the room's reflection of the marker is dropped as our own echo.
-		sig.ID = id
-		x.mucEcho.register(portalID, id)
+		// Trailing debounce: the newest ref goes out after a quiet period (never a live span into the timer).
+		x.sig.scheduleMUCMarker(portalID, ref, mucMarkerDebounce, func(ref string) { x.sendMUCDisplayed(portalID, ref) })
+		return nil
 	}
+	sig := outSignal{To: to, Type: stanza.ChatMessage, Kind: sigDisplayed, Value: ref}
 	if err := x.sendSignal(ctx, sig); err != nil {
-		if sig.ID != "" {
-			x.mucEcho.discard(portalID, sig.ID)
-		}
 		log.Debug().Err(err).Msg("Failed to send displayed marker")
 		return nil
 	}
 	x.sig.setDisplayed(portalID, ref)
-	log.Debug().Bool("muc", isMUC).Msg(fmt.Sprintf("Sent displayed marker (ref length %d)", len(ref)))
+	log.Debug().Bool("muc", false).Msg(fmt.Sprintf("Sent displayed marker (ref length %d)", len(ref)))
 	return nil
+}
+
+// sendMUCDisplayed sends the debounced groupchat displayed marker (timer goroutine: no inherited span).
+func (x *xmppClient) sendMUCDisplayed(portalID, ref string) {
+	ctx := context.Background()
+	log := x.logFor(ctx)
+	if x.getMUCOurOccupantJID(portalID) == "" || x.sig.lastDisplayed(portalID) == ref {
+		return
+	}
+	to, err := jid.Parse(portalID)
+	if err != nil {
+		return
+	}
+	id, err := generateXMPPMessageID()
+	if err != nil {
+		return
+	}
+	// Register before sending so the room's reflection of the marker is dropped as our own echo.
+	x.mucEcho.register(portalID, id)
+	if err := x.sendSignal(ctx, outSignal{To: to, Type: stanza.MessageType("groupchat"), ID: id, Kind: sigDisplayed, Value: ref}); err != nil {
+		x.mucEcho.discard(portalID, id)
+		log.Debug().Err(err).Msg("Failed to send displayed marker")
+		return
+	}
+	x.sig.setDisplayed(portalID, ref)
+	log.Debug().Bool("muc", true).Msg(fmt.Sprintf("Sent displayed marker (ref length %d)", len(ref)))
+}
+
+// noteOutboundSent drops the typing record after a message carrying <active/> went out: the stanza told
+// the peer we stopped typing, so a later composing state must not be suppressed as a duplicate.
+func (x *xmppClient) noteOutboundSent(m outMessage) {
+	if m.Active {
+		x.sig.forgetTyping(strings.ToLower(m.To.Bare().String()))
+	}
 }
 
 var (

@@ -75,12 +75,55 @@ type signalState struct {
 	chatStatePeers map[string]struct{}     // lower bare JIDs that sent us any XEP-0085 state this session
 	typingSent     map[string]typingRecord // portal ID -> last state sent
 	displayedSent  map[string]string       // portal ID -> last displayed ref sent
+	mucPending     map[string]*mucPendingMarker // portal ID -> the one pending debounced MUC marker
 }
+
+// mucPendingMarker is a debounced groupchat displayed marker waiting for its quiet period.
+type mucPendingMarker struct {
+	timer *time.Timer
+	ref   string
+}
+
+// mucMarkerDebounce is the quiet period after the last read position change before a groupchat displayed
+// marker is sent (the marker is visible to the whole room, so it is rate limited; only the newest ref goes out).
+var mucMarkerDebounce = 8 * time.Second
 
 func (s *signalState) reset() {
 	s.mu.Lock()
-	s.chatStatePeers, s.typingSent, s.displayedSent = nil, nil, nil
+	for _, p := range s.mucPending {
+		p.timer.Stop()
+	}
+	s.chatStatePeers, s.typingSent, s.displayedSent, s.mucPending = nil, nil, nil, nil
 	s.mu.Unlock()
+}
+
+// scheduleMUCMarker (re)arms the single pending timer of the portal with ref; when it fires with no newer
+// ref and no reset in between, send is called (from the timer goroutine) with the newest ref.
+func (s *signalState) scheduleMUCMarker(portal, ref string, d time.Duration, send func(ref string)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if old, ok := s.mucPending[portal]; ok {
+		old.timer.Stop()
+		delete(s.mucPending, portal)
+	}
+	if s.mucPending == nil || len(s.mucPending) >= signalMapCap {
+		for _, p := range s.mucPending {
+			p.timer.Stop()
+		}
+		s.mucPending = map[string]*mucPendingMarker{}
+	}
+	p := &mucPendingMarker{ref: ref}
+	p.timer = time.AfterFunc(d, func() {
+		s.mu.Lock()
+		if s.mucPending[portal] != p {
+			s.mu.Unlock()
+			return
+		}
+		delete(s.mucPending, portal)
+		s.mu.Unlock()
+		send(p.ref)
+	})
+	s.mucPending[portal] = p
 }
 
 func (s *signalState) notePeer(bare string) {
@@ -156,11 +199,21 @@ type inboundSignal struct {
 	extras    messageExtras
 }
 
+// isJoinedRoomBare reports whether bare is a MUC we joined this session (memory only, any goroutine).
+func (x *xmppClient) isJoinedRoomBare(bare string) bool {
+	return x.getMUCOurOccupantJID(bare) != "" || x.getMUCOurOccupantJID(strings.ToLower(bare)) != ""
+}
+
 // handleInboundSignals runs on the Serve goroutine: memory and queueing only (no DB, no IQ).
 // MAM never reaches it (archived signals are stale).
 func (x *xmppClient) handleInboundSignals(s inboundSignal) {
 	e := s.extras
 	if !e.hasInboundSignal() {
+		return
+	}
+	// A delayed stanza (MUC join history, offline storage) is a replay: a body-less signal in it (marker,
+	// chat state, receipt) is stale and must not be bridged as live. Stanzas with a body are unaffected.
+	if e.Delayed && !s.hasBody {
 		return
 	}
 	// Cheogram group MMS: the sender of a group stanza is synthesized and cannot be attributed.
@@ -169,6 +222,11 @@ func (x *xmppClient) handleInboundSignals(s inboundSignal) {
 	}
 	live := s.channel == retractChanLive
 	dm := !s.groupchat
+	// A type=chat stanza from room@conf/nick is a MUC private message, not a chat with the room's ghost:
+	// no DM signal rules for a room we joined this session (memory only).
+	if dm && x.isJoinedRoomBare(string(s.key.ID)) {
+		return
+	}
 
 	// Chat states: live 1:1 only (carbons, MAM and MUC are noise).
 	if e.ChatState != "" && live && dm && !s.fromMe {
@@ -240,6 +298,12 @@ type receiptEnv interface {
 	log(ctx context.Context) *zerolog.Logger
 }
 
+// ownReceiptGate is an optional receiptEnv capability: whether a read receipt "from me" can be delivered
+// (it needs the user's double puppet).
+type ownReceiptGate interface {
+	canMarkOwnReads(ctx context.Context) bool
+}
+
 // newMarkerReceipt builds a read (delivery=false) or delivery receipt event. ref is the raw XMPP reference;
 // the pre-handler resolves it room-scoped to the bridgev2 message ID (our sent rows are `matrix:$event`,
 // found only through their stored XMPP id, and bridgev2's own receipt lookups are not room-scoped).
@@ -265,6 +329,11 @@ func newMarkerReceipt(env receiptEnv, loginID networkid.UserLoginID, key network
 		done := func(res bridgev2.EventHandlingResult) *bridgev2.EventHandlingResult {
 			telemetry.EndRemoteEvent(ctx)
 			return &res
+		}
+		// Without double puppeting bridgev2 would fall back to the user's own ghost and fail with 403.
+		if g, ok := env.(ownReceiptGate); ok && !delivery && sender.IsFromMe && !g.canMarkOwnReads(ctx) {
+			env.log(ctx).Debug().Str("reason", "no_double_puppet").Msg("Ignoring own read receipt")
+			return done(bridgev2.EventHandlingResultIgnored)
 		}
 		rctx, span := telemetry.StartChild(ctx, "bridge.resolve_receipt_target")
 		defer span.End()

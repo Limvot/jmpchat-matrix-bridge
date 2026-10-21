@@ -34,6 +34,7 @@ type correction struct {
 	replyID       string
 	replyFallback replyFallback
 	hasOOB        bool
+	encrypted     bool // the correction payload is encrypted: the body is only a fallback text, never applied
 	senderID      string // sender id as stored on rows (bare JID / room/nick / login id)
 	ts            time.Time
 }
@@ -302,6 +303,12 @@ func (x *xmppClient) queueCorrection(ctx context.Context, key networkid.PortalKe
 // handleInboundCorrection is the live/carbon entry point (Serve goroutine: span, debug line and queueing
 // only; no DB or IQ work). It logs ids, the channel and lengths, never the corrected text.
 func (x *xmppClient) handleInboundCorrection(c correction, key networkid.PortalKey, sender bridgev2.EventSender) {
+	if c.encrypted {
+		// Editing with the sender's fallback text ("I sent you an OMEMO encrypted message...") would
+		// overwrite the original with noise; the plaintext is not readable here.
+		x.logFor(context.Background()).Debug().Str("reason", "encrypted").Str("channel", c.claim.channel).Msg("Ignoring encrypted message correction")
+		return
+	}
 	ctx, span := startReceiveSpan("correction", c.claim.msgType, c.claim.fromFull, string(key.ID), c.corrID, c.hasOOB, c.replyID != "", false)
 	defer span.End()
 	if span.IsRecording() {
@@ -326,6 +333,10 @@ func (x *xmppClient) queueMAMCorrection(ctx context.Context, key networkid.Porta
 		return false
 	}
 	if item.Body == "" {
+		return true
+	}
+	if item.Extras.Encryption != "" {
+		x.logFor(ctx).Debug().Str("reason", "encrypted").Str("channel", retractChanMAM).Msg("Ignoring encrypted message correction")
 		return true
 	}
 	corrID := mamCorrectionID(item)
@@ -417,8 +428,8 @@ func foldBatchCorrectionsDetailed(items []mamResultItem) ([]mamResultItem, []fol
 		progress := false
 		for _, ci := range pending {
 			c := items[ci]
-			if c.Body == "" {
-				continue
+			if c.Body == "" || c.Extras.Encryption != "" {
+				continue // encrypted: the body is a fallback text, never folded into the original
 			}
 			if _, mms := ParseCheogramGroupMMSJID(bareJID(c.From)); mms {
 				continue
@@ -450,6 +461,20 @@ func foldBatchCorrectionsDetailed(items []mamResultItem) ([]mamResultItem, []fol
 		}
 	}
 	return kept, folded
+}
+
+// foldedWithin keeps the folded corrections whose original is one of items.
+func foldedWithin(folded []foldedCorrection, items []mamResultItem) []foldedCorrection {
+	var out []foldedCorrection
+	for _, f := range folded {
+		for _, it := range items {
+			if it.StanzaID == f.orig.StanzaID && it.OriginID == f.orig.OriginID && it.From == f.orig.From && it.Timestamp.Equal(f.orig.Timestamp) {
+				out = append(out, f)
+				break
+			}
+		}
+	}
+	return out
 }
 
 // recordFoldedCorrections stores the dedupe keys of corrections that were folded into their originals

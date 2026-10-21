@@ -144,6 +144,7 @@ func (x *xmppClient) handleCarbonSent(t xmlstream.TokenReadEncoder, outer *xml.S
 			x.handleInboundCorrection(correction{
 				claim:    senderClaim{channel: retractChanCarbonSent, msgType: typeAttr, fromFull: from},
 				target:   ids.Extras.Replace,
+				encrypted: ids.Extras.Encryption != "",
 				corrID:   firstNonEmpty(id, ids.OriginID),
 				body:     body,
 				hasOOB:   false,
@@ -247,6 +248,7 @@ func (x *xmppClient) handleCarbonReceived(t xmlstream.TokenReadEncoder, outer *x
 			x.handleInboundCorrection(correction{
 				claim:    senderClaim{channel: retractChanCarbonReceived, msgType: typeAttr, fromFull: from},
 				target:   ids.Extras.Replace,
+				encrypted: ids.Extras.Encryption != "",
 				corrID:   firstNonEmpty(id, ids.OriginID),
 				body:     body,
 				senderID: fromBare,
@@ -277,7 +279,7 @@ func (x *xmppClient) handleCarbonReceived(t xmlstream.TokenReadEncoder, outer *x
 			key:      networkid.PortalKey{ID: networkid.PortalID(strings.ToLower(fromBare)), Receiver: x.loginID},
 			channel:  retractChanCarbonReceived,
 			fromFull: from,
-			sender:   x.makeEventSender(fromBare),
+			sender:   x.makeEventSender(strings.ToLower(fromBare)),
 			hasBody:  body != "",
 			extras:   ids.Extras,
 		})

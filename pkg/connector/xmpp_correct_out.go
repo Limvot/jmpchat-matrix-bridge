@@ -37,7 +37,11 @@ var (
 func (x *xmppClient) sendOut(ctx context.Context, m outMessage) (string, error) {
 	m = x.withSignalFlags(m)
 	if x.sendOutHook != nil {
-		return x.sendOutHook(ctx, m)
+		id, err := x.sendOutHook(ctx, m)
+		if err == nil {
+			x.noteOutboundSent(m)
+		}
+		return id, err
 	}
 	x.mu.Lock()
 	sess := x.session
@@ -45,7 +49,11 @@ func (x *xmppClient) sendOut(ctx context.Context, m outMessage) (string, error) 
 	if sess == nil {
 		return "", errRetractNotConnected
 	}
-	return sendXMPPOut(ctx, sess, m)
+	id, err := sendXMPPOut(ctx, sess, m)
+	if err == nil {
+		x.noteOutboundSent(m)
+	}
+	return id, err
 }
 
 // HandleMatrixEdit implements bridgev2.EditHandlingNetworkAPI.

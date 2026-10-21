@@ -60,9 +60,14 @@ type xmppClient struct {
 	sendOutHook func(ctx context.Context, m outMessage) (string, error)
 	// sig is the per-session chat signal state (typing peers, dedupe); reset in Connect.
 	sig signalState
+	// sessionStartedAt (unix nanos, 0 = none) is set by Connect when a session goes live and consumed by
+	// ReconnectLoop when that session has ended.
+	sessionStartedAt atomic.Int64
 	// signalHook, bridgedHook and betweenHook (tests only) replace the signal send, the "row exists"
 	// check after a bridged message and the message window query of read receipts.
 	signalHook  func(ctx context.Context, s outSignal) error
+	// doublePuppetHook (tests only) replaces the "user has a double puppet" check of own read receipts.
+	doublePuppetHook func() bool
 	bridgedHook func(key networkid.PortalKey, id networkid.MessageID) bool
 	betweenHook func(key networkid.PortalKey, start, end time.Time) ([]*database.Message, error)
 	// statusHook, when set (tests only), receives message statuses instead of the Matrix connector.
@@ -220,6 +225,9 @@ func (x *xmppClient) Connect(ctx context.Context) {
 	x.authFailures = 0
 	x.lastInbound.Store(time.Now().UnixNano())
 	x.session = sess
+	// The session is live from here, whoever called Connect (the reconnect loop or bridgev2 itself): the
+	// loop uses this to back off after a session that dies right after bind.
+	x.sessionStartedAt.Store(time.Now().UnixNano())
 	// Background goroutines of this session run on sessCtx so they end with the session (Serve loop
 	// exit or Disconnect) instead of leaking one set per reconnect.
 	sessCtx, cancelSess := context.WithCancel(context.Background())
@@ -421,7 +429,6 @@ func drainIQPayload(t xmlstream.TokenReadEncoder) {
 func (x *xmppClient) ReconnectLoop(ctx context.Context) {
 	backoff := reconnectBackoffStart
 	const maxBackoff = 5 * time.Minute
-	var sessionStart time.Time // set when a connect succeeded, cleared once the session end was handled
 
 	for {
 		select {
@@ -442,12 +449,11 @@ func (x *xmppClient) ReconnectLoop(ctx context.Context) {
 			continue
 		}
 
-		if !sessionStart.IsZero() {
-			// The session we started has ended. One that died right after bind (session limit,
-			// conflict, policy violation) must not reconnect at once: keep and double the backoff
-			// and wait for it even though the session end woke the loop.
-			lived := time.Since(sessionStart)
-			sessionStart = time.Time{}
+		if started := x.sessionStartedAt.Swap(0); started != 0 {
+			// A session (started by this loop or by bridgev2's own Connect call) has ended. One that
+			// died right after bind (session limit, conflict, policy violation) must not reconnect at
+			// once: keep and double the backoff and wait for it even though the session end woke the loop.
+			lived := time.Since(time.Unix(0, started))
 			if lived < minHealthySession {
 				x.log.Debug().Dur("lived", lived).Dur("backoff", backoff).Msg("XMPP session ended shortly after connecting, backing off")
 				t := time.NewTimer(backoff)
@@ -478,8 +484,9 @@ func (x *xmppClient) ReconnectLoop(ctx context.Context) {
 
 		if x.IsLoggedIn() {
 			// Roster sync (and optional full backfill) is started by Connect itself.
-			// The backoff is reset only once the session proved healthy (see above).
-			sessionStart = time.Now()
+			// The backoff is reset only once the session proved healthy (see above). Connect records
+			// the start itself; this covers a connect hook that does not.
+			x.sessionStartedAt.CompareAndSwap(0, time.Now().UnixNano())
 			continue
 		}
 
@@ -525,6 +532,7 @@ func (x *xmppClient) Disconnect() {
 		x.reconnectCancel = nil
 	}
 	hadSession := x.session != nil
+	x.sig.reset() // stops pending debounced MUC markers
 	if hadSession {
 		_ = x.session.Close()
 		x.session = nil
@@ -2328,7 +2336,11 @@ func (x *xmppClient) handleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 		Str("msg_type", string(msgType)).
 		Msg("DEBUG: About to call sendXMPPMessageWithOOB")
 	
-	xmppMsgID, err := sendXMPPOut(ctx, sess, x.withSignalFlags(outMessage{To: toJID, Type: msgType, ID: preID, Body: messageBody, OOBURL: oobURL, ReplyID: replyID, ReplyTo: replyToJID}))
+	outMsg := x.withSignalFlags(outMessage{To: toJID, Type: msgType, ID: preID, Body: messageBody, OOBURL: oobURL, ReplyID: replyID, ReplyTo: replyToJID})
+	xmppMsgID, err := sendXMPPOut(ctx, sess, outMsg)
+	if err == nil {
+		x.noteOutboundSent(outMsg)
+	}
 	if err != nil {
 		if preID != "" {
 			x.mucEcho.discard(toJIDStr, preID)

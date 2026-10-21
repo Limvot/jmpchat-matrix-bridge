@@ -5,6 +5,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -125,7 +126,7 @@ func TestCarbonSentDisplayedIsFromMe(t *testing.T) {
 	x, got = hookClient()
 	runHandler(t, x, `<message from="me@example.com"><received xmlns="urn:xmpp:carbons:2"><forwarded xmlns="urn:xmpp:forward:0"><message xmlns="jabber:client" from="Bob@example.com/p" to="me@example.com" type="chat"><displayed xmlns="urn:xmpp:chat-markers:0" id="mine1"/></message></forwarded></received></message>`)
 	ev = receiptEvents(*got)
-	if len(ev) != 1 || ev[0].Sender.IsFromMe || ev[0].Sender.Sender != "Bob@example.com" {
+	if len(ev) != 1 || ev[0].Sender.IsFromMe || ev[0].Sender.Sender != "bob@example.com" {
 		t.Fatalf("events = %v", *got)
 	}
 }
@@ -155,10 +156,17 @@ func TestMUCDisplayedUnknownOccupantIgnored(t *testing.T) {
 }
 
 func TestMUCDisplayedEchoDropped(t *testing.T) {
-	x, got := hookClient()
+	fastMUCMarkers(t)
+	c := &sigCapture{}
+	x := sigClient(c)
+	got := captureQueue(x)
 	x.mucOurOccupantJID = map[string]string{sigRoom: sigRoom + "/me"}
-	x.mucEcho.register(sigRoom, "marker1")
-	runHandler(t, x, `<message type="groupchat" from="room@muc.example.com/me" id="marker1"><displayed xmlns="urn:xmpp:chat-markers:0" id="ROOMSID"/><origin-id xmlns="urn:xmpp:sid:0" id="marker1"/></message>`)
+	muc := &bridgev2.Portal{Portal: &database.Portal{PortalKey: sigKey(sigRoom), RoomType: database.RoomTypeGroupDM}}
+	if err := x.HandleMatrixReadReceipt(context.Background(), readMsg(muc, mkRow("m1", "room@muc.example.com/bob", 5, true, "ROOMSID"))); err != nil {
+		t.Fatal(err)
+	}
+	id := waitSent(t, c, 1)[0].ID
+	runHandler(t, x, `<message type="groupchat" from="room@muc.example.com/me" id="`+id+`"><displayed xmlns="urn:xmpp:chat-markers:0" id="ROOMSID"/><origin-id xmlns="urn:xmpp:sid:0" id="`+id+`"/></message>`)
 	if len(*got) != 0 {
 		t.Fatalf("our own marker's echo was bridged: %v", *got)
 	}
@@ -192,9 +200,12 @@ func TestGroupMMSSignalsIgnored(t *testing.T) {
 // ---- receipt pre-handler ----
 
 type fakeReceiptEnv struct {
-	rows map[string][]*database.Message
-	err  error
+	rows  map[string][]*database.Message
+	err   error
+	noOwn bool // the user has no double puppet
 }
+
+func (f *fakeReceiptEnv) canMarkOwnReads(context.Context) bool { return !f.noOwn }
 
 func (f *fakeReceiptEnv) findByRef(_ context.Context, _ networkid.PortalKey, ref string, _ refKind) ([]*database.Message, error) {
 	return f.rows[ref], f.err
@@ -256,12 +267,48 @@ func TestReceiptPreHandleError(t *testing.T) {
 
 // ---- answering XEP-0184 requests ----
 
-type sigCapture struct{ sent []outSignal }
+type sigCapture struct {
+	mu   sync.Mutex
+	sent []outSignal
+}
+
+func (c *sigCapture) snapshot() []outSignal {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]outSignal(nil), c.sent...)
+}
+
+// waitSent polls until n signals were captured (debounced MUC markers come from a timer goroutine).
+func waitSent(t *testing.T, c *sigCapture, n int) []outSignal {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if got := c.snapshot(); len(got) >= n {
+			return got
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %d signals, got %+v", n, c.snapshot())
+	return nil
+}
+
+// fastMUCMarkers shortens the MUC marker debounce for a test.
+func fastMUCMarkers(t *testing.T) {
+	t.Helper()
+	old := mucMarkerDebounce
+	mucMarkerDebounce = 20 * time.Millisecond
+	t.Cleanup(func() { mucMarkerDebounce = old })
+}
 
 func sigClient(c *sigCapture) *xmppClient {
 	x, _ := hookClient()
 	x.conn = &JabberConnector{}
-	x.signalHook = func(_ context.Context, s outSignal) error { c.sent = append(c.sent, s); return nil }
+	x.signalHook = func(_ context.Context, s outSignal) error {
+		c.mu.Lock()
+		c.sent = append(c.sent, s)
+		c.mu.Unlock()
+		return nil
+	}
 	x.bridgedHook = func(networkid.PortalKey, networkid.MessageID) bool { return true }
 	return x
 }
@@ -318,7 +365,7 @@ func TestNoReceiptAnswerCases(t *testing.T) {
 		{"config off", `<message type="chat" from="bob@example.com/p" id="in1"><body>hi</body><request xmlns="urn:xmpp:receipts"/></message>`, &JabberConfig{SendDeliveryReceipts: &off}},
 		{"no id", `<message type="chat" from="bob@example.com/p"><body>hi</body><request xmlns="urn:xmpp:receipts"/></message>`, nil},
 		{"no request", `<message type="chat" from="bob@example.com/p" id="in1"><body>hi</body></message>`, nil},
-		{"error type", `<message type="headline" from="bob@example.com/p" id="in1"><body>hi</body><request xmlns="urn:xmpp:receipts"/></message>`, nil},
+		{"error type", `<message type="error" from="bob@example.com/p" id="in1"><body>hi</body><request xmlns="urn:xmpp:receipts"/></message>`, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := &sigCapture{}
@@ -481,15 +528,21 @@ func TestHandleMatrixReadReceipt(t *testing.T) {
 		}
 	})
 	t.Run("muc uses the stanza id and registers the echo", func(t *testing.T) {
+		fastMUCMarkers(t)
 		c := &sigCapture{}
 		x := sigClient(c)
 		x.mucOurOccupantJID = map[string]string{sigRoom: sigRoom + "/me"}
 		if err := x.HandleMatrixReadReceipt(context.Background(), readMsg(muc, mkRow("m1", "room@muc.example.com/bob", 5, true, "ROOMSID"))); err != nil {
 			t.Fatal(err)
 		}
-		if len(c.sent) != 1 || c.sent[0].Value != "ROOMSID" || c.sent[0].Type != "groupchat" || c.sent[0].ID == "" {
-			t.Fatalf("sent = %+v", c.sent)
+		if got := c.snapshot(); len(got) != 0 {
+			t.Fatalf("marker sent before the quiet period: %+v", got)
 		}
+		sent := waitSent(t, c, 1)
+		if len(sent) != 1 || sent[0].Value != "ROOMSID" || sent[0].Type != "groupchat" || sent[0].ID == "" {
+			t.Fatalf("sent = %+v", sent)
+		}
+		c.sent = sent
 		// The room's reflection of the marker is recognized as ours.
 		res := x.mucEcho.matchEcho(sigRoom, []string{c.sent[0].ID}, "", "")
 		if !res.matched {

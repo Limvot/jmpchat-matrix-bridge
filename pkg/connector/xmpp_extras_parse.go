@@ -35,6 +35,7 @@ type messageExtras struct {
 	ReceiptRequest  bool    // <request xmlns=receiptsNS/>
 	ReceiptReceived string  // <received xmlns=receiptsNS id>
 	Subject         *string // <subject> (stanza namespace); non-nil even when empty (= subject cleared)
+	Delayed         bool    // direct-child <delay xmlns=delayNS>: a replayed (history/offline) stanza, not a live one
 	Encryption      string  // "omemo","omemo2","openpgp","pgp","eme:<ns>"; "" none
 }
 
@@ -80,6 +81,10 @@ func (e *messageExtras) observe(se xml.StartElement) (subject bool) {
 			e.ReceiptRequest = true
 		case "received":
 			setID(&e.ReceiptReceived, attrValue(se.Attr, "id"))
+		}
+	case delayNS:
+		if se.Name.Local == "delay" {
+			e.Delayed = true
 		}
 	case omemoLegacyNS:
 		if se.Name.Local == "encrypted" {

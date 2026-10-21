@@ -419,10 +419,12 @@ func (x *xmppClient) FetchMessages(ctx context.Context, params bridgev2.FetchMes
 	// Corrections are newer than their originals too: fold them into the originals of this batch (a
 	// BackfillMessage cannot carry an edit) before truncating.
 	items, foldedCorrs := foldBatchCorrectionsDetailed(items)
-	x.recordFoldedCorrections(ctx, params.Portal.PortalKey, foldedCorrs)
 	if len(items) > count {
 		items = items[:count]
 	}
+	// Dedupe keys only for corrections whose original is within the kept items: a correction folded into
+	// an original that truncation dropped is still pending for the next page.
+	x.recordFoldedCorrections(ctx, params.Portal.PortalKey, foldedWithin(foldedCorrs, items))
 	// MAM server order is implementation-defined; sort by timestamp so Matrix always gets oldest-first.
 	if len(items) > 1 {
 		sort.Slice(items, func(i, j int) bool { return items[i].Timestamp.Before(items[j].Timestamp) })

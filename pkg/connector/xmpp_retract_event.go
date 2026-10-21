@@ -488,6 +488,17 @@ func (e xmppRetractionEnv) rowsGone(ctx context.Context, portal *bridgev2.Portal
 	return err == nil && len(rows) == 0
 }
 
+// canMarkOwnReads reports whether the user has a double puppet (bridgev2 sends "from me" receipts through it).
+func (e xmppRetractionEnv) canMarkOwnReads(ctx context.Context) bool {
+	if e.x.doublePuppetHook != nil {
+		return e.x.doublePuppetHook()
+	}
+	if e.x.login == nil || e.x.login.User == nil {
+		return true
+	}
+	return e.x.login.User.DoublePuppet(ctx) != nil
+}
+
 func (e xmppRetractionEnv) log(ctx context.Context) *zerolog.Logger { return e.x.logFor(ctx) }
 
 // senderIntent returns the intent bridgev2 would use to remove a message of this part's sender (the
