@@ -7,7 +7,9 @@ package connector
 import (
 	"context"
 	"encoding/xml"
+	"errors"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 	"sync"
@@ -74,7 +76,10 @@ type mamState struct {
 }
 
 func (m *mamState) register(queryID string, portal networkid.PortalKey, forward bool) chan mamResultItem {
-	ch := make(chan mamResultItem, 50)
+	// Buffer more than one page of results: the query asks for max+1 items and the consumer may be
+	// briefly busy queueing remote events; deliverMessage drops on overflow, so an undersized buffer
+	// silently truncates pages (breaking hasMore detection).
+	ch := make(chan mamResultItem, 256)
 	m.mu.Lock()
 	if m.pending == nil {
 		m.pending = make(map[string]*mamPendingEntry)
@@ -85,9 +90,13 @@ func (m *mamState) register(queryID string, portal networkid.PortalKey, forward 
 }
 
 func (m *mamState) deliverMessage(queryID string, item mamResultItem) bool {
+	// The send runs under the mutex: closeAndRemove deletes and closes the channel under the same
+	// mutex, so a send can never race a close. (A previous version unlocked before sending and could
+	// panic with "send on closed channel" when the consumer abandoned a query early.) The send is
+	// non-blocking (the channel is buffered), so holding the lock here cannot deadlock.
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	entry := m.pending[queryID]
-	m.mu.Unlock()
 	if entry == nil {
 		return false
 	}
@@ -141,14 +150,25 @@ func (x *xmppClient) handleMAMResult(t xmlstream.TokenReadEncoder, start *xml.St
 		return nil
 	}
 	// Parse <forwarded xmlns='urn:xmpp:forward:0'><message .../><delay .../></forwarded>
-	var from, to, msgType, stanzaID, body string
+	var from, to, msgType, stanzaID string
 	var timestamp time.Time
 	var ids messageIDs
-	msgDepth := 0 // depth of the first inner <message>; its direct children carry the XEP-0359 ids
+	msgDepth := 0  // depth of the first inner <message>; its direct children carry the XEP-0359 ids
+	bodyDepth := 0 // depth of the inner message's <body> being collected; 0 = not inside one
+	var bodyBuf strings.Builder
 	depth := 1
 	for depth > 0 {
 		tok, err := t.Token()
 		if err != nil {
+			// io.EOF at depth > 0 means the element was truncated mid-stanza. Never hand EOF back
+			// to mellium's Serve: it treats a handler's io.EOF as "stream closed cleanly", returns
+			// nil and its deferred Session.Close() sends </stream:stream> on the wire, tearing down
+			// an otherwise healthy session (this masqueraded as a server-side MAM "kick" for a long
+			// time). The replacement error deliberately does not wrap the EOF, so no caller can
+			// mistake it for a clean end of stream either.
+			if errors.Is(err, io.EOF) {
+				return fmt.Errorf("mam: truncated <result> element (read error: %v)", err)
+			}
 			return err
 		}
 		switch v := tok.(type) {
@@ -167,15 +187,16 @@ func (x *xmppClient) handleMAMResult(t xmlstream.TokenReadEncoder, start *xml.St
 				msgType = attrValue(v.Attr, "type")
 				stanzaID = attrValue(v.Attr, "id")
 			}
-			if v.Name.Local == "body" {
-				// Next token(s) are character data
-				inner, ierr := t.Token()
-				if ierr != nil {
-					continue
-				}
-				if cd, ok := inner.(xml.CharData); ok {
-					body = strings.TrimSpace(string(cd))
-				}
+			// The message body is the <body> DIRECT child of the inner <message>, collected via a
+			// flag rather than by peeking the next token. An earlier peek-based parse broke on
+			// self-closing/empty <body/> elements (XEP-0482 fallback markers embed
+			// <fallback ...><body end='33' start='0'/></fallback>): the peek ate the element's
+			// EndElement, the depth counter leaked one level, and the loop ran past the end of the
+			// result where the reader returns io.EOF — which killed the whole XMPP session mid-MAM
+			// flood (see the comment on the error path above). Nested <body> elements (fallback
+			// markers) must not be captured either; they are not the message text.
+			if v.Name.Local == "body" && bodyDepth == 0 && msgDepth > 0 && depth == msgDepth+1 {
+				bodyDepth = depth
 			}
 			if v.Name.Space == delayNS && v.Name.Local == "delay" {
 				if stamp := attrValue(v.Attr, "stamp"); stamp != "" {
@@ -189,13 +210,20 @@ func (x *xmppClient) handleMAMResult(t xmlstream.TokenReadEncoder, start *xml.St
 			if msgDepth > 0 {
 				ids.trackChars(v)
 			}
+			if bodyDepth > 0 {
+				bodyBuf.Write(v)
+			}
 		case xml.EndElement:
+			if bodyDepth > 0 && depth == bodyDepth {
+				bodyDepth = 0
+			}
 			depth--
 			if msgDepth > 0 {
 				ids.trackEnd(depth + 1)
 			}
 		}
 	}
+	body := strings.TrimSpace(bodyBuf.String())
 	ids.finish()
 	if ids.Retract != nil {
 		body = "" // XEP-0424 fallback text; never bridge it
@@ -210,11 +238,15 @@ func (x *xmppClient) handleMAMResult(t xmlstream.TokenReadEncoder, start *xml.St
 	if archiveID == "" {
 		archiveID = ids.stanzaIDBy(string(x.loginID))
 	}
-	x.mam.deliverMessage(queryID, mamResultItem{
+	sent := x.mam.deliverMessage(queryID, mamResultItem{
 		From: from, To: to, Type: msgType, StanzaID: stanzaID, ArchiveID: archiveID, OriginID: ids.OriginID,
 		Body: body, Timestamp: timestamp, QueryID: queryID,
 		Retract: ids.Retract, Retracted: ids.Tombstone,
 	})
+	if !sent {
+		x.log.Warn().Str("query_id", queryID).Str("stanza_id", stanzaID).
+			Msg("MAM result dropped: query already finished or collector buffer full")
+	}
 	return nil
 }
 

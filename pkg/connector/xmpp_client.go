@@ -1454,7 +1454,9 @@ func (x *xmppClient) resolveIdentifier(ctx context.Context, identifier string, c
 		resp.Chat = x.dmCreateChatResponse(jidStr)
 		// Backfill on PM creation: run before room is created so history appears before first message.
 		if x.conn.backfillConfig != nil && x.conn.backfillConfig.Enabled {
-			backfillCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			// 30s, not 10s: an MMS-heavy page can take longer than 10s to stream, and cancelling
+			// mid-page only guarantees the next connect re-fetches the same page from scratch.
+			backfillCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 			x.mamBackfillOnView(x.log.WithContext(backfillCtx), jidStr)
 			cancel()
 		}
@@ -1758,7 +1760,8 @@ func (x *xmppClient) HandleMatrixViewingChat(ctx context.Context, msg *bridgev2.
 	// Run synchronously so history appears before they can send; respects config.backfill.enabled.
 	if x.login != nil && x.conn.backfillConfig != nil && x.conn.backfillConfig.Enabled &&
 		!x.portalIsMUC(ctx, msg.Portal) && msg.Portal.ID != "" {
-		backfillCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		// 30s, not 10s (see ResolveIdentifier): don't abandon slow MAM pages mid-stream.
+		backfillCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		x.mamBackfillOnView(x.log.WithContext(backfillCtx), string(msg.Portal.ID))
 		cancel()
 	}

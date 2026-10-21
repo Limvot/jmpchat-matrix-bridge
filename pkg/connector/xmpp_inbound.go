@@ -3,6 +3,7 @@ package connector
 import (
 	"context"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -48,7 +49,17 @@ type messageLoggingHandler struct {
 	x     *xmppClient
 }
 
-func (h *messageLoggingHandler) HandleXMPP(t xmlstream.TokenReadEncoder, start *xml.StartElement) error {
+func (h *messageLoggingHandler) HandleXMPP(t xmlstream.TokenReadEncoder, start *xml.StartElement) (err error) {
+	// A bare io.EOF must never escape a stanza handler: mellium's Session.Serve treats it as
+	// "the stream closed cleanly", returns nil and its deferred Session.Close() writes
+	// </stream:stream> — silently tearing down a healthy session whenever a handler mis-parses
+	// itself past the end of its element (this is what made MAM backfill kill the connection
+	// mid-flood; see xmpp_mam.go). Retype it as a real error so the stream error surfaces.
+	defer func() {
+		if errors.Is(err, io.EOF) {
+			err = fmt.Errorf("jmpchat: truncated <%s> stanza (read error: %v)", start.Name.Local, err)
+		}
+	}()
 	switch start.Name.Local {
 	case "message":
 		from := attrValue(start.Attr, "from")
