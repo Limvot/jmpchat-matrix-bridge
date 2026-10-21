@@ -41,6 +41,8 @@ func (x *xmppClient) queueRemoteEvent(ctx context.Context, evt bridgev2.RemoteEv
 			attachTraceHooks(&e.EventMeta, sc)
 		case *simplevent.MessageRemove:
 			attachLazyTraceHooks(&e.EventMeta, sc)
+		case *simplevent.Message[*correction]:
+			attachLazyTraceHooks(&e.EventMeta, sc)
 		}
 		span.SetAttributes(attribute.String("xmpp.peer.jid", string(evt.GetPortalKey().ID)))
 	}

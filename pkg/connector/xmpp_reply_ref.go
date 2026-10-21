@@ -68,7 +68,12 @@ func resolveMessageRef(ctx context.Context, db *database.Database, portal networ
 // refIsMUC decides, without any disco IQ, whether a reply/reaction in this event refers to a
 // groupchat: the origin of the event first, then the stored room type, then the JID heuristic.
 func (m *jabberRemoteMessage) refIsMUC(portal *bridgev2.Portal) bool {
-	if m.groupchat {
+	return refIsMUCFor(m.groupchat, portal, m.portalKey)
+}
+
+// refIsMUCFor is refIsMUC for any event origin: groupchat says the stanza itself was a groupchat one.
+func refIsMUCFor(groupchat bool, portal *bridgev2.Portal, key networkid.PortalKey) bool {
+	if groupchat {
 		return true
 	}
 	if portal != nil {
@@ -79,7 +84,7 @@ func (m *jabberRemoteMessage) refIsMUC(portal *bridgev2.Portal) bool {
 			return false
 		}
 	}
-	return isMUCJID(string(m.portalKey.ID))
+	return isMUCJID(string(key.ID))
 }
 
 // replyRefForMessage returns the id a Matrix->XMPP reply or reaction must carry for target. In a

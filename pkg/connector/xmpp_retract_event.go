@@ -101,8 +101,7 @@ func validateRetraction(r retraction, p portalFacts, target *database.Message) (
 		return false, "wrong_portal"
 	}
 	portalID := string(p.key.ID)
-	switch {
-	case r.isModeration():
+	if r.isModeration() {
 		// Only the room itself (bare JID, type=groupchat) may moderate; the moderator identity is informational.
 		switch {
 		case !r.groupchat:
@@ -115,37 +114,67 @@ func validateRetraction(r retraction, p portalFacts, target *database.Message) (
 			return false, "moderation_portal_not_muc"
 		}
 		return true, ""
-	case r.groupchat:
+	}
+	return validateOwnership(r.claim(), p, target)
+}
+
+// senderClaim is who sent a stanza that claims ownership of a target message (retraction, correction).
+type senderClaim struct {
+	channel    string // retractChan*
+	groupchat  bool   // the stanza had type=groupchat (MUC handler)
+	msgType    string // stanza type attribute (inner message for carbons/MAM)
+	fromFull   string // sender of the stanza (inner `from` for carbons/MAM)
+	occupantID string // top-level XEP-0421 occupant-id of the stanza
+}
+
+// claim is the ownership claim a retraction makes (moderation is decided separately).
+func (r retraction) claim() senderClaim {
+	return senderClaim{channel: r.channel, groupchat: r.groupchat, msgType: r.msgType, fromFull: r.fromFull, occupantID: r.occupantID}
+}
+
+// validateOwnership decides whether the sender described by c owns target, a row resolved in portal p:
+// the checks every stanza that acts on its own earlier message has to pass (retraction, correction).
+// reason is an enum string (never user content) when it does not.
+func validateOwnership(c senderClaim, p portalFacts, target *database.Message) (ok bool, reason string) {
+	if target == nil {
+		return false, "not_found"
+	}
+	// bridgev2 resolves message IDs without a room check; never act on another portal's message.
+	if target.Room != p.key {
+		return false, "wrong_portal"
+	}
+	portalID := string(p.key.ID)
+	if c.groupchat {
 		if !p.isMUC {
 			return false, "retraction_portal_not_muc"
 		}
-		if !strings.EqualFold(bareJID(r.fromFull), portalID) {
+		if !strings.EqualFold(bareJID(c.fromFull), portalID) {
 			return false, "retraction_wrong_room"
 		}
 		if meta := targetMeta(target); meta != nil && meta.OccupantID != "" {
 			// Strict: with an occupant-id on the target only an equal one counts, never the nick
 			// (a nick can be reused by someone else after the owner left).
-			if r.occupantID == "" || r.occupantID != meta.OccupantID {
+			if c.occupantID == "" || c.occupantID != meta.OccupantID {
 				return false, "occupant_id_mismatch"
 			}
 			return true, ""
 		}
-		if r.occupantID != "" {
+		if c.occupantID != "" {
 			// The room stamps occupant-ids but the target has none (stored before occupant-ids were
 			// persisted): a nick or our current occupant JID proves nothing, since another occupant may
 			// hold it now (or held it while we were away and the retraction is a history replay).
 			return false, "target_without_occupant_id"
 		}
-		if r.fromFull == string(target.SenderID) {
+		if c.fromFull == string(target.SenderID) {
 			return true, ""
 		}
-		if string(target.SenderID) == string(p.loginID) && p.ourOccupantFull != "" && r.fromFull == p.ourOccupantFull {
+		if string(target.SenderID) == string(p.loginID) && p.ourOccupantFull != "" && c.fromFull == p.ourOccupantFull {
 			return true, ""
 		}
 		return false, "occupant_mismatch"
 	}
 	// 1:1 retraction.
-	switch r.msgType {
+	switch c.msgType {
 	case "", "normal", "chat":
 	default:
 		return false, "bad_message_type"
@@ -157,8 +186,8 @@ func validateRetraction(r retraction, p portalFacts, target *database.Message) (
 	if p.isGroupMMS {
 		return false, "group_mms"
 	}
-	fromBare := bareJID(r.fromFull)
-	if r.channel == retractChanCarbonSent {
+	fromBare := bareJID(c.fromFull)
+	if c.channel == retractChanCarbonSent {
 		if strings.EqualFold(fromBare, string(p.loginID)) && strings.EqualFold(string(target.SenderID), string(p.loginID)) {
 			return true, ""
 		}
@@ -676,7 +705,8 @@ func (x *xmppClient) queueMAMRetraction(ctx context.Context, portalKey networkid
 
 // mamItemBackfillable is the cheap (no DB) part of the FetchMessages filter: retractions themselves
 // (their fallback text is dropped), server tombstones of retracted originals, body-less items (chat
-// states) and originals removed by a retraction in the same batch are never backfilled.
+// states), corrections (folded into their originals beforehand) and originals removed by a retraction in
+// the same batch are never backfilled.
 func mamItemBackfillable(item mamResultItem, b batchRetractions) bool {
-	return item.Retract == nil && !item.Retracted && item.Body != "" && !b.hides(item)
+	return item.Retract == nil && !item.Retracted && item.Body != "" && item.Extras.Replace == "" && !b.hides(item)
 }

@@ -32,6 +32,7 @@ func TestBridgeCapsFeatureList(t *testing.T) {
 		"jabber:x:oob",
 		"urn:xmpp:bookmarks:1+notify",
 		"urn:xmpp:fallback:0",
+		"urn:xmpp:message-correct:0",
 		"urn:xmpp:message-retract:0",
 		"urn:xmpp:message-retract:1",
 		"urn:xmpp:ping",

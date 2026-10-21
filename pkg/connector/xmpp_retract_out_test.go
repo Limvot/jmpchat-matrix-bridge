@@ -369,10 +369,10 @@ func TestRetractionCapabilities(t *testing.T) {
 	if jabberCaps.Delete != event.CapLevelFullySupported {
 		t.Errorf("Delete = %v", jabberCaps.Delete)
 	}
-	if jabberCapID != "github.com/mautrix/jabber.capabilities.2026_10" || jabberCaps.ID != jabberCapID {
+	if jabberCapID != "github.com/mautrix/jabber.capabilities.2026_11" || jabberCaps.ID != jabberCapID {
 		t.Errorf("cap ID = %q / %q", jabberCapID, jabberCaps.ID)
 	}
-	if info, caps := (&JabberConnector{}).GetBridgeInfoVersion(); info != 1 || caps != 2 {
+	if info, caps := (&JabberConnector{}).GetBridgeInfoVersion(); info != 1 || caps != 3 {
 		t.Errorf("bridge info version = %d, %d", info, caps)
 	}
 	var _ bridgev2.RedactionHandlingNetworkAPI = (*xmppClient)(nil)

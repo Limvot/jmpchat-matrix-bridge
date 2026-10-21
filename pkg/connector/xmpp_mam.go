@@ -413,6 +413,9 @@ func (x *xmppClient) FetchMessages(ctx context.Context, params bridgev2.FetchMes
 	// Retractions are newer than their originals and the first thing truncation drops, so collect
 	// them from everything fetched.
 	batchRetracted := collectBatchRetractions(items)
+	// Corrections are newer than their originals too: fold them into the originals of this batch (a
+	// BackfillMessage cannot carry an edit) before truncating.
+	items = foldBatchCorrections(items)
 	if len(items) > count {
 		items = items[:count]
 	}
@@ -680,7 +683,7 @@ func (x *xmppClient) mamCatchUpForPortal(ctx, cycleCtx context.Context, bareJID 
 		if item.Type == "groupchat" {
 			continue
 		}
-		if x.queueMAMRetraction(pctx, portalKey, item) {
+		if x.queueMAMRetraction(pctx, portalKey, item) || x.queueMAMCorrection(pctx, portalKey, item) {
 			continue
 		}
 		if item.Retracted || x.mamItemHidden(ctx, portalKey, item, batchRetracted) {
@@ -869,7 +872,7 @@ func (x *xmppClient) doMAMBackfillOnView(ctx context.Context, span trace.Span, p
 		if item.Type == "groupchat" {
 			continue
 		}
-		if x.queueMAMRetraction(ctx, portalKey, item) {
+		if x.queueMAMRetraction(ctx, portalKey, item) || x.queueMAMCorrection(ctx, portalKey, item) {
 			continue
 		}
 		if item.Body == "" || item.Retracted {

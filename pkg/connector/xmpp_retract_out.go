@@ -112,6 +112,27 @@ func (x *xmppClient) sendPortalNotice(ctx context.Context, portal *bridgev2.Port
 	}
 }
 
+// ensureInMUC makes sure we are in the room before a retraction or correction is sent (the join on
+// view may not have run yet). A room that was left on purpose returns the "you left this room" error
+// (errMUCLeft is never cleared here); other join failures are only logged (the send may still work).
+func (x *xmppClient) ensureInMUC(ctx context.Context, portalID string) error {
+	if x.getMUCOurOccupantJID(portalID) != "" {
+		return nil
+	}
+	if joinErr := x.joinMUCForPortal(ctx, portalID); errors.Is(joinErr, errMUCLeft) {
+		return fmt.Errorf("you left this room; use `%s join %s` to rejoin it", x.mucCmdPrefix(), portalID)
+	} else if joinErr != nil {
+		x.logFor(ctx).Warn().Err(joinErr).Msg("Failed to join MUC before sending; it may be rejected")
+		return nil
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(1500 * time.Millisecond):
+	}
+	return nil
+}
+
 // HandleMatrixMessageRemove implements bridgev2.RedactionHandlingNetworkAPI.
 func (x *xmppClient) HandleMatrixMessageRemove(ctx context.Context, msg *bridgev2.MatrixMessageRemove) error {
 	ctx, span := telemetry.Start(ctx, "matrix.handle_redaction", trace.WithSpanKind(trace.SpanKindConsumer))
@@ -172,18 +193,8 @@ func (x *xmppClient) handleMatrixMessageRemove(ctx context.Context, msg *bridgev
 	if isMUC {
 		msgType = stanza.MessageType("groupchat")
 		// Be in the room before retracting (same as sending).
-		if x.getMUCOurOccupantJID(portalID) == "" {
-			if joinErr := x.joinMUCForPortal(ctx, portalID); errors.Is(joinErr, errMUCLeft) {
-				return bridgev2.WrapErrorInStatus(fmt.Errorf("you left this room; use `%s join %s` to rejoin it", x.mucCmdPrefix(), portalID)).WithSendNotice(true)
-			} else if joinErr != nil {
-				log.Warn().Err(joinErr).Msg("Failed to join MUC before retraction; it may be rejected")
-			} else {
-				select {
-				case <-ctx.Done():
-					return bridgev2.WrapErrorInStatus(ctx.Err()).WithSendNotice(true)
-				case <-time.After(1500 * time.Millisecond):
-				}
-			}
+		if err := x.ensureInMUC(ctx, portalID); err != nil {
+			return bridgev2.WrapErrorInStatus(err).WithSendNotice(true)
 		}
 	}
 

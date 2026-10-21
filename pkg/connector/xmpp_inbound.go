@@ -363,6 +363,24 @@ func (x *xmppClient) handleMessageWithOOB(t xmlstream.TokenReadEncoder, start *x
 		x.handleJingleMessageInitiation(ctx, *jmi, fromBare, bareJID(from) == bareJID(string(x.loginID)))
 		return nil
 	}
+	// XEP-0308 correction: bridged as an edit of the original, never as a new message (a correction
+	// without text is dropped). Must precede the "no body" skip and the portal/backfill triggers below.
+	if ids.Extras.Replace != "" {
+		if body != "" {
+			x.handleInboundCorrection(correction{
+				claim:         senderClaim{channel: retractChanLive, msgType: attrValue(start.Attr, "type"), fromFull: from},
+				target:        ids.Extras.Replace,
+				corrID:        firstNonEmpty(attrValue(start.Attr, "id"), ids.OriginID),
+				body:          body,
+				replyID:       replyID,
+				replyFallback: ids.ReplyFallback,
+				hasOOB:        oobURL != "",
+				senderID:      fromBare,
+				ts:            time.Now(),
+			}, networkid.PortalKey{ID: networkid.PortalID(fromBare), Receiver: x.loginID}, x.makeEventSender(fromBare))
+		}
+		return nil
+	}
 	// Skip XEP-0085 chat state notifications (composing, paused, etc.) - messages with no body, no OOB, and no reactions.
 	if body == "" && oobURL == "" && reactionTarget == "" {
 		x.log.Debug().Str("from", attrValue(start.Attr, "from")).Msg("Skipping chat state notification (no body, no OOB, no reactions)")
@@ -545,6 +563,23 @@ func (x *xmppClient) handleGroupchatWithOOB(t xmlstream.TokenReadEncoder, start 
 	fromMe := x.isOwnMUCOccupant(roomJID, occupantFull)
 	if fromMe {
 		x.log.Debug().Str("room", roomJID).Msg("MUC message from our own nick that is not an echo; bridging as sent by the user")
+	}
+	// XEP-0308 correction (after the echo check, so the echo of our own correction is dropped above):
+	// bridged as an edit of the original, never as a new message.
+	if ids.Extras.Replace != "" {
+		corrSender := x.mucMessageSender(roomJID, occupantFull)
+		x.handleInboundCorrection(correction{
+			claim:         senderClaim{channel: retractChanLive, groupchat: true, msgType: "groupchat", fromFull: from, occupantID: ids.OccupantID},
+			target:        ids.Extras.Replace,
+			corrID:        firstNonEmpty(attrValue(start.Attr, "id"), ids.OriginID),
+			body:          body,
+			replyID:       replyID,
+			replyFallback: ids.ReplyFallback,
+			hasOOB:        oobURL != "",
+			senderID:      string(corrSender.Sender),
+			ts:            time.Now(),
+		}, networkid.PortalKey{ID: networkid.PortalID(roomJID), Receiver: x.loginID}, corrSender)
+		return nil
 	}
 	msgID := attrValue(start.Attr, "id")
 	if msgID == "" {
@@ -1349,36 +1384,7 @@ func (m *jabberRemoteMessage) convertMessage(ctx context.Context, portal *bridge
 			// If it's not a file attachment, fall through to treat it as a regular text message with a link
 		}
 	}
-	// Resolve the reply target first: the XEP-0428 fallback (the quote) is only removed when the
-	// quoted message is known, otherwise the quote stays visible as the only context.
-	var replyTarget *database.Message
-	if m.replyID != "" && m.x != nil && m.x.conn != nil && m.x.conn.br != nil {
-		isMUC := m.refIsMUC(portal)
-		dbMsg, err := resolveMessageRef(ctx, m.x.conn.br.DB, m.portalKey, m.replyID, isMUC)
-		switch {
-		case err != nil:
-			zerolog.Ctx(ctx).Debug().Err(err).Bool("muc", isMUC).Msg("Reply target lookup failed")
-		case dbMsg == nil:
-			zerolog.Ctx(ctx).Debug().Bool("muc", isMUC).Msg("Reply target not found in portal")
-		default:
-			replyTarget = dbMsg
-			zerolog.Ctx(ctx).Debug().Bool("muc", isMUC).Str("db_message_id", string(dbMsg.ID)).Msg("Reply target resolved")
-		}
-	}
-	bodyText := m.body
-	if replyTarget != nil && m.replyFallback.Valid {
-		bodyText = stripReplyFallback(bodyText, m.replyFallback)
-	} else if m.replyID != "" && !m.replyFallback.Valid {
-		// No XEP-0428 range: strip lines starting with ">" (common Jabber quote format)
-		lines := strings.Split(bodyText, "\n")
-		var cleanLines []string
-		for _, line := range lines {
-			if !strings.HasPrefix(strings.TrimSpace(line), ">") {
-				cleanLines = append(cleanLines, line)
-			}
-		}
-		bodyText = strings.TrimSpace(strings.Join(cleanLines, "\n"))
-	}
+	bodyText, replyTarget := textForBody(ctx, m.x, m.portalKey, m.refIsMUC(portal), m.body, m.replyID, m.replyFallback)
 
 	part := &bridgev2.ConvertedMessagePart{
 		Type:    event.EventMessage,
@@ -1390,6 +1396,41 @@ func (m *jabberRemoteMessage) convertMessage(ctx context.Context, portal *bridge
 		cm.ReplyTo = &networkid.MessageOptionalPartID{MessageID: replyTarget.ID}
 	}
 	return cm, nil
+}
+
+// textForBody turns an inbound XMPP body into the Matrix text: it resolves the reply target (room-scoped)
+// first, since the XEP-0428 fallback (the quote) is only removed when the quoted message is known,
+// otherwise the quote stays visible as the only context. It returns the text and the resolved reply
+// target (nil when there is none). Shared by messages and XEP-0308 corrections. x may be nil (no lookup).
+func textForBody(ctx context.Context, x *xmppClient, portalKey networkid.PortalKey, isMUC bool, body, replyID string, fallback replyFallback) (string, *database.Message) {
+	var replyTarget *database.Message
+	if replyID != "" && x != nil && x.conn != nil && x.conn.br != nil {
+		dbMsg, err := resolveMessageRef(ctx, x.conn.br.DB, portalKey, replyID, isMUC)
+		switch {
+		case err != nil:
+			zerolog.Ctx(ctx).Debug().Err(err).Bool("muc", isMUC).Msg("Reply target lookup failed")
+		case dbMsg == nil:
+			zerolog.Ctx(ctx).Debug().Bool("muc", isMUC).Msg("Reply target not found in portal")
+		default:
+			replyTarget = dbMsg
+			zerolog.Ctx(ctx).Debug().Bool("muc", isMUC).Str("db_message_id", string(dbMsg.ID)).Msg("Reply target resolved")
+		}
+	}
+	bodyText := body
+	if replyTarget != nil && fallback.Valid {
+		bodyText = stripReplyFallback(bodyText, fallback)
+	} else if replyID != "" && !fallback.Valid {
+		// No XEP-0428 range: strip lines starting with ">" (common Jabber quote format)
+		lines := strings.Split(bodyText, "\n")
+		var cleanLines []string
+		for _, line := range lines {
+			if !strings.HasPrefix(strings.TrimSpace(line), ">") {
+				cleanLines = append(cleanLines, line)
+			}
+		}
+		bodyText = strings.TrimSpace(strings.Join(cleanLines, "\n"))
+	}
+	return bodyText, replyTarget
 }
 
 // captionFromBodyWithOOB returns body text suitable for use as a Matrix caption when the message

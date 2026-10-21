@@ -60,6 +60,8 @@ Recommendations from codebase analysis (duplication, library overlap, configurat
 
 - **[F-3] context.Background() in async paths** — Location: e.g. `go x.mamBackfillOnView(x.log.WithContext(context.Background()), toJIDStr)`, `context.WithTimeout(context.Background(), 5*time.Second)` in xmpp_inbound. Recommendation: Where the originating request context is not available, document why Background is used; consider passing a detached context with a timeout or cancel tied to login lifecycle so long-running backfills don't outlive the session.
 
+- **[F-4] Outbound helpers share one builder** — Location: `pkg/connector/xmpp_message.go`. `outMessage` + `sendXMPPOut` is the single outbound message builder (text, OOB, reply, XEP-0308 correction; `sendXMPPMessageWithOOB*` delegate to it). Recommendation: migrate the remaining `sendXMPP*` helpers (reactions, retractions) onto it when touching them.
+
 ## Resolved / Acknowledged
 
 - *(None.)*

@@ -27,6 +27,7 @@ var bridgeFeatureVars = []string{
 	oobNS,
 	"urn:xmpp:bookmarks:1+notify",
 	fallbackNS,
+	correctNS,
 	retractNS0,
 	retractNS1,
 	"urn:xmpp:ping",

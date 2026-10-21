@@ -162,6 +162,53 @@ func sendXMPPMessageWithOOB(ctx context.Context, sess *xmpp.Session, to jid.JID,
 // sendXMPPMessageWithOOBID is sendXMPPMessageWithOOB with a caller-chosen stanza id (empty: generate).
 // MUC sends pass an id they registered in the echo table before the send.
 func sendXMPPMessageWithOOBID(ctx context.Context, sess *xmpp.Session, to jid.JID, body string, oobURL string, replyID string, replyToJID string, msgType stanza.MessageType, xmppMsgID string) (string, error) {
+	return sendXMPPOut(ctx, sess, outMessage{To: to, Type: msgType, ID: xmppMsgID, Body: body, OOBURL: oobURL, ReplyID: replyID, ReplyTo: replyToJID})
+}
+
+// outMessage describes one outbound chat/groupchat message with a body. It is the single builder for
+// text, media (OOB), replies and XEP-0308 corrections; later features (chat markers, receipts) add
+// their flags here instead of growing the sendXMPP* helpers.
+type outMessage struct {
+	To      jid.JID
+	Type    stanza.MessageType // "" -> normal
+	ID      string             // stanza id, also the origin-id; "" -> generate
+	Body    string
+	OOBURL  string // XEP-0066 media URL
+	ReplyID string // XEP-0461 reply target id
+	ReplyTo string // XEP-0461 reply `to` (author JID)
+	Replace string // XEP-0308 correction target id ("" -> not a correction)
+	// Phase E adds: Active, Markable, RequestReceipt bool
+}
+
+// replaceReader returns <replace xmlns='urn:xmpp:message-correct:0' id='...'/> (XEP-0308).
+func replaceReader(targetID string) xml.TokenReader {
+	start := xml.StartElement{
+		Name: xml.Name{Space: correctNS, Local: "replace"},
+		Attr: []xml.Attr{{Name: xml.Name{Local: "xmlns"}, Value: correctNS}, {Name: xml.Name{Local: "id"}, Value: targetID}},
+	}
+	return xmlstream.MultiReader(xmlstream.Token(start), xmlstream.Token(xml.EndElement{Name: start.Name}))
+}
+
+// outPayload is the child content of the message stanza for m: the body (finalBody, already resolved),
+// the stanza's own origin-id, then the optional OOB, reply and correction (replace + store hint) elements.
+func outPayload(m outMessage, finalBody, stanzaID string) xml.TokenReader {
+	readers := []xml.TokenReader{bodyReader(finalBody), originIDReader(stanzaID)}
+	if m.OOBURL != "" {
+		readers = append(readers, oobReader(m.OOBURL))
+	}
+	if m.ReplyID != "" {
+		readers = append(readers, replyReader(m.ReplyID, m.ReplyTo))
+	}
+	if m.Replace != "" {
+		readers = append(readers, replaceReader(m.Replace), storeHintReader())
+	}
+	return xmlstream.MultiReader(readers...)
+}
+
+// sendXMPPOut builds and sends m and returns the stanza id. A correction (Replace set) carries
+// <body>, <origin-id>, <replace> and a store hint. Span attributes and logs carry ids and lengths only.
+func sendXMPPOut(ctx context.Context, sess *xmpp.Session, m outMessage) (string, error) {
+	to, body, oobURL, replyID, msgType, xmppMsgID := m.To, m.Body, m.OOBURL, m.ReplyID, m.Type, m.ID
 	ctx, span := telemetry.StartChild(ctx, "xmpp.send_message", trace.WithSpanKind(trace.SpanKindProducer))
 	defer span.End()
 	if span.IsRecording() {
@@ -171,6 +218,7 @@ func sendXMPPMessageWithOOBID(ctx context.Context, sess *xmpp.Session, to jid.JI
 			attribute.Bool("xmpp.has_oob", oobURL != ""),
 			attribute.Bool("xmpp.has_reply", replyID != ""),
 			attribute.Bool("xmpp.reaction", false),
+			attribute.Bool("xmpp.correction", m.Replace != ""),
 		)
 	}
 	log := zerolog.Ctx(ctx)
@@ -221,28 +269,13 @@ func sendXMPPMessageWithOOBID(ctx context.Context, sess *xmpp.Session, to jid.JI
 		Type: msgType,
 		ID:   xmppMsgID, // Set the message ID so XEP-0461 replies can reference it
 	}
-	var readers []xml.TokenReader
-	readers = append(readers, bodyReader(finalBody), originIDReader(xmppMsgID))
-	if oobURL != "" {
-		log.Debug().
-			Str("final_body_len", fmt.Sprintf("%d", len(finalBody))).
-			Msg("DEBUG: Adding OOB payload")
-		readers = append(readers, oobReader(oobURL))
-	}
-	if replyID != "" {
-		log.Debug().
-			Str("reply_id", replyID).
-			Str("reply_to_jid", replyToJID).
-			Msg("DEBUG: Adding XEP-0461 reply element")
-		readers = append(readers, replyReader(replyID, replyToJID))
-	}
-	var payload xml.TokenReader
-	if len(readers) == 1 {
-		payload = readers[0]
-	} else {
-		payload = xmlstream.MultiReader(readers...)
-	}
-	err = sess.Send(ctx, msg.Wrap(payload))
+	log.Debug().
+		Int("final_body_len", len(finalBody)).
+		Bool("has_oob", oobURL != "").
+		Str("reply_id", replyID).
+		Bool("correction", m.Replace != "").
+		Msg("DEBUG: Building outbound message payload")
+	err = sess.Send(ctx, msg.Wrap(outPayload(m, finalBody, xmppMsgID)))
 	if err != nil {
 		telemetry.Fail(span, err)
 		log.Debug().Err(err).Msg("DEBUG: sendXMPPMessageWithOOB send failed")

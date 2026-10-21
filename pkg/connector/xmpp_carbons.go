@@ -134,6 +134,21 @@ func (x *xmppClient) handleCarbonSent(t xmlstream.TokenReadEncoder, outer *xml.S
 		}
 		return nil
 	}
+	// A correction made from another of our clients (outer from was validated above).
+	if ids.Extras.Replace != "" {
+		if toBare := strings.ToLower(bareJID(to)); toBare != "" && typeAttr != "groupchat" && body != "" {
+			x.handleInboundCorrection(correction{
+				claim:    senderClaim{channel: retractChanCarbonSent, msgType: typeAttr, fromFull: from},
+				target:   ids.Extras.Replace,
+				corrID:   firstNonEmpty(id, ids.OriginID),
+				body:     body,
+				hasOOB:   false,
+				senderID: string(x.loginID),
+				ts:       time.Now(),
+			}, networkid.PortalKey{ID: networkid.PortalID(toBare), Receiver: x.loginID}, x.makeEventSender(string(x.loginID)))
+		}
+		return nil
+	}
 	// XEP-0353 action we performed from another of our devices (accept/reject/proceed).
 	if jmi != nil {
 		ctx, span := startReceiveSpan("carbon_sent", "", from, "", id, false, false, false)
@@ -206,6 +221,20 @@ func (x *xmppClient) handleCarbonReceived(t xmlstream.TokenReadEncoder, outer *x
 			x.handleInboundRetraction(retraction{
 				info: *ids.Retract, channel: retractChanCarbonReceived, msgType: typeAttr, fromFull: from,
 			}, networkid.PortalKey{ID: networkid.PortalID(fromBare), Receiver: x.loginID}, id, ids, string(x.loginID))
+		}
+		return nil
+	}
+	// A correction received on another of our clients (outer from was validated above).
+	if ids.Extras.Replace != "" {
+		if fromBare := bareJID(from); fromBare != "" && typeAttr != "groupchat" && body != "" {
+			x.handleInboundCorrection(correction{
+				claim:    senderClaim{channel: retractChanCarbonReceived, msgType: typeAttr, fromFull: from},
+				target:   ids.Extras.Replace,
+				corrID:   firstNonEmpty(id, ids.OriginID),
+				body:     body,
+				senderID: fromBare,
+				ts:       time.Now(),
+			}, networkid.PortalKey{ID: networkid.PortalID(strings.ToLower(fromBare)), Receiver: x.loginID}, x.makeEventSender(fromBare))
 		}
 		return nil
 	}

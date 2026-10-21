@@ -27,6 +27,11 @@ const (
 	// stanza-id, so that goes first; then the direct id and the sender-chosen aliases for clients
 	// that still reference those. Room-scoped like every lookup here.
 	refReplyMUC
+	// refCorrectionDM / refCorrectionMUC: target of a XEP-0308 correction. <replace id> names the
+	// original's `id` attribute in both chat kinds (not the room stanza-id), so the direct id goes first,
+	// then the sender-chosen aliases, then the archive/room stanza-id.
+	refCorrectionDM
+	refCorrectionMUC
 )
 
 // metadata JSON keys (MessageMetadata) that findMessagesByXMPPRef may match. Only these constants are
@@ -60,6 +65,12 @@ func refLookupPlan(kind refKind) []refStep {
 			{keys: []string{metaKeyStanzaID}},
 			{direct: true},
 			{keys: []string{metaKeyOriginID, metaKeyXMPPID}},
+		}
+	case refCorrectionDM, refCorrectionMUC:
+		return []refStep{
+			{direct: true},
+			{keys: []string{metaKeyOriginID, metaKeyXMPPID}},
+			{keys: []string{metaKeyStanzaID}},
 		}
 	case refReplyDM:
 		return []refStep{

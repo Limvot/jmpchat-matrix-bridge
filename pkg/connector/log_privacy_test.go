@@ -26,6 +26,11 @@ func TestInboundMessageContentNotLogged(t *testing.T) {
 	serveStanza(t, x, `<message xmlns="jabber:client" type="chat" from="bob@example.com/res" id="s1"><body>`+secret+` serve</body></message>`)
 	serveStanza(t, x, `<message xmlns="jabber:client" type="groupchat" from="room@muc.example.com/bob" id="s2"><body>`+secret+` serve muc</body></message>`)
 
+	// XEP-0308 corrections (live DM, MUC, carbon): the corrected text is content too.
+	runHandler(t, x, `<message type="chat" from="bob@example.com/res" to="me@example.com" id="k1"><body>`+secret+` fix dm</body><replace xmlns="urn:xmpp:message-correct:0" id="c1"/></message>`)
+	runHandler(t, x, `<message type="groupchat" from="room@muc.example.com/bob" id="k2"><body>`+secret+` fix muc</body><replace xmlns="urn:xmpp:message-correct:0" id="g1"/></message>`)
+	runHandler(t, x, `<message from="me@example.com"><sent xmlns="urn:xmpp:carbons:2"><forwarded xmlns="urn:xmpp:forward:0"><message xmlns="jabber:client" from="me@example.com/l" to="bob@example.com" type="chat" id="k3"><body>`+secret+` fix carbon</body><replace xmlns="urn:xmpp:message-correct:0" id="c1"/></message></forwarded></sent></message>`)
+
 	out := buf.String()
 	if out == "" {
 		t.Fatal("nothing was logged; the test proves nothing")
