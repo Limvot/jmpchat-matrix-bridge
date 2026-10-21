@@ -11,6 +11,7 @@ import (
 	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/id"
+	"mellium.im/xmpp/jid"
 )
 
 // MUC echo rendezvous. A MUC retraction must name the ROOM-assigned stanza-id of the original, which
@@ -210,6 +211,43 @@ func (x *xmppClient) mucEchoPostSave(room, msgID string) func(context.Context, *
 func (x *xmppClient) isOwnMUCOccupant(room, occupantFull string) bool {
 	ours := x.getMUCOurOccupantJID(room)
 	return ours != "" && occupantFull == ours
+}
+
+// noteOwnMUCNickChange follows a nick change of our own occupant (unavailable + 303 from oldOccupant).
+// It is ours when oldOccupant is the occupant JID we recorded for the room, or the presence carries the
+// self-presence status 110. Then the recorded occupant JID becomes room/newNick under its lock, which is
+// all the echo matching (handleOwnMUCEcho, mucMessageSender, leaveMUC) reads. A rename of anybody else
+// changes nothing here (the avatar table drops the old occupant record). Serve goroutine, memory only.
+func (x *xmppClient) noteOwnMUCNickChange(roomBare, oldOccupant string, info presenceInfo) bool {
+	roomJID, err := jid.Parse(roomBare)
+	if err != nil {
+		return false
+	}
+	newJID, err := roomJID.WithResource(info.newNick)
+	if err != nil {
+		return false
+	}
+	x.mucOurOccupantJIDMu.Lock()
+	ours := x.mucOurOccupantJID[roomBare]
+	if !(ours != "" && ours == oldOccupant) && !info.hasStatus("110") {
+		x.mucOurOccupantJIDMu.Unlock()
+		return false
+	}
+	if x.mucOurOccupantJID == nil {
+		x.mucOurOccupantJID = make(map[string]string)
+	}
+	x.mucOurOccupantJID[roomBare] = newJID.String()
+	x.mucOurOccupantJIDMu.Unlock()
+	x.log.Info().Str("room", roomBare).Str("old_nick", resourceOf(oldOccupant)).Str("new_nick", info.newNick).Msg("MUC own nick changed, following it")
+	return true
+}
+
+// resourceOf returns the resource part of a JID string ("" if none).
+func resourceOf(j string) string {
+	if i := strings.IndexByte(j, '/'); i >= 0 {
+		return j[i+1:]
+	}
+	return ""
 }
 
 // mucMessageSender is the bridged sender of a groupchat message: the user themselves (is_from_me,

@@ -363,7 +363,8 @@ func (s *mucAvatarState) notePresence(occ, room string, info presenceInfo, unava
 	defer s.mu.Unlock()
 	s.initLocked()
 	if own {
-		if unavailable {
+		// Our own leave/kick drops the whole room; our own rename (303) keeps everyone else's records.
+		if unavailable && !info.hasStatus("303") {
 			s.clearRoomLocked(room)
 		}
 		return false

@@ -897,6 +897,13 @@ func (x *xmppClient) handlePresence(t xmlstream.TokenReadEncoder, start *xml.Sta
 	if ourNick == "" {
 		return nil
 	}
+	// XEP-0045 7.6: a nick change is announced as unavailable + status 303 with item@nick = the new nick,
+	// from the OLD occupant JID. When it is our own occupant (renamed by us or by another client sharing
+	// the nick) follow it, so our echoes are still recognized (memory only).
+	if sawMUCUser && typeVal == "unavailable" && info.hasStatus("303") && info.newNick != "" {
+		x.noteOwnMUCNickChange(roomBare, fromJID.String(), info)
+		return nil
+	}
 	x.mucPendingJoinMu.Lock()
 	pendingNick, pending := x.mucPendingJoin[roomBare]
 	if pending && pendingNick == ourNick && typeVal != "unavailable" {
