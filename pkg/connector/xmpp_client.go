@@ -1903,9 +1903,7 @@ func (x *xmppClient) handleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 	}
 
 	log.Debug().
-		Str("content_body", msg.Content.Body).
 		Str("content_body_len", fmt.Sprintf("%d", len(msg.Content.Body))).
-		Str("content_formatted_body", msg.Content.FormattedBody).
 		Str("content_formatted_body_len", fmt.Sprintf("%d", len(msg.Content.FormattedBody))).
 		Str("content_filename", msg.Content.FileName).
 		Str("content_msgtype", string(msg.Content.MsgType)).
@@ -1916,11 +1914,10 @@ func (x *xmppClient) handleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 	body := msg.Content.Body
 	if body == "" && msg.Content.FormattedBody != "" {
 		body = msg.Content.FormattedBody
-		log.Debug().Str("using_formatted_body", body).Msg("DEBUG: Using FormattedBody instead of Body")
+		log.Debug().Msg("DEBUG: Using FormattedBody instead of Body")
 	}
 	
 	log.Debug().
-		Str("resolved_body", body).
 		Str("resolved_body_len", fmt.Sprintf("%d", len(body))).
 		Msg("DEBUG: Body resolved from Matrix content")
 
@@ -1978,7 +1975,6 @@ func (x *xmppClient) handleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 		log.Debug().
 			Str("msg_type", string(msg.Content.MsgType)).
 			Str("media_label", mediaLabel).
-			Str("raw_body", body).
 			Str("body_len", fmt.Sprintf("%d", len(body))).
 			Str("content_filename", msg.Content.FileName).
 			Str("content_url", string(msg.Content.URL)).
@@ -2008,7 +2004,6 @@ func (x *xmppClient) handleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 		}
 		
 		log.Debug().
-			Str("trimmed_body", userCaption).
 			Str("content_filename", msg.Content.FileName).
 			Str("resolved_filename", filename).
 			Bool("body_equals_filename", userCaption == filename).
@@ -2028,7 +2023,7 @@ func (x *xmppClient) handleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 				strings.HasSuffix(userCaption, ".mp3") || strings.HasSuffix(userCaption, ".ogg") ||
 				strings.HasSuffix(userCaption, ".pdf") || strings.HasSuffix(userCaption, ".zip") ||
 				strings.Contains(userCaption, ".")) {
-				log.Debug().Str("body_looks_like_filename", userCaption).Msg("DEBUG: Body looks like filename (has extension, no spaces), treating as empty caption")
+				log.Debug().Msg("DEBUG: Body looks like filename (has extension, no spaces), treating as empty caption")
 				userCaption = ""
 			}
 		}
@@ -2042,9 +2037,7 @@ func (x *xmppClient) handleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 			}
 		}
 		log.Debug().
-			Str("user_caption", userCaption).
 			Str("user_caption_len", fmt.Sprintf("%d", len(userCaption))).
-			Str("fallback_caption", fallbackCaption).
 			Msg("DEBUG: Caption processing complete")
 		// Download media and re-upload to our server (XEP-0363) so Jabber users get a usable HTTPS URL.
 		dlCtx, dlSpan := telemetry.StartChild(ctx, "matrix.download_media")
@@ -2132,9 +2125,7 @@ func (x *xmppClient) handleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 									log.Info().
 										Str("get_url", getURLStr).
 										Str("filename", filename).
-										Str("user_caption", userCaption).
 										Str("user_caption_len", fmt.Sprintf("%d", len(userCaption))).
-										Str("message_body", messageBody).
 										Str("message_body_len", fmt.Sprintf("%d", len(messageBody))).
 										Str("oob_url", oobURL).
 										Msg("DEBUG: XEP-0363 upload successful, final values before sending")
@@ -2187,7 +2178,6 @@ func (x *xmppClient) handleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 		x.mucEcho.register(toJIDStr, preID)
 	}
 	log.Debug().
-		Str("final_message_body", messageBody).
 		Str("final_message_body_len", fmt.Sprintf("%d", len(messageBody))).
 		Str("final_oob_url", oobURL).
 		Str("final_oob_url_len", fmt.Sprintf("%d", len(oobURL))).
@@ -2253,7 +2243,6 @@ func (x *xmppClient) PreHandleMatrixReaction(ctx context.Context, msg *bridgev2.
 	// Extract emoji from the reaction key (e.g., "👍" from the reaction event)
 	emoji := msg.Content.RelatesTo.Key
 	x.log.Debug().
-		Str("emoji", emoji).
 		Str("target_message_id", string(msg.TargetMessage.ID)).
 		Msg("DEBUG: PreHandleMatrixReaction")
 	return bridgev2.MatrixReactionPreResponse{
@@ -2320,7 +2309,6 @@ func (x *xmppClient) handleMatrixReaction(ctx context.Context, msg *bridgev2.Mat
 	// Jabber→Matrix). Future: see README "To-do (unimplemented work)" — multiple reactions per user per message.
 	emoji := msg.PreHandleResp.Emoji
 	log.Debug().
-		Str("emoji", emoji).
 		Str("target_message_id", targetMessageID).
 		Msg("DEBUG: Sending Matrix reaction to XMPP using XEP-0444 format")
 	
@@ -2356,7 +2344,6 @@ func (x *xmppClient) handleMatrixReaction(ctx context.Context, msg *bridgev2.Mat
 func (x *xmppClient) HandleMatrixReactionRemove(ctx context.Context, msg *bridgev2.MatrixReactionRemove) error {
 	x.log.Debug().
 		Str("target_message_id", string(msg.TargetReaction.MessageID)).
-		Str("emoji", msg.TargetReaction.Emoji).
 		Msg("DEBUG: HandleMatrixReactionRemove - Jabber doesn't support removing reactions, ignoring")
 	// Jabber doesn't have a standard way to remove reactions, so we just return success
 	// The original reaction message will remain in Jabber

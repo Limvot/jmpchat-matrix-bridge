@@ -171,7 +171,7 @@ func (x *xmppClient) handleCarbonSent(t xmlstream.TokenReadEncoder, outer *xml.S
 	x.maybeTriggerBackfillOnNewPortal(ctx, portalKey)
 	x.logFor(ctx).Debug().
 		Str("to", toBare).
-		Str("body_preview", truncate(body, 60)).
+		Int("body_len", len(body)).
 		Msg("Carbon <sent>: queuing message sent from another client")
 	x.queueRemoteEvent(ctx, &jabberRemoteMessage{
 		portalKey: portalKey,
@@ -244,7 +244,7 @@ func (x *xmppClient) handleCarbonReceived(t xmlstream.TokenReadEncoder, outer *x
 	x.maybeTriggerBackfillOnNewPortal(ctx, portalKey)
 	zerolog.Ctx(context.Background()).Debug().
 		Str("from", fromBare).
-		Str("body_preview", truncate(body, 60)).
+		Int("body_len", len(body)).
 		Msg("Carbon <received>: queuing message received on another client")
 	x.queueRemoteEvent(ctx, &jabberRemoteMessage{
 		portalKey: portalKey,

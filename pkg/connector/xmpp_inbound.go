@@ -447,20 +447,20 @@ func (x *xmppClient) handleMessageWithOOB(t xmlstream.TokenReadEncoder, start *x
 	if replyID != "" {
 		log.Debug().
 			Str("reply_id", replyID).
-			Str("body_preview", truncate(body, 80)).
+			Int("body_len", len(body)).
 			Msg("DEBUG: Received XMPP message with XEP-0461 reply")
 	}
 	if reactionTarget != "" {
 		log.Debug().
 			Str("reaction_target", reactionTarget).
-			Strs("reaction_emojis", reactionEmojis).
+			Int("reaction_emoji_count", len(reactionEmojis)).
 			Msg("DEBUG: Received XMPP message with XEP-0444 reactions")
 	}
 	if oobURL != "" {
 		log.Info().
 			Str("type", attrValue(start.Attr, "type")).
 			Str("id", msgID).
-			Str("body_preview", truncate(body, 80)).
+			Int("body_len", len(body)).
 			Str("oob_url", oobURL).
 			Str("reply_id", replyID).
 			Str("reaction_target", reactionTarget).
@@ -469,7 +469,7 @@ func (x *xmppClient) handleMessageWithOOB(t xmlstream.TokenReadEncoder, start *x
 		log.Info().
 			Str("type", attrValue(start.Attr, "type")).
 			Str("id", msgID).
-			Str("body_preview", truncate(body, 80)).
+			Int("body_len", len(body)).
 			Str("reply_id", replyID).
 			Str("reaction_target", reactionTarget).
 			Msg("XMPP message received (text only), queued for bridge")
@@ -573,7 +573,6 @@ func (x *xmppClient) handleGroupchatWithOOB(t xmlstream.TokenReadEncoder, start 
 				Str("room", roomJID).
 				Str("occupant", occupantFull).
 				Str("reaction_target", targetID).
-				Str("emoji", emoji).
 				Msg("MUC body-based reaction detected, bridging as reaction")
 		}
 	}
@@ -583,16 +582,16 @@ func (x *xmppClient) handleGroupchatWithOOB(t xmlstream.TokenReadEncoder, start 
 		Str("room", roomJID).
 		Str("occupant", occupantFull).
 		Str("id", msgID).
-		Str("body_preview", truncate(body, 80)).
+		Int("body_len", len(body)).
 		Str("reaction_target", reactionTarget).
-		Strs("reaction_emojis", reactionEmojis).
+		Int("reaction_emoji_count", len(reactionEmojis)).
 		Msg("Inbound MUC message received, queuing for bridge")
 	if reactionTarget != "" && len(reactionEmojis) > 0 {
 		log.Warn().
 			Str("room", roomJID).
 			Str("occupant", occupantFull).
 			Str("reaction_target", reactionTarget).
-			Strs("reaction_emojis", reactionEmojis).
+			Int("reaction_emoji_count", len(reactionEmojis)).
 			Msg("Inbound MUC reaction: will look up target and bridge to Matrix")
 	}
 
@@ -723,14 +722,14 @@ func (x *xmppClient) handleIncomingMessage(msg stanza.Message, rw xmlstream.Toke
 	x.log.Info().
 		Str("type", string(msg.Type)).
 		Str("id", msg.ID).
-		Str("body_preview", truncate(body, 80)).
+		Int("body_len", len(body)).
 		Msg("XMPP message received, queuing for bridge")
 	warnIfDebugIdentifiers(&x.log)
 	x.log.Debug().
 		Str("from", fromBare).
 		Str("type", string(msg.Type)).
 		Str("id", msg.ID).
-		Str("body_preview", truncate(body, 80)).
+		Int("body_len", len(body)).
 		Msg("XMPP message received, queuing for bridge")
 
 	portalKey := networkid.PortalKey{
@@ -803,7 +802,6 @@ func (x *xmppClient) handleIncomingGroupchat(msg stanza.Message, rw xmlstream.To
 		x.log.Debug().
 			Str("room", roomJID).
 			Str("reaction_target", targetID).
-			Str("emoji", emoji).
 			Msg("MUC body-based reaction detected, bridging as reaction")
 	}
 	// Exact echoes of messages this bridge sent are dropped; anything else from our own occupant JID
@@ -817,7 +815,7 @@ func (x *xmppClient) handleIncomingGroupchat(msg stanza.Message, rw xmlstream.To
 		Str("room", roomJID).
 		Str("occupant", occupantFull).
 		Str("id", msg.ID).
-		Str("body_preview", truncate(body, 80)).
+		Int("body_len", len(body)).
 		Msg("MUC message received, queuing for bridge")
 
 	portalKey := networkid.PortalKey{
@@ -955,13 +953,6 @@ func readBodyFromStream(rw xmlstream.TokenReadEncoder) string {
 	return strings.TrimSpace(b.String())
 }
 
-func truncate(s string, max int) string {
-	if len(s) <= max {
-		return s
-	}
-	return s[:max] + "..."
-}
-
 // jabberRemoteMessage implements bridgev2.RemoteMessage for incoming XMPP messages.
 type jabberRemoteMessage struct {
 	portalKey      networkid.PortalKey
@@ -1054,7 +1045,7 @@ func (m *jabberRemoteMessage) GetType() bridgev2.RemoteEventType {
 		if m.x != nil {
 			telemetry.LoggerSC(m.spanCtx, &m.x.log).Debug().
 				Str("reaction_target", m.reactionTarget).
-				Strs("reaction_emojis", m.reactionEmojis).
+				Int("reaction_emoji_count", len(m.reactionEmojis)).
 				Msg("DEBUG: Detected Jabber reaction (XEP-0444)")
 		}
 		// Empty reactions list means removal
@@ -1069,7 +1060,6 @@ func (m *jabberRemoteMessage) GetType() bridgev2.RemoteEventType {
 		if m.x != nil {
 			telemetry.LoggerSC(m.spanCtx, &m.x.log).Debug().
 				Str("reply_id", m.replyID).
-				Str("emoji", strings.TrimSpace(m.body)).
 				Msg("DEBUG: Detected Jabber reaction (reply with single emoji, legacy)")
 		}
 		return bridgev2.RemoteEventReaction
@@ -1283,7 +1273,6 @@ func (m *jabberRemoteMessage) convertMessage(ctx context.Context, portal *bridge
 				result := makeMediaPart(fileName, msgType, mxcURL, file, mimeType, len(content), string(m.id), caption)
 				log.Debug().
 					Str("content_msg_type", string(result.Parts[0].Content.MsgType)).
-					Str("content_body", result.Parts[0].Content.Body).
 					Str("content_filename", result.Parts[0].Content.FileName).
 					Str("content_url", string(result.Parts[0].Content.URL)).
 					Bool("content_has_file", result.Parts[0].Content.File != nil).

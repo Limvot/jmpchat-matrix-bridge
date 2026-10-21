@@ -175,7 +175,6 @@ func sendXMPPMessageWithOOBID(ctx context.Context, sess *xmpp.Session, to jid.JI
 	}
 	log := zerolog.Ctx(ctx)
 	log.Debug().
-		Str("input_body", body).
 		Str("input_body_len", fmt.Sprintf("%d", len(body))).
 		Str("input_oob_url", oobURL).
 		Str("input_oob_url_len", fmt.Sprintf("%d", len(oobURL))).
@@ -190,10 +189,10 @@ func sendXMPPMessageWithOOBID(ctx context.Context, sess *xmpp.Session, to jid.JI
 		if body == "" {
 			// No user caption - use OOB URL in body as fallback per XEP-0066
 			finalBody = oobURL
-			log.Debug().Str("using_oob_url_as_body", oobURL).Msg("DEBUG: No caption, using OOB URL in body per XEP-0066")
+			log.Debug().Msg("DEBUG: No caption, using OOB URL in body per XEP-0066")
 		} else {
 			// User provided caption - use it
-			log.Debug().Str("using_user_caption", body).Msg("DEBUG: Using user caption in body")
+			log.Debug().Msg("DEBUG: Using user caption in body")
 		}
 	} else if body == "" {
 		// No OOB and no body - use space to ensure valid message
@@ -227,7 +226,6 @@ func sendXMPPMessageWithOOBID(ctx context.Context, sess *xmpp.Session, to jid.JI
 	readers = append(readers, bodyReader(finalBody), originIDReader(xmppMsgID))
 	if oobURL != "" {
 		log.Debug().
-			Str("final_body", finalBody).
 			Str("final_body_len", fmt.Sprintf("%d", len(finalBody))).
 			Str("final_oob_url", oobURL).
 			Msg("DEBUG: Adding OOB payload")
