@@ -35,7 +35,10 @@ const (
 	vcardTempNS   = "vcard-temp"
 	vcardUpdateNS = "vcard-temp:x:update" // XEP-0153
 
-	avatarFetchTimeout    = 10 * time.Second
+	// avatarFetchTimeout bounds one vCard fetch. Large avatars routed between servers are slow: a 177 KB
+	// photo fetched through a MUC took ~17 s (Prosody s2s bandwidth limits) while clients like Gajim simply
+	// wait, so 10 s timed out every time. Fetches run in the background, paced, off the Serve goroutine.
+	avatarFetchTimeout    = 60 * time.Second
 	avatarRefreshInterval = 24 * time.Hour // max age before GetUserInfo re-fetches a contact's vCard
 )
 
