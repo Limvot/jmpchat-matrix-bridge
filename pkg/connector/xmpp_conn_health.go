@@ -25,10 +25,11 @@ import (
 
 // Keepalive timing. Variables so tests can shorten them.
 var (
-	keepaliveTick    = 30 * time.Second // how often the loop looks at the idle time
-	keepaliveIdle    = 90 * time.Second // ping only after this long without inbound traffic
-	keepaliveTimeout = 30 * time.Second // per ping
-	keepaliveMaxMiss = 2                // consecutive unanswered pings before the session is closed
+	keepaliveTick      = 30 * time.Second // how often the loop looks at the idle time
+	keepaliveIdle      = 90 * time.Second // ping only after this long without inbound traffic
+	keepaliveTimeout   = 30 * time.Second // per ping
+	keepaliveMaxMiss   = 2                // consecutive unanswered pings before the session is closed
+	routeCheckInterval = 3 * time.Minute  // how often the session pings its own full JID
 )
 
 // authNotAuthorizedLimit is how many consecutive not-authorized results make the failure final (one
@@ -170,14 +171,26 @@ func (x *xmppClient) postAuthFailedNotice(cond string) {
 	}
 }
 
-// runKeepalive pings the server after keepaliveIdle without inbound traffic (XEP-0199) and closes the
-// session's connection after keepaliveMaxMiss unanswered pings so Serve returns and the reconnect loop
-// takes over. It runs on the session context, never on the Serve goroutine, and holds no IQ response
-// open. Successful pings are not traced (they would flood traces).
+// runKeepalive runs two checks from one ticker loop (XEP-0199), on the session context, never on the
+// Serve goroutine, holding no IQ response open. Successful pings are not traced or logged.
+//
+// Server ping: after keepaliveIdle without inbound traffic the server domain is pinged; any reply,
+// including a stanza error, proves the connection is alive. keepaliveMaxMiss consecutive misses close it.
+//
+// Route check: every routeCheckInterval, independent of inbound traffic, the session pings its OWN full
+// JID. The server must route that ping back to us, our ping handler answers it and the server routes
+// the result back. Only a result counts; any error reply (the server saying our full JID is not
+// routable) is a miss. This catches a "deaf" session whose TCP connection and replies to our own IQs
+// (e.g. MAM) still work while the server no longer delivers stanzas to us (inbound MAM replies keep
+// lastInbound fresh, so the idle ping never fires). keepaliveMaxMiss consecutive route misses close
+// the connection. Both never run in one tick: a due route check also proves the connection.
+//
+// Closing the connection makes Serve return so the reconnect loop takes over.
 func (x *xmppClient) runKeepalive(ctx context.Context, sess *xmpp.Session, server jid.JID) {
 	ticker := time.NewTicker(keepaliveTick)
 	defer ticker.Stop()
-	misses := 0
+	misses, routeMisses := 0, 0
+	lastRoute := time.Now()
 	for {
 		select {
 		case <-ctx.Done():
@@ -190,18 +203,36 @@ func (x *xmppClient) runKeepalive(ctx context.Context, sess *xmpp.Session, serve
 		if !current {
 			return
 		}
+		if time.Since(lastRoute) >= routeCheckInterval {
+			lastRoute = time.Now()
+			misses = 0
+			err := x.sendPing(ctx, sess, sess.LocalAddr(), routePing)
+			if ctx.Err() != nil {
+				return
+			}
+			if err == nil {
+				routeMisses = 0
+				continue
+			}
+			routeMisses++
+			x.log.Debug().Err(err).Int("misses", routeMisses).Msg("XMPP route check ping to own address failed")
+			if routeMisses < keepaliveMaxMiss {
+				continue
+			}
+			x.log.Warn().Int("misses", routeMisses).Msg("XMPP route check: own address not reachable, closing session")
+			_, span := telemetry.Start(context.Background(), "xmpp.keepalive.route_timeout")
+			if span.IsRecording() {
+				span.SetAttributes(attribute.Int("xmpp.keepalive.route_misses", routeMisses))
+			}
+			span.End()
+			x.closeConn(sess)
+			return
+		}
 		if time.Since(time.Unix(0, x.lastInbound.Load())) < keepaliveIdle {
 			misses = 0
 			continue
 		}
-		pctx, cancel := context.WithTimeout(ctx, keepaliveTimeout)
-		var err error
-		if x.pingFunc != nil {
-			err = x.pingFunc(pctx, sess, server)
-		} else {
-			err = ping.Send(pctx, sess, server)
-		}
-		cancel()
+		err := x.sendPing(ctx, sess, server, ping.Send)
 		if ctx.Err() != nil {
 			return
 		}
@@ -228,6 +259,26 @@ func (x *xmppClient) runKeepalive(ctx context.Context, sess *xmpp.Session, serve
 		x.closeConn(sess)
 		return
 	}
+}
+
+// sendPing sends one ping with keepaliveTimeout; the pingFunc test seam replaces send.
+func (x *xmppClient) sendPing(ctx context.Context, sess *xmpp.Session, to jid.JID, send func(context.Context, *xmpp.Session, jid.JID) error) error {
+	pctx, cancel := context.WithTimeout(ctx, keepaliveTimeout)
+	defer cancel()
+	if x.pingFunc != nil {
+		return x.pingFunc(pctx, sess, to)
+	}
+	return send(pctx, sess, to)
+}
+
+// routePing is ping.Send without its special case: ping.Send maps service-unavailable to success
+// (a client that does not implement XEP-0199), but for the route check any error reply, including the
+// server's service-unavailable/recipient-unavailable for an unroutable full JID, must be an error.
+// mellium matches the result to this IQ by id and stanza name only (the response from is not compared
+// with the request to, and only a from equal to our bare JID is blanked), so the result arriving with
+// from = our full JID is delivered to the waiting UnmarshalIQ.
+func routePing(ctx context.Context, sess *xmpp.Session, to jid.JID) error {
+	return sess.UnmarshalIQ(ctx, ping.IQ{IQ: stanza.IQ{Type: stanza.GetIQ, To: to}}.TokenReader(), nil)
 }
 
 // closeConn closes the session's network connection; closeConnHook (tests only) replaces it.

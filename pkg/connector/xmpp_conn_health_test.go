@@ -454,9 +454,11 @@ func TestKeepaliveErrorReplyProvesAlive(t *testing.T) {
 
 func keepaliveFast(t *testing.T) {
 	t.Helper()
-	ot, oi, oto, om := keepaliveTick, keepaliveIdle, keepaliveTimeout, keepaliveMaxMiss
-	keepaliveTick, keepaliveIdle, keepaliveTimeout, keepaliveMaxMiss = 10*time.Millisecond, 50*time.Millisecond, time.Second, 2
-	t.Cleanup(func() { keepaliveTick, keepaliveIdle, keepaliveTimeout, keepaliveMaxMiss = ot, oi, oto, om })
+	ot, oi, oto, om, or := keepaliveTick, keepaliveIdle, keepaliveTimeout, keepaliveMaxMiss, routeCheckInterval
+	keepaliveTick, keepaliveIdle, keepaliveTimeout, keepaliveMaxMiss, routeCheckInterval = 10*time.Millisecond, 50*time.Millisecond, time.Second, 2, time.Hour
+	t.Cleanup(func() {
+		keepaliveTick, keepaliveIdle, keepaliveTimeout, keepaliveMaxMiss, routeCheckInterval = ot, oi, oto, om, or
+	})
 }
 
 func TestKeepaliveClosesAfterMisses(t *testing.T) {
@@ -554,5 +556,98 @@ func TestInboundStampsLastInbound(t *testing.T) {
 	serveStanza(t, x, `<iq xmlns='jabber:client' type='get' id='p2' from='example.com'><ping xmlns='urn:xmpp:ping'/></iq>`)
 	if time.Since(time.Unix(0, x.lastInbound.Load())) > time.Minute {
 		t.Fatal("lastInbound not stamped")
+	}
+}
+
+func routeTestClient(t *testing.T) (*xmppClient, *xmpp.Session) {
+	t.Helper()
+	keepaliveFast(t)
+	routeCheckInterval = 40 * time.Millisecond
+	keepaliveIdle = time.Hour // idle ping never due
+	sess := &xmpp.Session{}
+	x := &xmppClient{log: zerolog.Nop(), session: sess}
+	x.lastInbound.Store(time.Now().UnixNano())
+	return x, sess
+}
+
+func TestRouteCheckFiresWithoutIdleAndKeepsSession(t *testing.T) {
+	x, sess := routeTestClient(t)
+	var n atomic.Int32
+	x.pingFunc = func(_ context.Context, s *xmpp.Session, to jid.JID) error {
+		if to.String() == "example.com" {
+			t.Error("server ping sent despite recent traffic")
+		}
+		n.Add(1)
+		x.lastInbound.Store(time.Now().UnixNano())
+		return nil
+	}
+	x.closeConnHook = func(*xmpp.Session) { t.Error("closed despite route replies") }
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	x.runKeepalive(ctx, sess, jid.MustParse("example.com"))
+	if n.Load() < 3 {
+		t.Fatalf("only %d route checks", n.Load())
+	}
+}
+
+func TestRouteCheckClosesAfterMisses(t *testing.T) {
+	x, sess := routeTestClient(t)
+	var n atomic.Int32
+	x.pingFunc = func(context.Context, *xmpp.Session, jid.JID) error {
+		n.Add(1)
+		return errors.New("timeout")
+	}
+	closed := make(chan struct{})
+	x.closeConnHook = func(*xmpp.Session) { close(closed) }
+	done := make(chan struct{})
+	go func() { x.runKeepalive(context.Background(), sess, jid.MustParse("example.com")); close(done) }()
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("session not closed")
+	}
+	<-done
+	if n.Load() != 2 {
+		t.Fatalf("route pings = %d, want 2", n.Load())
+	}
+}
+
+func TestRouteCheckStanzaErrorIsMiss(t *testing.T) {
+	x, sess := routeTestClient(t)
+	x.pingFunc = func(context.Context, *xmpp.Session, jid.JID) error {
+		return fmt.Errorf("ping: %w", stanza.Error{Type: stanza.Cancel, Condition: stanza.ServiceUnavailable})
+	}
+	closed := make(chan struct{})
+	x.closeConnHook = func(*xmpp.Session) { close(closed) }
+	go x.runKeepalive(context.Background(), sess, jid.MustParse("example.com"))
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stanza error reply to the route ping did not count as a miss")
+	}
+}
+
+func TestRouteCheckTargetsOwnFullJID(t *testing.T) {
+	x, sess := routeTestClient(t)
+	own := jid.MustParse("me@example.com/res")
+	sess.UpdateAddr(own)
+	got := make(chan jid.JID, 1)
+	x.pingFunc = func(_ context.Context, _ *xmpp.Session, to jid.JID) error {
+		select {
+		case got <- to:
+		default:
+		}
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	x.runKeepalive(ctx, sess, jid.MustParse("example.com"))
+	select {
+	case to := <-got:
+		if !to.Equal(own) {
+			t.Fatalf("route ping to %s, want %s", to, own)
+		}
+	default:
+		t.Fatal("no route ping")
 	}
 }
