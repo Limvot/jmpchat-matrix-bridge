@@ -129,6 +129,10 @@ func parseMessageBodyOOBIDs(t xml.TokenReader) (body, oobURL, replyID string, re
 	var bodyBuf, urlBuf, reactionEmojiBuf strings.Builder
 	depth := 1
 	inBody, inOOB, inURL, inReactions, inReaction := false, false, false, false, false
+	// Only the first direct-child <body> of the message is the text: an XHTML-IM copy
+	// (<html><body xmlns='http://www.w3.org/1999/xhtml'>), the XEP-0428 fallback's <body/> or further
+	// xml:lang bodies must not be appended to it.
+	gotBody := false
 	reactionEmojis = []string{}
 	// XEP-0428: a direct-child <fallback for='urn:xmpp:reply:0'> and the <body start end/> inside it.
 	inReplyFallback := false
@@ -154,7 +158,7 @@ func parseMessageBodyOOBIDs(t xml.TokenReader) (body, oobURL, replyID string, re
 					fbStart, fbEnd, fbValid = s, e, true
 				}
 			}
-			if v.Name.Local == "body" {
+			if depth == 2 && v.Name.Local == "body" && !gotBody && isStanzaNS(v.Name.Space) {
 				inBody = true
 			}
 			if v.Name.Local == "x" && attrValue(v.Attr, "xmlns") == oobNS {
@@ -193,8 +197,9 @@ func parseMessageBodyOOBIDs(t xml.TokenReader) (body, oobURL, replyID string, re
 			if depth == 1 && v.Name.Local == "fallback" {
 				inReplyFallback = false
 			}
-			if v.Name.Local == "body" {
+			if depth == 1 && v.Name.Local == "body" && inBody {
 				inBody = false
+				gotBody = true
 			}
 			if v.Name.Local == "url" {
 				inURL = false
