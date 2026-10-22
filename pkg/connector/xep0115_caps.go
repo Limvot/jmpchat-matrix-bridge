@@ -18,7 +18,7 @@ import (
 const (
 	// bridgeCapsNode is the XEP-0115 node URL of this software.
 	bridgeCapsNode = "https://github.com/williamkray/jmpchat-matrix-bridge"
-	// bridgeIdentityName is the disco identity name (category client, type bot).
+	// bridgeIdentityName is the disco identity name (category client, type pc: the bridge acts as the user's own client, so other clients must not label the account a bot).
 	bridgeIdentityName = "jmpchat-matrix-bridge"
 )
 
@@ -49,7 +49,7 @@ func newBridgeDiscoInfo(node string) disco.Info {
 	}
 	return disco.Info{
 		InfoQuery: disco.InfoQuery{Node: node},
-		Identity:  []info.Identity{{Category: "client", Type: "bot", Name: bridgeIdentityName}},
+		Identity:  []info.Identity{{Category: "client", Type: "pc", Name: bridgeIdentityName}},
 		Features:  feats,
 	}
 }

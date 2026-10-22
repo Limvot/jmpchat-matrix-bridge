@@ -89,7 +89,7 @@ func TestCapsDiscoResponder(t *testing.T) {
 		if r.Type != "result" || r.ID != "d1" || r.To != "peer@example.com/res" || r.Query.Node != node {
 			t.Errorf("node %q: reply = %+v\n%s", node, r, out)
 		}
-		if len(r.Query.Identity) != 1 || r.Query.Identity[0].Category != "client" || r.Query.Identity[0].Type != "bot" || r.Query.Identity[0].Name != "jmpchat-matrix-bridge" {
+		if len(r.Query.Identity) != 1 || r.Query.Identity[0].Category != "client" || r.Query.Identity[0].Type != "pc" || r.Query.Identity[0].Name != "jmpchat-matrix-bridge" {
 			t.Errorf("identity = %+v", r.Query.Identity)
 		}
 		var got []string

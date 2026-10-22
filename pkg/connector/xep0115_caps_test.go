@@ -54,7 +54,7 @@ func TestBridgeCapsFeatureList(t *testing.T) {
 		}
 	}
 	i := newBridgeDiscoInfo("")
-	if len(i.Identity) != 1 || i.Identity[0].Category != "client" || i.Identity[0].Type != "bot" || i.Identity[0].Name != "jmpchat-matrix-bridge" {
+	if len(i.Identity) != 1 || i.Identity[0].Category != "client" || i.Identity[0].Type != "pc" || i.Identity[0].Name != "jmpchat-matrix-bridge" {
 		t.Fatalf("identity = %+v", i.Identity)
 	}
 }
