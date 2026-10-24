@@ -138,8 +138,15 @@ func (x *callsExt) startJingleFor(ul *bridgev2.UserLogin, cl *xmppClient) error 
 		},
 		OnInvite: func(call leg.InboundCall) {
 			// Same entry point the SIP accounts use (sipcalls_accounts.go onInvite tail):
-			// ring every Matrix client through MatrixRTC. Roster-only gating is handled by
-			// the SIP path via account prefs; TODO: map it onto call.Info() for Jingle too.
+			// ring every Matrix client through MatrixRTC. Roster-only gating mirrors the SIP
+			// path (prefs from the login's metadata, roster from the live XMPP client).
+			info := call.Info()
+			if prefs := callPrefsOf(loginMeta(ul)); prefs.RosterOnly && cl != nil {
+				if allow, e164 := rosterGate(prefs, info, x.cfg.DefaultCountryCode, cl.inRoster); !allow {
+					x.rejectFiltered(ul.ID, ul, call, e164)
+					return
+				}
+			}
 			if x.calls != nil {
 				x.calls.HandleInvite(core.LoginRef(loginID), loginNumberFromJID(string(loginID)), call)
 			} else {

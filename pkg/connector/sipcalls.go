@@ -305,6 +305,9 @@ func (x *callsExt) account(loginID networkid.UserLoginID) *sipaccount.Account {
 
 // loginNumber returns the E.164 of the login's SIP account, "" if none (no I/O).
 func (x *callsExt) loginNumber(ref core.LoginRef) string {
+	if x.cfg.Transport == callsTransportJingle {
+		return loginNumberFromJID(string(ref))
+	}
 	if a := x.account(networkid.UserLoginID(ref)); a != nil {
 		return a.Creds().DisplayNumber
 	}
