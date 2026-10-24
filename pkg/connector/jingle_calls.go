@@ -133,6 +133,7 @@ func (x *callsExt) startJingleFor(ul *bridgev2.UserLogin, cl *xmppClient) error 
 			ExternalIP: x.cfg.ExternalIP,
 			Log:        x.log,
 		}),
+		Log: x.log.With().Str("component", "jingleleg").Logger(),
 		OnStateChange: func(ev leg.StateEvent) {
 			x.log.Info().Str("login", string(loginID)).Str("state", ev.State.String()).
 				Msg("Jingle call leg state")
