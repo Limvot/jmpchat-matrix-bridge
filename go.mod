@@ -8,7 +8,7 @@ require (
 	github.com/mattn/go-sqlite3 v1.14.52
 	github.com/rs/xid v1.6.0
 	github.com/rs/zerolog v1.35.1
-	github.com/williamkray/mrtc-sip-bridge v0.3.1-0.20261024222324-d75cbc1f6651
+	github.com/williamkray/mrtc-sip-bridge v0.3.1-0.20261024225700-30cfd80451b1
 	go.mau.fi/util v0.11.0
 	go.mau.fi/zeroconfig v0.2.0
 	go.opentelemetry.io/otel v1.47.0
@@ -138,4 +138,4 @@ require (
 	mellium.im/reader v0.1.0 // indirect
 )
 
-replace github.com/williamkray/mrtc-sip-bridge => github.com/Limvot/mrtc-sip-bridge v0.3.1-0.20261024222324-d75cbc1f6651
+replace github.com/williamkray/mrtc-sip-bridge => github.com/Limvot/mrtc-sip-bridge v0.3.1-0.20261024225700-30cfd80451b1

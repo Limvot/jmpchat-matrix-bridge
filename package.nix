@@ -33,7 +33,7 @@ buildGo126Module rec {
   buildInputs = [opus];
   nativeBuildInputs = [pkg-config];
   ldflags = ["-s" "-w" "-X main.Tag=v${version}"];
-  vendorHash = "sha256-WR5/ize4lKOf7St+0R8EKx8H/j2sajlFdYieikgOUnw=";
+  vendorHash = "sha256-vJvHoTsFuCQ02/yXWm2FM61Etvjormdq5pBWc3xccMA=";
 
   meta = with lib; {
     description = "Matrix <-> JMP.chat bridge: XMPP/SMS/MMS, SIP calls, CardDAV contacts";
