@@ -14,7 +14,7 @@
   buildGo126Module,
   pkg-config,
   opus,
-  version ? "0.10.2",
+  version ? "0.11.0",
   jmpchatSrc ? lib.cleanSourceWith {
     src = lib.cleanSource ./.;
     filter = name: type: type != "symlink" || baseNameOf name != "result";
@@ -33,7 +33,7 @@ buildGo126Module rec {
   buildInputs = [opus];
   nativeBuildInputs = [pkg-config];
   ldflags = ["-s" "-w" "-X main.Tag=v${version}"];
-  vendorHash = "sha256-REktjICRFnbpjKKQlbbfRTLqtBeUcKYSri82GH16n1k=";
+  vendorHash = "sha256-8AaXSKVriBMtxc7vEk07F0ekhIrKc3/U+KuHi8C6GK8=";
 
   meta = with lib; {
     description = "Matrix <-> JMP.chat bridge: XMPP/SMS/MMS, SIP calls, CardDAV contacts";

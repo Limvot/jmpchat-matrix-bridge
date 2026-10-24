@@ -20,7 +20,11 @@ type CallsConfig struct {
 	Enabled bool `yaml:"enabled"`
 	// Transport selects the call leg: "" or "sip" (default, the JMP SIP account) or "jingle"
 	// (native XMPP calling on the login's own session; no SIP credentials needed, ADR-014).
-	Transport      string `yaml:"transport"`
+	Transport string `yaml:"transport"`
+	// ICEServers are STUN/TURN URLs for the jingle transport's WebRTC engine (ignored for
+	// sip). The media port range and external IP are the shared rtp_port_min/max and
+	// external_ip keys above.
+	ICEServers   []string `yaml:"ice_servers"`
 	hostkit.Config `yaml:",inline"`
 }
 
@@ -42,7 +46,7 @@ var errCallsNeedCheogram = errors.New("network.calls.enabled requires network.ch
 // example indented by 4 spaces (comments included).
 func callsExampleConfig() string {
 	var b strings.Builder
-	b.WriteString("# Calls for Cheogram numbers (transport: sip = JMP SIP account, jingle = native XMPP calls).\n# Requires cheogram: true.\ncalls:\n    enabled: false\n    transport: sip\n")
+	b.WriteString("# Calls for Cheogram numbers (transport: sip = JMP SIP account, jingle = native XMPP calls).\n# Requires cheogram: true. For transport: jingle the WebRTC media path reuses rtp_port_min/max\n# and external_ip; ice_servers adds STUN/TURN.\ncalls:\n    enabled: false\n    transport: sip\n    ice_servers: []\n")
 	for _, l := range strings.SplitAfter(hostkit.ExampleYAML, "\n") {
 		if l == "" {
 			continue
@@ -63,6 +67,7 @@ func (x *callsExt) exampleConfig() string { return callsExampleConfig() }
 func (x *callsExt) upgradeConfig(h configupgrade.Helper) {
 	h.Copy(configupgrade.Bool, "calls", "enabled")
 	h.Copy(configupgrade.Str, "calls", "transport")
+	h.Copy(configupgrade.List, "calls", "ice_servers")
 	hostkit.CopyKeys(h, "calls")
 }
 

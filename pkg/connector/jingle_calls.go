@@ -125,7 +125,13 @@ func (x *callsExt) startJingleFor(ul *bridgev2.UserLogin, cl *xmppClient) error 
 		LocalBare:  string(loginID),
 		Transport:  jingleTransport{cl: cl},
 		PeerDomain: cheogramDomain,
-		NewEngine:  jingleleg.NewWebRTCEngine(jingleleg.WebRTCEngineConfig{Log: x.log}),
+		NewEngine: jingleleg.NewWebRTCEngine(jingleleg.WebRTCEngineConfig{
+			ICEServers: jingleICEServers(x.cfg),
+			PortMin:    uint16(clampPort(x.cfg.RTPPortMin)),
+			PortMax:    uint16(clampPort(x.cfg.RTPPortMax)),
+			ExternalIP: x.cfg.ExternalIP,
+			Log:        x.log,
+		}),
 		OnStateChange: func(ev leg.StateEvent) {
 			x.log.Info().Str("login", string(loginID)).Str("state", ev.State.String()).
 				Msg("Jingle call leg state")
@@ -174,6 +180,23 @@ func (x *callsExt) jingleDial(ref core.LoginRef, req leg.DialRequest) (leg.Outbo
 		return nil, leg.ErrNotRegistered
 	}
 	return ua.Dial(req)
+}
+
+// jingleICEServers merges the configured jingle ice_servers with the shared stun_server.
+func jingleICEServers(cfg CallsConfig) []string {
+	servers := append([]string(nil), cfg.ICEServers...)
+	if cfg.STUNServer != "" {
+		servers = append(servers, cfg.STUNServer)
+	}
+	return servers
+}
+
+// clampPort bounds a configured UDP port to the valid range (0 = default).
+func clampPort(p int) int {
+	if p < 0 || p > 65535 {
+		return 0
+	}
+	return p
 }
 
 // loginNumberFromJID returns the E.164 a "+E.164@…" login JID stands for, "" otherwise.
