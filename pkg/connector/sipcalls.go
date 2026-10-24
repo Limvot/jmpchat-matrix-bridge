@@ -285,8 +285,13 @@ func (x *callsExt) startAttrs() []attribute.KeyValue {
 	)
 }
 
-// hasAccount reports whether the login has an attached SIP account (map read only, no I/O).
+// hasAccount reports whether the login has a usable call leg: an attached SIP account, or (jingle
+// transport) a running Jingle leg. This gates MatrixRTC event routing (hostkit.ResolveRTCLogin),
+// so it must know every leg type or call events are dropped before the manager sees them.
 func (x *callsExt) hasAccount(loginID networkid.UserLoginID) bool {
+	if x.cfg.Transport == callsTransportJingle {
+		return x.jingleUA(loginID) != nil
+	}
 	x.mu.Lock()
 	defer x.mu.Unlock()
 	lc := x.accounts[loginID]
