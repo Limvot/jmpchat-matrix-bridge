@@ -82,7 +82,7 @@ func (h *jabberCallHost) ResolveCallRoom(ctx context.Context, ref core.LoginRef,
 	} else if _, err = h.ensurePL(ctx, portal.MXID); err != nil {
 		h.x.logFor(ctx).Warn().Err(err).Stringer("room_id", portal.MXID).Msg("Failed to ensure call power levels")
 	}
-	room, err := h.roomFor(ctx, portal, e164)
+	room, err := h.roomFor(ctx, ul, portal, e164)
 	if err != nil {
 		return nil, err
 	}
@@ -98,8 +98,10 @@ func (h *jabberCallHost) ensurePL(ctx context.Context, roomID id.RoomID) (bool, 
 }
 
 // roomFor builds the CallRoom of an existing portal room: the Cheogram ghost (joined), its intent and
-// the encryption state.
-func (h *jabberCallHost) roomFor(ctx context.Context, portal *bridgev2.Portal, e164 string) (*core.CallRoom, error) {
+// the encryption state. It also makes sure the room is in the owner's m.direct: Element X only
+// offers voice calls and DM-style ringing for DM rooms, and functional members alone do not
+// qualify a room (missing m.direct meant video-only call buttons and video-style rings).
+func (h *jabberCallHost) roomFor(ctx context.Context, ul *bridgev2.UserLogin, portal *bridgev2.Portal, e164 string) (*core.CallRoom, error) {
 	br := h.x.br
 	ghost, err := br.GetGhostByID(ctx, networkid.UserID(cheogramJID(e164)))
 	if err != nil {
@@ -108,6 +110,7 @@ func (h *jabberCallHost) roomFor(ctx context.Context, portal *bridgev2.Portal, e
 	if err = ghost.Intent.EnsureJoined(ctx, portal.MXID); err != nil {
 		h.x.logFor(ctx).Warn().Err(err).Stringer("room_id", portal.MXID).Msg("Failed to ensure the ghost is joined")
 	}
+	ensureDirectChat(ctx, h.x, ul, portal.MXID, ghost.Intent.GetMXID())
 	gi, err := hostkit.NewGhostIntent(ghost)
 	if err != nil {
 		return nil, err
@@ -120,8 +123,8 @@ func (h *jabberCallHost) roomFor(ctx context.Context, portal *bridgev2.Portal, e
 	}, nil
 }
 
-// LookupCallRoom returns the call room of an existing Cheogram 1:1 portal of ref. It creates nothing,
-// changes no power levels and does no I/O beyond the bridge DB / portal cache (and the ghost join).
+// LookupCallRoom returns the call room of an existing Cheogram 1:1 portal of ref. It creates nothing
+// and changes no power levels (it does the ghost join and the m.direct ensure of roomFor).
 func (h *jabberCallHost) LookupCallRoom(ctx context.Context, ref core.LoginRef, roomID id.RoomID) (*core.CallRoom, error) {
 	lookup := h.lookupPortal
 	if lookup == nil {
@@ -135,7 +138,36 @@ func (h *jabberCallHost) LookupCallRoom(ctx context.Context, ref core.LoginRef, 
 	if !ok || portal.MXID == "" {
 		return nil, core.ErrNotCallRoom
 	}
-	return h.roomFor(ctx, portal, e164)
+	ul, err := h.login(ref)
+	if err != nil {
+		return nil, err
+	}
+	return h.roomFor(ctx, ul, portal, e164)
+}
+
+// dmMarker is the part of the double-puppet intent that maintains m.direct
+// (bridgev2/matrix.ASIntent.MarkAsDM).
+type dmMarker interface {
+	MarkAsDM(ctx context.Context, roomID id.RoomID, withUser id.UserID) error
+}
+
+// ensureDirectChat adds the room to the owner's m.direct via double puppeting (best-effort:
+// failures only log; without double puppeting the user can still mark the room direct manually).
+func ensureDirectChat(ctx context.Context, x *callsExt, ul *bridgev2.UserLogin, roomID id.RoomID, ghost id.UserID) {
+	if ul == nil || ul.User == nil {
+		return
+	}
+	dp := ul.User.DoublePuppet(ctx)
+	if dp == nil {
+		return
+	}
+	m, ok := dp.(dmMarker)
+	if !ok {
+		return
+	}
+	if err := m.MarkAsDM(ctx, roomID, ghost); err != nil {
+		x.logFor(ctx).Warn().Err(err).Stringer("room_id", roomID).Msg("Failed to mark the call room as a direct chat")
+	}
 }
 
 // SendCallNotice posts a notice in the room as the ghost.

@@ -12,6 +12,7 @@ import (
 	"context"
 	"encoding/xml"
 	"errors"
+	"strings"
 	"sync"
 
 	"maunium.net/go/mautrix/bridgev2"
@@ -189,11 +190,21 @@ func (x *callsExt) jingleDial(ref core.LoginRef, req leg.DialRequest) (leg.Outbo
 	return ua.Dial(req)
 }
 
-// jingleICEServers merges the configured jingle ice_servers with the shared stun_server.
+// jingleICEServers merges the configured jingle ice_servers with the shared stun_server into
+// ICE URLs. hostkit's stun_server is documented as "host:port" (SIP style) while pion needs a
+// scheme — a bare host:port made NewPeerConnection fail with "unknown scheme type" and every
+// outbound call die with "the provider did not respond".
 func jingleICEServers(cfg CallsConfig) []string {
-	servers := append([]string(nil), cfg.ICEServers...)
-	if cfg.STUNServer != "" {
-		servers = append(servers, cfg.STUNServer)
+	var servers []string
+	for _, s := range append(append([]string(nil), cfg.ICEServers...), cfg.STUNServer) {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			continue
+		}
+		if !strings.HasPrefix(s, "stun:") && !strings.HasPrefix(s, "turn:") && !strings.HasPrefix(s, "turns:") {
+			s = "stun:" + s
+		}
+		servers = append(servers, s)
 	}
 	return servers
 }
