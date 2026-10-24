@@ -66,6 +66,9 @@ type callsExt struct {
 	stopped bool
 	// teardown tracks the asynchronous account shutdowns started by loginStopped.
 	teardown sync.WaitGroup
+	// jingle holds the per-login Jingle call legs (calls.transport: jingle, ADR-014); always
+	// non-nil after init, empty when unused.
+	jingle jingleRuntime
 
 	// Test seams (nil = real implementation).
 	newRuntime   func(ctx context.Context, cfg sipaccount.NetConfig, log zerolog.Logger) (*sipaccount.Runtime, error)
@@ -308,8 +311,12 @@ func (x *callsExt) loginNumber(ref core.LoginRef) string {
 	return ""
 }
 
-// dial places an outbound call on the login's SIP account.
+// dial places an outbound call on the login's call leg (SIP account, or Jingle when
+// calls.transport is jingle).
 func (x *callsExt) dial(ref core.LoginRef, req sipua.DialRequest) (sipua.OutboundCall, error) {
+	if x.cfg.Transport == callsTransportJingle {
+		return x.jingleDial(ref, req)
+	}
 	a := x.account(networkid.UserLoginID(ref))
 	if a == nil {
 		return nil, sipua.ErrNotRegistered

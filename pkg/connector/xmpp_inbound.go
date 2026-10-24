@@ -563,6 +563,7 @@ func (x *xmppClient) serveMessages() {
 		mux.MessageFunc(chatType, bodyPayload, x.handleIncomingMessage),
 		mux.MessageFunc(groupchatType, bodyPayload, x.handleIncomingGroupchat),
 		mux.IQ(stanza.ResultIQ, mamFinPayload, mamFinHandler{x: x}),
+		mux.IQ(stanza.SetIQ, jingleIQPayloadName, jingleIQHandler{x: x}),
 	)
 	wrapper := &messageLoggingHandler{inner: m, log: &x.log, x: x}
 	serveStart := time.Now()

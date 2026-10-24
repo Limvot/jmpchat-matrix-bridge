@@ -137,3 +137,5 @@ require (
 	maunium.net/go/mauflag v1.0.0 // indirect
 	mellium.im/reader v0.1.0 // indirect
 )
+
+replace github.com/williamkray/mrtc-sip-bridge => ../mrtc-sip-bridge

@@ -144,6 +144,12 @@ func (x *xmppClient) handleJingleMessageInitiation(ctx context.Context, jmi jing
 	if x.login == nil || jmi.sid == "" {
 		return
 	}
+	// A compiled-in call extension (e.g. the Jingle call leg) may consume the action itself.
+	if x.conn != nil {
+		if e := x.conn.extension(); e != nil && e.feedCallJMI(ctx, x, fromBare, fromSelf, &jmi) {
+			return
+		}
+	}
 	if !fromSelf && x.conn != nil {
 		if e := x.conn.extension(); e != nil && e.suppressCallNotice(x.loginID, fromBare) {
 			return
