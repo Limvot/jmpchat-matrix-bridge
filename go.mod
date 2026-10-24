@@ -137,3 +137,5 @@ require (
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect
 	mellium.im/reader v0.1.0 // indirect
 )
+
+replace github.com/williamkray/mrtc-sip-bridge => ../mrtc-sip-bridge

@@ -17,9 +17,15 @@ import (
 // CallsConfig is the `network.calls` section: the runtime switch plus exactly the standalone
 // mrtc-sip-bridge `network:` keys (same names, defaults and validation).
 type CallsConfig struct {
-	Enabled        bool `yaml:"enabled"`
+	Enabled bool `yaml:"enabled"`
+	// Transport selects the call leg: "" or "sip" (default, the JMP SIP account) or "jingle"
+	// (native XMPP calling on the login's own session; no SIP credentials needed, ADR-014).
+	Transport      string `yaml:"transport"`
 	hostkit.Config `yaml:",inline"`
 }
+
+// callsTransportJingle selects the Jingle call leg in CallsConfig.Transport.
+const callsTransportJingle = "jingle"
 
 // networkCallsSection is the part of the `network:` node the calls extension decodes.
 type networkCallsSection struct {
@@ -36,7 +42,7 @@ var errCallsNeedCheogram = errors.New("network.calls.enabled requires network.ch
 // example indented by 4 spaces (comments included).
 func callsExampleConfig() string {
 	var b strings.Builder
-	b.WriteString("# SIP calls for Cheogram numbers. Requires cheogram: true.\ncalls:\n    enabled: false\n")
+	b.WriteString("# Calls for Cheogram numbers (transport: sip = JMP SIP account, jingle = native XMPP calls).\n# Requires cheogram: true.\ncalls:\n    enabled: false\n    transport: sip\n")
 	for _, l := range strings.SplitAfter(hostkit.ExampleYAML, "\n") {
 		if l == "" {
 			continue
@@ -56,7 +62,17 @@ func (x *callsExt) exampleConfig() string { return callsExampleConfig() }
 // copied would be reset to the example value on every start).
 func (x *callsExt) upgradeConfig(h configupgrade.Helper) {
 	h.Copy(configupgrade.Bool, "calls", "enabled")
+	h.Copy(configupgrade.Str, "calls", "transport")
 	hostkit.CopyKeys(h, "calls")
+}
+
+// validateCallsTransport rejects unknown transport values (empty = sip).
+func validateCallsTransport(s string) error {
+	switch s {
+	case "", "sip", callsTransportJingle:
+		return nil
+	}
+	return errors.New("network.calls.transport must be 'sip' or 'jingle'")
 }
 
 // decodeCallsConfig decodes `calls` from the network node. A missing node or section means disabled.
@@ -75,6 +91,9 @@ func decodeCallsConfig(network *yaml.Node) (CallsConfig, error) {
 // configs): shared validation with the network.calls. prefix, then the Cheogram requirement.
 func validateCallsConfig(cfg *CallsConfig, cheogram bool) error {
 	cfg.ApplyDefaults()
+	if err := validateCallsTransport(cfg.Transport); err != nil {
+		return err
+	}
 	if err := cfg.Validate(callsConfigPrefix); err != nil {
 		return err
 	}

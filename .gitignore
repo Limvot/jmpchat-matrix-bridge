@@ -20,3 +20,4 @@ logs/
 vendor
 .plans/
 .claude/worktrees/
+result

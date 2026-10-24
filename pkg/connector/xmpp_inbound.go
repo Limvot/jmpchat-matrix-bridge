@@ -753,6 +753,8 @@ func (x *xmppClient) newServeHandler() xmpp.Handler {
 		mux.IQ(stanza.GetIQ, xml.Name{Space: "http://jabber.org/protocol/disco#info", Local: "query"}, capsDiscoHandler{x: x}),
 		// PEP notifications are body-less headline messages (XEP-0402 bookmarks via +notify).
 		mux.MessageFunc(stanza.HeadlineMessage, xml.Name{Space: pubsubEventNS, Local: "event"}, x.handlePubSubEvent),
+		// XEP-0166 Jingle session IQs, forwarded to the call extension (jingle_calls.go).
+		mux.IQ(stanza.SetIQ, jingleIQPayloadName, jingleIQHandler{x: x}),
 	)
 	return &messageLoggingHandler{inner: m, log: &x.log, x: x}
 }

@@ -72,6 +72,13 @@ func (x *callsExt) loginLoaded(ul *bridgev2.UserLogin, client *xmppClient) {
 	if !x.enabled || ul == nil {
 		return
 	}
+	// Jingle transport: no SIP credentials; the leg rides the login's own XMPP session.
+	if x.cfg.Transport == callsTransportJingle {
+		if err := x.startJingleFor(ul, client); err != nil {
+			x.log.Warn().Err(err).Str("login", string(ul.ID)).Msg("Jingle call leg not started")
+		}
+		return
+	}
 	meta := loginMeta(ul)
 	x.mu.Lock()
 	lc := x.accounts[ul.ID]
@@ -126,6 +133,10 @@ func (x *callsExt) loginLoaded(ul *bridgev2.UserLogin, client *xmppClient) {
 // bridge stop, client replacement, logout). An old client of a replaced login is ignored.
 func (x *callsExt) loginStopped(client *xmppClient) {
 	if !x.enabled || client == nil {
+		return
+	}
+	if x.cfg.Transport == callsTransportJingle {
+		x.stopJingleFor(client.loginID)
 		return
 	}
 	x.mu.Lock()
