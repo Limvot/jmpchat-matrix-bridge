@@ -24,8 +24,17 @@ type CallsConfig struct {
 	// ICEServers are STUN/TURN URLs for the jingle transport's WebRTC engine (ignored for
 	// sip). The media port range and external IP are the shared rtp_port_min/max and
 	// external_ip keys above.
-	ICEServers   []string `yaml:"ice_servers"`
-	hostkit.Config `yaml:",inline"`
+	ICEServers []string `yaml:"ice_servers"`
+	// BotLeavesPortals (default true) makes the bridge bot and the login's own-account ghost
+	// leave 1:1 number portals so Element X's outbound-call pickup detection finds the number's
+	// ghost as the ring recipient (ADR-010; Element Call does not respect functional_members).
+	BotLeavesPortals *bool `yaml:"bot_leaves_portals"`
+	hostkit.Config   `yaml:",inline"`
+}
+
+// BotLeavesPortalsEnabled reports whether the pickup trim is active (nil = true).
+func (c *CallsConfig) BotLeavesPortalsEnabled() bool {
+	return c.BotLeavesPortals == nil || *c.BotLeavesPortals
 }
 
 // callsTransportJingle selects the Jingle call leg in CallsConfig.Transport.
@@ -46,7 +55,7 @@ var errCallsNeedCheogram = errors.New("network.calls.enabled requires network.ch
 // example indented by 4 spaces (comments included).
 func callsExampleConfig() string {
 	var b strings.Builder
-	b.WriteString("# Calls for Cheogram numbers (transport: sip = JMP SIP account, jingle = native XMPP calls).\n# Requires cheogram: true. For transport: jingle the WebRTC media path reuses rtp_port_min/max\n# and external_ip; ice_servers adds STUN/TURN.\ncalls:\n    enabled: false\n    transport: sip\n    ice_servers: []\n")
+	b.WriteString("# Calls for Cheogram numbers (transport: sip = JMP SIP account, jingle = native XMPP calls).\n# Requires cheogram: true. For transport: jingle the WebRTC media path reuses rtp_port_min/max\n# and external_ip; ice_servers adds STUN/TURN.\ncalls:\n    enabled: false\n    transport: sip\n    ice_servers: []\n    # Make the bridge bot and your own-account puppet leave 1:1 number rooms (the number's ghost\n    # manages them). Needed for calls you start in Element X: with extra members in the room,\n    # Element X keeps \"ringing\" client-side and gives up after 30 s.\n    bot_leaves_portals: true\n")
 	for _, l := range strings.SplitAfter(hostkit.ExampleYAML, "\n") {
 		if l == "" {
 			continue
@@ -68,6 +77,7 @@ func (x *callsExt) upgradeConfig(h configupgrade.Helper) {
 	h.Copy(configupgrade.Bool, "calls", "enabled")
 	h.Copy(configupgrade.Str, "calls", "transport")
 	h.Copy(configupgrade.List, "calls", "ice_servers")
+	h.Copy(configupgrade.Bool, "calls", "bot_leaves_portals")
 	hostkit.CopyKeys(h, "calls")
 }
 

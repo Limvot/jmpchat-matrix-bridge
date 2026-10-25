@@ -5,6 +5,8 @@ package connector
 import (
 	"context"
 	"errors"
+	"maunium.net/go/mautrix/bridgev2/networkid"
+	"maunium.net/go/mautrix/id"
 	"reflect"
 	"strings"
 	"testing"
@@ -39,6 +41,7 @@ func testCallsExt(t *testing.T, cheogram bool) (*callsExt, *JabberConnector) {
 	if !ok {
 		t.Fatal("calls extension not registered")
 	}
+	e.pickupTrim = func(context.Context, networkid.UserLoginID, string, id.RoomID) {} // pickup trim needs a full bridge
 	e.init(br)
 	c.br = br
 	return e, c

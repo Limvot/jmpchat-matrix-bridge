@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/rs/zerolog"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -111,6 +112,7 @@ func (h *jabberCallHost) roomFor(ctx context.Context, ul *bridgev2.UserLogin, po
 		h.x.logFor(ctx).Warn().Err(err).Stringer("room_id", portal.MXID).Msg("Failed to ensure the ghost is joined")
 	}
 	ensureDirectChat(ctx, h.x, ul, portal.MXID, ghost.Intent.GetMXID())
+	h.x.pickupEnsure(ctx, ul.ID, e164, portal.MXID)
 	gi, err := hostkit.NewGhostIntent(ghost)
 	if err != nil {
 		return nil, err
@@ -143,6 +145,76 @@ func (h *jabberCallHost) LookupCallRoom(ctx context.Context, ref core.LoginRef, 
 		return nil, err
 	}
 	return h.roomFor(ctx, ul, portal, e164)
+}
+
+// roomLeaver is the LeaveRoom method of concrete Matrix intents (bridgev2.MatrixAPI does not
+// expose it).
+type roomLeaver interface {
+	LeaveRoom(ctx context.Context, roomID id.RoomID, extra ...any) error
+}
+
+// pickupEnsure runs the pickup trim unless a test seam is installed.
+func (x *callsExt) pickupEnsure(ctx context.Context, loginID networkid.UserLoginID, e164 string, roomID id.RoomID) {
+	if x.pickupTrim != nil {
+		x.pickupTrim(ctx, loginID, e164, roomID)
+		return
+	}
+	x.ensurePickupRoom(ctx, loginID, e164, roomID)
+}
+
+// ensurePickupRoom trims a 1:1 number portal to [owner, ghost] for Element X's outbound-call
+// pickup detection (ADR-010): Element Call picks the ring recipient as
+// roomMemberUserIds.find(id => id != localUser) and does NOT respect io.element.functional_members
+// (their own TODO), so any extra member (the bot, the login's own-account puppet) becomes the
+// "recipient" and outbound calls ring client-side forever. The ghost is raised to PL 50 first so
+// it manages the room after the bot leaves. Best-effort.
+func (x *callsExt) ensurePickupRoom(ctx context.Context, loginID networkid.UserLoginID, e164 string, roomID id.RoomID) {
+	if !x.cfg.BotLeavesPortalsEnabled() {
+		return
+	}
+	ghost, err := x.br.GetGhostByID(ctx, networkid.UserID(cheogramJID(e164)))
+	if err != nil || ghost == nil {
+		return
+	}
+	ghostMXID := ghost.Intent.GetMXID()
+	x.ensureGhostPL(ctx, roomID, ghost)
+	// The login's own-account ghost (the user's XMPP self) must not sit in the portal.
+	if self, err := x.br.GetGhostByID(ctx, networkid.UserID(string(loginID))); err == nil && self != nil && self.Intent.GetMXID() != ghostMXID {
+		leaveCallRoom(ctx, self.Intent, roomID, x.logFor(ctx))
+	}
+	// The bot leaves last: the ghost owns the room afterwards (ADR-010 trade-offs apply).
+	leaveCallRoom(ctx, x.br.Bot, roomID, x.logFor(ctx))
+}
+
+// ensureGhostPL raises the ghost to PL 50 as the bot, so the ghost can manage the room (redact
+// dtmf commands, re-invite) once the bot has left.
+func (x *callsExt) ensureGhostPL(ctx context.Context, roomID id.RoomID, ghost *bridgev2.Ghost) {
+	pl, err := x.br.Matrix.GetPowerLevels(ctx, roomID)
+	if err != nil {
+		return
+	}
+	ghostMXID := ghost.Intent.GetMXID()
+	if pl.Users[ghostMXID] >= 50 {
+		return
+	}
+	if pl.Users == nil {
+		pl.Users = make(map[id.UserID]int)
+	}
+	pl.Users[ghostMXID] = 50
+	if _, err = x.br.Bot.SendState(ctx, roomID, event.StatePowerLevels, "", &event.Content{Parsed: pl}, time.Time{}); err != nil {
+		x.logFor(ctx).Warn().Err(err).Stringer("room_id", roomID).Msg("Failed to raise the ghost power level")
+	}
+}
+
+// leaveCallRoom is a best-effort room leave for the pickup trim.
+func leaveCallRoom(ctx context.Context, intent bridgev2.MatrixAPI, roomID id.RoomID, log *zerolog.Logger) {
+	l, ok := intent.(roomLeaver)
+	if !ok {
+		return
+	}
+	if err := l.LeaveRoom(ctx, roomID); err != nil {
+		log.Warn().Err(err).Stringer("room_id", roomID).Msg("Failed to leave the call room (pickup trim)")
+	}
 }
 
 // dmMarker is the part of the double-puppet intent that maintains m.direct
@@ -284,10 +356,12 @@ func (x *callsExt) runPLSweep(ctx context.Context, loginID networkid.UserLoginID
 		if ctx.Err() != nil {
 			return checked, updated, failed, ctx.Err()
 		}
-		if _, ok := isCallPortal(p, loginID); !ok || p.MXID == "" {
+		e164, ok := isCallPortal(p, loginID)
+		if !ok || p.MXID == "" {
 			continue
 		}
 		checked++
+		x.pickupEnsure(ctx, loginID, e164, p.MXID)
 		changed, perr := x.ensureCallPL(ctx, p.MXID)
 		switch {
 		case perr != nil:

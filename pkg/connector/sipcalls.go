@@ -78,6 +78,8 @@ type callsExt struct {
 	notifyFn     func(ctx context.Context, roomID id.RoomID, text string) error
 	listPortals  func(ctx context.Context) ([]*bridgev2.Portal, error)
 	ensurePL     func(ctx context.Context, roomID id.RoomID) (bool, error)
+	// pickupTrim is a test seam (nil = real ensurePickupRoom).
+	pickupTrim func(ctx context.Context, loginID networkid.UserLoginID, e164 string, roomID id.RoomID)
 	// Widget features (sipcalls_widgetfeatures.go).
 	openChatRoom func(ctx context.Context, ref core.LoginRef, e164 string) (*core.CallRoom, error) // nil = callHost().ResolveCallRoom
 	setRoster    func(ctx context.Context, xc *xmppClient, jid, name string) error                 // nil = xc.SetRosterItem
