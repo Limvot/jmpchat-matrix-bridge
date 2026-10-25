@@ -16,6 +16,10 @@ import (
 // jingleIQPayloadName is the payload of Jingle session IQs.
 var jingleIQPayloadName = xml.Name{Space: "urn:xmpp:jingle:1", Local: "jingle"}
 
+// jingleIQErrorPayloadName is the payload of stanza-error IQ answers (RFC 6120 §8.3.2), which
+// gateways use to reject session stanzas; without routing them the rejection is invisible.
+var jingleIQErrorPayloadName = xml.Name{Space: "jabber:client", Local: "error"}
+
 // jingleIQHandler consumes one <jingle/> IQ payload and hands it to the extension.
 type jingleIQHandler struct{ x *xmppClient }
 

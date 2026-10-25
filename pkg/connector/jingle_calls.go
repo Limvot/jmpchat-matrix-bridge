@@ -56,6 +56,7 @@ func (t jingleTransport) SendIQ(ctx context.Context, to, iqType, id string, payl
 	case "error":
 		typ = stanza.ErrorIQ
 	}
+	t.cl.log.Debug().Str("dir", "out").Str("to", to).Str("payload", string(payload)).Msg("Jingle stanza")
 	iq := stanza.IQ{ID: id, Type: typ, To: toJID}
 	return sess.Send(ctx, iq.Wrap(xml.NewDecoder(bytes.NewReader(payload))))
 }
@@ -69,6 +70,7 @@ func (t jingleTransport) SendMessage(ctx context.Context, to, msgType, id string
 	if err != nil {
 		return err
 	}
+	t.cl.log.Debug().Str("dir", "out").Str("to", to).Str("payload", string(payload)).Msg("Jingle stanza")
 	msg := stanza.Message{ID: id, Type: stanza.ChatMessage, To: toJID}
 	return sess.Send(ctx, msg.Wrap(xml.NewDecoder(bytes.NewReader(payload))))
 }
@@ -76,7 +78,7 @@ func (t jingleTransport) SendMessage(ctx context.Context, to, msgType, id string
 // --- extension hooks (connectorExtension) ---
 
 // feedCallJMI routes a parsed XEP-0353 JMI action to the login's Jingle leg.
-func (x *callsExt) feedCallJMI(ctx context.Context, cl *xmppClient, fromBare string, fromSelf bool, jmi *jingleMessageInfo) bool {
+func (x *callsExt) feedCallJMI(ctx context.Context, cl *xmppClient, from string, fromSelf bool, jmi *jingleMessageInfo) bool {
 	if cl == nil || jmi == nil || x.cfg.Transport != callsTransportJingle {
 		return false
 	}
@@ -88,7 +90,7 @@ func (x *callsExt) feedCallJMI(ctx context.Context, cl *xmppClient, fromBare str
 	if jmi.action == jingleleg.JMIPropose && jmi.media != "" {
 		j.Descriptions = []jingleleg.Description{{Media: jmi.media}}
 	}
-	return ua.HandleJMI(ctx, fromBare, fromSelf, j)
+	return ua.HandleJMI(ctx, from, fromSelf, j)
 }
 
 // feedCallIQ routes a raw <jingle/> IQ payload to the login's Jingle leg.

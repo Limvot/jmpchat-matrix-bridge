@@ -140,13 +140,13 @@ func (x *xmppClient) markCallAnswered(sid string) {
 // handleJingleMessageInitiation turns a parsed JMI action into a Matrix notice.
 // fromBare is the bare JID the stanza came from; fromSelf is true when it originated
 // from one of our own resources (e.g. an <accept> we sent from another client).
-func (x *xmppClient) handleJingleMessageInitiation(ctx context.Context, jmi jingleMessageInfo, fromBare string, fromSelf bool) {
+func (x *xmppClient) handleJingleMessageInitiation(ctx context.Context, jmi jingleMessageInfo, fromBare string, fromSelf bool, fromFull string) {
 	if x.login == nil || jmi.sid == "" {
 		return
 	}
 	// A compiled-in call extension (e.g. the Jingle call leg) may consume the action itself.
 	if x.conn != nil {
-		if e := x.conn.extension(); e != nil && e.feedCallJMI(ctx, x, fromBare, fromSelf, &jmi) {
+		if e := x.conn.extension(); e != nil && e.feedCallJMI(ctx, x, fromFull, fromSelf, &jmi) {
 			return
 		}
 	}

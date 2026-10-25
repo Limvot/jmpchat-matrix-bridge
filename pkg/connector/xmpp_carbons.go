@@ -161,7 +161,7 @@ func (x *xmppClient) handleCarbonSent(t xmlstream.TokenReadEncoder, outer *xml.S
 		if span.IsRecording() {
 			span.SetAttributes(attribute.String("xmpp.jingle.action", jmi.action))
 		}
-		x.handleJingleMessageInitiation(ctx, *jmi, bareJID(from), true)
+		x.handleJingleMessageInitiation(ctx, *jmi, bareJID(from), true, from)
 		return nil
 	}
 	_ = from
@@ -264,7 +264,7 @@ func (x *xmppClient) handleCarbonReceived(t xmlstream.TokenReadEncoder, outer *x
 		if span.IsRecording() {
 			span.SetAttributes(attribute.String("xmpp.jingle.action", jmi.action))
 		}
-		x.handleJingleMessageInitiation(ctx, *jmi, bareJID(from), bareJID(from) == bareJID(string(x.loginID)))
+		x.handleJingleMessageInitiation(ctx, *jmi, bareJID(from), bareJID(from) == bareJID(string(x.loginID)), from)
 		return nil
 	}
 	fromBare := from

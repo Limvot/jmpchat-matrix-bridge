@@ -365,7 +365,7 @@ func (x *xmppClient) handleMessageWithOOB(t xmlstream.TokenReadEncoder, start *x
 		if span.IsRecording() {
 			span.SetAttributes(attribute.String("xmpp.jingle.action", jmi.action))
 		}
-		x.handleJingleMessageInitiation(ctx, *jmi, fromBare, bareJID(from) == bareJID(string(x.loginID)))
+		x.handleJingleMessageInitiation(ctx, *jmi, fromBare, bareJID(from) == bareJID(string(x.loginID)), from)
 		return nil
 	}
 	// XEP-0308 correction: bridged as an edit of the original, never as a new message (a correction
@@ -755,6 +755,9 @@ func (x *xmppClient) newServeHandler() xmpp.Handler {
 		mux.MessageFunc(stanza.HeadlineMessage, xml.Name{Space: pubsubEventNS, Local: "event"}, x.handlePubSubEvent),
 		// XEP-0166 Jingle session IQs, forwarded to the call extension (jingle_calls.go).
 		mux.IQ(stanza.SetIQ, jingleIQPayloadName, jingleIQHandler{x: x}),
+		// Stanza-error answers to our session stanzas (gateways reject with these).
+		mux.IQ(stanza.ErrorIQ, jingleIQPayloadName, jingleIQHandler{x: x}),
+		mux.IQ(stanza.ErrorIQ, jingleIQErrorPayloadName, jingleIQHandler{x: x}),
 	)
 	return &messageLoggingHandler{inner: m, log: &x.log, x: x}
 }

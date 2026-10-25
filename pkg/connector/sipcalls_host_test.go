@@ -257,27 +257,27 @@ func TestJMISuppressionThroughHandler(t *testing.T) {
 	}
 
 	// No SIP account: Cheogram JMI still produce notices.
-	xc.handleJingleMessageInitiation(ctx, propose("a1"), "+15551234567@cheogram.com", false)
+	xc.handleJingleMessageInitiation(ctx, propose("a1"), "+15551234567@cheogram.com", false, "+15551234567@cheogram.com")
 	if !strings.Contains(logs.String(), queued) || xc.getCallSession("a1") == nil {
 		t.Fatalf("propose without account not queued: %s", logs.String())
 	}
 
 	attachFakeAccount(x, xc.loginID)
 	before := strings.Count(logs.String(), queued)
-	xc.handleJingleMessageInitiation(ctx, propose("b1"), "+15551234567@cheogram.com", false)
-	xc.handleJingleMessageInitiation(ctx, jingleMessageInfo{action: "retract", sid: "b1"}, "+15551234567@cheogram.com", false)
-	xc.handleJingleMessageInitiation(ctx, jingleMessageInfo{action: "finish", sid: "b2"}, "+15551234567@cheogram.com", false)
+	xc.handleJingleMessageInitiation(ctx, propose("b1"), "+15551234567@cheogram.com", false, "+15551234567@cheogram.com")
+	xc.handleJingleMessageInitiation(ctx, jingleMessageInfo{action: "retract", sid: "b1"}, "+15551234567@cheogram.com", false, "+15551234567@cheogram.com")
+	xc.handleJingleMessageInitiation(ctx, jingleMessageInfo{action: "finish", sid: "b2"}, "+15551234567@cheogram.com", false, "+15551234567@cheogram.com")
 	if n := strings.Count(logs.String(), queued); n != before || xc.getCallSession("b1") != nil {
 		t.Fatalf("suppressed JMI queued notices (%d -> %d)", before, n)
 	}
 
 	// Real XMPP callers and group MMS JIDs are not suppressed.
-	xc.handleJingleMessageInitiation(ctx, propose("c1"), "alice@example.com", false)
-	xc.handleJingleMessageInitiation(ctx, jingleMessageInfo{action: "retract", sid: "c1"}, "alice@example.com", false)
+	xc.handleJingleMessageInitiation(ctx, propose("c1"), "alice@example.com", false, "alice@example.com")
+	xc.handleJingleMessageInitiation(ctx, jingleMessageInfo{action: "retract", sid: "c1"}, "alice@example.com", false, "alice@example.com")
 	if n := strings.Count(logs.String(), queued); n != before+2 {
 		t.Fatalf("plain JID JMI: %d notices, want %d", n-before, 2)
 	}
-	xc.handleJingleMessageInitiation(ctx, propose("d1"), "+15551234567,+15557654321@cheogram.com", false)
+	xc.handleJingleMessageInitiation(ctx, propose("d1"), "+15551234567,+15557654321@cheogram.com", false, "+15551234567,+15557654321@cheogram.com")
 	if n := strings.Count(logs.String(), queued); n != before+3 {
 		t.Fatal("group MMS JMI not queued")
 	}

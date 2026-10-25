@@ -25,8 +25,9 @@ type connectorExtension interface {
 	decorateChatInfo(portalID string, info *bridgev2.ChatInfo) // DM chat info (getChatInfo DM paths, dmCreateChatResponse)
 	suppressCallNotice(loginID networkid.UserLoginID, peerBareJID string) bool
 	// feedCallJMI hands a parsed XEP-0353 JMI action to the extension (e.g. the Jingle call leg);
-	// true = consumed, no notices. feedCallIQ does the same for a raw <jingle/> IQ payload.
-	feedCallJMI(ctx context.Context, cl *xmppClient, fromBare string, fromSelf bool, jmi *jingleMessageInfo) bool
+	// true = consumed, no notices. from is the full sender JID (call gateways answer from call
+	// resources like /tel or /sip:...). feedCallIQ does the same for a raw <jingle/> IQ payload.
+	feedCallJMI(ctx context.Context, cl *xmppClient, from string, fromSelf bool, jmi *jingleMessageInfo) bool
 	feedCallIQ(ctx context.Context, cl *xmppClient, from, iqID string, payload []byte) bool
 	startAttrs() []attribute.KeyValue // extra bridge.start attributes
 }
