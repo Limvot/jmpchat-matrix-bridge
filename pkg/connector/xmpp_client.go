@@ -1280,7 +1280,13 @@ func (x *xmppClient) getMUCChatInfo(ctx context.Context, portal *bridgev2.Portal
 	name = fmt.Sprintf("%s (%s)", name, roomJID)
 	topic := fmt.Sprintf("Jabber MUC — %s", roomJID)
 	// Override with disco room metadata when available.
-	if metaName, metaTopic := x.getMUCRoomMetadata(ctx, roomJID); metaName != "" || metaTopic != "" {
+	metaName, metaTopic := x.getMUCRoomMetadata(ctx, roomJID)
+	if metaName == "" {
+		// No room name in disco#info: fall back to the name in the user's XMPP bookmark, which is
+		// what their XMPP client shows and is usually human-readable (and never a phone number).
+		metaName = x.bookmarkName(roomJID)
+	}
+	if metaName != "" || metaTopic != "" {
 		if metaName != "" {
 			name = metaName
 			// Keep JID in parentheses so room list still shows address.
@@ -1294,6 +1300,10 @@ func (x *xmppClient) getMUCChatInfo(ctx context.Context, portal *bridgev2.Portal
 	}
 	// Append login JID to room name to identify which bridged account it's associated with
 	name = fmt.Sprintf("%s (%s)", name, string(x.loginID))
+	// A name the user pinned with `setname` (or by renaming the Matrix room) wins over the XMPP side.
+	if override := roomNameOverride(portal); override != "" {
+		name = override
+	}
 	rt := database.RoomTypeGroupDM
 	meID := networkid.UserID(x.loginID)
 	// Minimal members: just the bridge user so they get invited. Full occupant list comes with join (3.2).
@@ -1358,6 +1368,10 @@ func (x *xmppClient) dmDisplayName(jidStr string) string {
 // For Cheogram group MMS JIDs (e.g. +1a,+1b,+1c@cheogram.com), returns one member per number so each gets a ghost with roster display name.
 func (x *xmppClient) getDMChatInfo(ctx context.Context, portal *bridgev2.Portal, bareJID string) (*bridgev2.ChatInfo, error) {
 	name := x.dmDisplayName(bareJID)
+	// A name the user pinned with `setname` (or by renaming the Matrix room) wins over the XMPP side.
+	if override := roomNameOverride(portal); override != "" {
+		name = override
+	}
 	rt := database.RoomTypeDM
 	meID := networkid.UserID(x.loginID)
 	memberMap := bridgev2.ChatMemberMap{

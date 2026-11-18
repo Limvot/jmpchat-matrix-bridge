@@ -18,6 +18,10 @@ type PortalMetadata struct {
 	// MUCLeft is set by an explicit `leave` and cleared by the next join; a left room is not
 	// re-joined automatically on connect (muc_autorejoin.go).
 	MUCLeft bool `json:"muc_left,omitempty"`
+	// CustomName is the Matrix room name the user pinned (`setname`, or renaming the room in Matrix).
+	// When set, getChatInfo returns it instead of the name derived from the XMPP side, so roster syncs
+	// and ChatResyncs never overwrite it. Empty = follow the XMPP side (room_name.go).
+	CustomName string `json:"custom_name,omitempty"`
 }
 
 // GhostMetadata stores ghost user metadata for profile refresh tracking.

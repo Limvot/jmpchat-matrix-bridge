@@ -191,6 +191,12 @@ func main() {
 			RequiresLogin: true,
 			Help:          commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Set default MUC nickname for all rooms. Usage: `%s muc-nick-default [_login JID_] <nick>`", prefix)},
 		})
+		br.Bridge.Commands.(*commands.Processor).AddHandler(&commands.FullHandler{
+			Func:          withSpan("setname", connector.SetRoomNameCommand),
+			Name:          "setname",
+			RequiresLogin: true,
+			Help:          commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Set this room's Matrix name (`reset` follows the name from the XMPP side again). The bridge never overwrites a pinned name. Usage: `%s setname <new name>` or `%s setname reset`", prefix, prefix)},
+		})
 	}
 	br.PostStart = func() {
 		attrs := []attribute.KeyValue{

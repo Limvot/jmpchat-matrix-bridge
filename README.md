@@ -549,6 +549,12 @@ Roster-only calls uses the bridge's Jabber roster as the list of known numbers (
 
 **Known limits**: Element X cannot pick up outbound calls started from Matrix due to an [Element Call notification bug](https://github.com/element-hq/element-call/blob/8be229a438dc363972bdae5f6198607998a851d8/src/state/CallViewModel/CallNotificationLifecycle.ts#L128); use Element Web/Desktop for those.
 
+## Room names
+
+A DM's Matrix room name is the contact's roster name (set by `add-to-roster`/`save-contact`, by another XMPP client or by the CardDAV import), falling back to the bare JID when the roster has no name; a group MMS room lists its participants' names the same way, and the bridged account stays in parentheses. A MUC's name comes from disco#info (`muc#roominfo_roomname`, else the `conference` identity name) and falls back to the room name in your XMPP bookmark (XEP-0048/0402), plus the room JID and account in parentheses.
+
+Inside a room, `!jabber setname <new name>` pins the Matrix name: the bridge stores it in the portal metadata and keeps returning it, so roster syncs, ChatResyncs and MUC re-joins stop overwriting it. `!jabber setname reset` drops the pin and goes back to the name from the XMPP side. Renaming the room in your Matrix client works the same way (the bridge records it instead of reverting it). This is the way to give a phone-number DM a human-readable name: the XMPP side only has a phone number to offer unless the contact has a roster name or a CardDAV entry.
+
 ## Multi-user chats (MUC)
 
 `!jabber join [<login-jid>] <room@service>` joins a MUC and creates its Matrix room (the optional login JID picks the account when you have several; see below). The room is always created as a group chat. Without the command (for example a room first seen through an inbound message), the bridge asks the server with disco#info, falling back to a name heuristic (`@conference.`, `@muc.`, `@groups.` for Snikket) when the server cannot be asked.

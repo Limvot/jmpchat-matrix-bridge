@@ -180,6 +180,12 @@ func (x *xmppClient) bookmarkNick(room string) string {
 	return c.Nick
 }
 
+// bookmarkName is the name the user gave the room in the XMPP bookmarks ("" when none). Memory only.
+func (x *xmppClient) bookmarkName(room string) string {
+	c, _, _ := x.bm.lookup(bookmarkKey(room))
+	return c.Name
+}
+
 // bookmarkPassword is the room password of the cached bookmark ("" when none). Never log it.
 func (x *xmppClient) bookmarkPassword(room string) string {
 	c, _, _ := x.bm.lookup(bookmarkKey(room))
