@@ -79,7 +79,7 @@ func TestApplyRoomNameReset(t *testing.T) {
 	noSavePortal(t)
 	x := &xmppClient{loginID: "me@example.com", conn: &JabberConnector{}}
 	p := testPortalWithName("+15550001111@cheogram.com", database.RoomTypeDM, "Grandma")
-	got, err := x.applyRoomName(context.Background(), p, "", false)
+	got, err := x.applyRoomName(context.Background(), p, "", nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,13 +123,13 @@ func TestSetRoomNameReplyRefusals(t *testing.T) {
 		{"no login", testRoomPortal(), []string{"Al"}, none, "You must be logged in. Use `!jc login` first."},
 		{"long name", testRoomPortal(), []string{strings.Repeat("é", maxRoomNameRunes+1)}, none, "That name is too long"},
 	} {
-		if got := setRoomNameReply(ctx, "!jc", c.portal, c.args, c.login); !strings.HasPrefix(got, c.want) {
+		if got := setRoomNameReply(ctx, "!jc", c.portal, c.args, c.login, nil); !strings.HasPrefix(got, c.want) {
 			t.Errorf("%s: %q, want prefix %q", c.name, got, c.want)
 		}
 	}
 	// A login that does not own the portal must not be able to rename it.
 	other := &bridgev2.UserLogin{UserLogin: &database.UserLogin{ID: "other@example.com"}, Client: &xmppClient{loginID: "other@example.com"}}
-	if got := setRoomNameReply(ctx, "!jc", testRoomPortal(), []string{"Al"}, func(*bridgev2.Portal) *bridgev2.UserLogin { return other }); !strings.HasPrefix(got, "You must be logged in") {
+	if got := setRoomNameReply(ctx, "!jc", testRoomPortal(), []string{"Al"}, func(*bridgev2.Portal) *bridgev2.UserLogin { return other }, nil); !strings.HasPrefix(got, "You must be logged in") {
 		t.Errorf("foreign login: %q", got)
 	}
 }

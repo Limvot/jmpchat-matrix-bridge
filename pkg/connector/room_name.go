@@ -19,6 +19,10 @@ import (
 // long names and a room name is a label, not a document.
 const maxRoomNameRunes = 255
 
+// errRoomNameNotSent means the override was stored but the m.room.name event was refused (the
+// bridge bot is not in the room and the user's double-puppet intent could not send it either).
+var errRoomNameNotSent = errors.New("the bridge could not send the m.room.name event")
+
 // savePortal persists the portal after a name change (a var for tests).
 var savePortal = func(ctx context.Context, portal *bridgev2.Portal) error { return portal.Save(ctx) }
 
@@ -49,10 +53,11 @@ func cleanRoomName(args []string) string {
 // applyRoomName sets the Matrix room name of portal to name and persists the override in the portal
 // metadata so the bridge's own resyncs (roster sync, ChatResync, MUC rejoin) stop overwriting it.
 // name == "" clears the override and reverts to the name the XMPP side gives the room.
-// send=true sends the m.room.name state event as the bridge bot (command path); send=false records a
-// name the user already set in Matrix (the bridgev2 RoomNameHandlingNetworkAPI path).
+// send=true sends the m.room.name state event through sender (nil = the bridge bot; bridgev2 retries
+// with the bot when sender is refused); send=false records a name the user already set in Matrix (the
+// bridgev2 RoomNameHandlingNetworkAPI path) without sending anything.
 // It returns the name now in effect.
-func (x *xmppClient) applyRoomName(ctx context.Context, portal *bridgev2.Portal, name string, send bool) (string, error) {
+func (x *xmppClient) applyRoomName(ctx context.Context, portal *bridgev2.Portal, name string, sender bridgev2.MatrixAPI, send bool) (string, error) {
 	if portal == nil || portal.Portal == nil {
 		return "", errors.New("no portal")
 	}
@@ -79,15 +84,22 @@ func (x *xmppClient) applyRoomName(ctx context.Context, portal *bridgev2.Portal,
 		meta.CustomName = name
 	}
 	if send && portal.MXID != "" {
-		portal.Internal().UpdateName(ctx, name, nil, time.Time{}, false)
+		// Try the caller's intent first (the user who ran the command is in the room; the bot may not be),
+		// and fall back to the bot when that intent cannot send (bridgev2 does not retry in this direction).
+		if !portal.Internal().UpdateName(ctx, name, sender, time.Time{}, false) && sender != nil {
+			portal.Internal().UpdateName(ctx, name, nil, time.Time{}, false)
+		}
 	} else {
 		portal.Name = name
 		portal.NameSet = true
 	}
 	if err := savePortal(ctx, portal); err != nil {
-		return "", err
+		return name, err
 	}
 	if send && portal.MXID != "" {
+		if !portal.NameSet {
+			return name, errRoomNameNotSent
+		}
 		portal.UpdateBridgeInfo(ctx)
 	}
 	return name, nil
@@ -102,7 +114,7 @@ func (x *xmppClient) HandleMatrixRoomName(ctx context.Context, msg *bridgev2.Mat
 	}
 	_, span := telemetry.Start(ctx, "matrix.handler.room_name")
 	defer span.End()
-	if _, err := x.applyRoomName(ctx, msg.Portal, cleanRoomName([]string{msg.Content.Name}), false); err != nil {
+	if _, err := x.applyRoomName(ctx, msg.Portal, cleanRoomName([]string{msg.Content.Name}), nil, false); err != nil {
 		telemetry.Fail(span, err)
 		return false, err
 	}
@@ -129,12 +141,28 @@ func SetRoomNameCommand(ce *commands.Event) {
 			return nil
 		}
 		return ul
+	}, func(ctx context.Context) bridgev2.MatrixAPI {
+		// Send as the user who ran the command: the bridge bot may not be in the room (it can leave one
+		// without the portal noticing), while the user is. bridgev2 falls back to the bot on M_FORBIDDEN.
+		if ce.User == nil {
+			return nil
+		}
+		return ce.User.DoublePuppet(ctx)
 	}))
 }
 
+// senderOf returns the intent doublePuppet builds (nil when there is none, i.e. the bot is used).
+func senderOf(ctx context.Context, doublePuppet func(context.Context) bridgev2.MatrixAPI) bridgev2.MatrixAPI {
+	if doublePuppet == nil {
+		return nil
+	}
+	return doublePuppet(ctx)
+}
+
 // setRoomNameReply runs `setname` for portal and returns the reply text. loginFor resolves the
-// portal's login (nil = none or not the sender's).
-func setRoomNameReply(ctx context.Context, prefix string, portal *bridgev2.Portal, args []string, loginFor func(*bridgev2.Portal) *bridgev2.UserLogin) string {
+// portal's login (nil = none or not the sender's); doublePuppet returns the intent used to send the
+// m.room.name event (nil = the bridge bot).
+func setRoomNameReply(ctx context.Context, prefix string, portal *bridgev2.Portal, args []string, loginFor func(*bridgev2.Portal) *bridgev2.UserLogin, doublePuppet func(context.Context) bridgev2.MatrixAPI) string {
 	if portal == nil || portal.Portal == nil || portal.Receiver == "" {
 		return fmt.Sprintf("Run `%s setname <new name>` inside a bridged room.", prefix)
 	}
@@ -163,7 +191,10 @@ func setRoomNameReply(ctx context.Context, prefix string, portal *bridgev2.Porta
 	if !x.IsLoggedIn() {
 		return "Not connected to Jabber. Reconnect (or wait for auto-reconnect) and try again."
 	}
-	got, err := x.applyRoomName(ctx, portal, name, true)
+	got, err := x.applyRoomName(ctx, portal, name, senderOf(ctx, doublePuppet), true)
+	if errors.Is(err, errRoomNameNotSent) {
+		return fmt.Sprintf("Saved the name **%s**, but Matrix refused the room name change (no permission, or the bridge is not in this room). It will be applied on the next room sync.", got)
+	}
 	if err != nil {
 		return fmt.Sprintf("Failed to set the room name: %v", err)
 	}
