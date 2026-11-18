@@ -19,6 +19,23 @@ import (
 // long names and a room name is a label, not a document.
 const maxRoomNameRunes = 255
 
+// ensureBotInRoom heals a portal whose room the bridge bot is no longer in (it can leave one while the
+// portal lives on): a bot outside the room cannot send its own state events or command replies, so the
+// user's intent invites it and the bot joins. Best-effort; errors are only logged.
+func (x *xmppClient) ensureBotInRoom(ctx context.Context, portal *bridgev2.Portal, sender bridgev2.MatrixAPI) {
+	if sender == nil || x.conn == nil || x.conn.br == nil || x.conn.br.Bot == nil || portal == nil || portal.MXID == "" {
+		return
+	}
+	botMXID := x.conn.br.Bot.GetMXID()
+	if err := sender.EnsureInvited(ctx, portal.MXID, botMXID); err != nil {
+		x.logFor(ctx).Debug().Err(err).Stringer("room_id", portal.MXID).Msg("Could not invite the bridge bot to the room")
+		return
+	}
+	if err := x.conn.br.Bot.EnsureJoined(ctx, portal.MXID); err != nil {
+		x.logFor(ctx).Debug().Err(err).Stringer("room_id", portal.MXID).Msg("Could not join the bridge bot to the room")
+	}
+}
+
 // errRoomNameNotSent means the override was stored but the m.room.name event was refused (the
 // bridge bot is not in the room and the user's double-puppet intent could not send it either).
 var errRoomNameNotSent = errors.New("the bridge could not send the m.room.name event")
@@ -84,6 +101,7 @@ func (x *xmppClient) applyRoomName(ctx context.Context, portal *bridgev2.Portal,
 		meta.CustomName = name
 	}
 	if send && portal.MXID != "" {
+		x.ensureBotInRoom(ctx, portal, sender)
 		// Try the caller's intent first (the user who ran the command is in the room; the bot may not be),
 		// and fall back to the bot when that intent cannot send (bridgev2 does not retry in this direction).
 		if !portal.Internal().UpdateName(ctx, name, sender, time.Time{}, false) && sender != nil {
