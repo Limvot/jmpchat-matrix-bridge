@@ -15,6 +15,7 @@ import (
 	"maunium.net/go/mautrix/bridgev2/matrix"
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/format"
+	"maunium.net/go/mautrix/id"
 
 	"github.com/williamkray/jmpchat-matrix-bridge/pkg/telemetry"
 )
@@ -57,9 +58,11 @@ func cleanRoomName(args []string) string {
 // applyRoomName sets the Matrix room name of portal to name and persists the override in the portal
 // metadata so the bridge's own resyncs (roster sync, ChatResync, MUC rejoin) stop overwriting it.
 // name == "" clears the override and reverts to the name the XMPP side gives the room.
-// send=true sends the m.room.name state event through sender (nil = the bridge bot; bridgev2 retries
-// with the bot when sender is refused); send=false records a name the user already set in Matrix (the
-// bridgev2 RoomNameHandlingNetworkAPI path) without sending anything.
+// send=true sends the m.room.name state event: first through sender (nil = the bridge bot), then through
+// the bot, which temporarily rejoins a room it was removed from to send it and leaves again afterwards
+// (a bot-free DM portal room is a normal thing: two members make Matrix clients offer a direct call).
+// send=false records a name the user already set in Matrix (the bridgev2 RoomNameHandlingNetworkAPI
+// path) without sending anything.
 // It returns the name now in effect.
 func (x *xmppClient) applyRoomName(ctx context.Context, portal *bridgev2.Portal, name string, sender bridgev2.MatrixAPI, send bool) (string, error) {
 	if portal == nil || portal.Portal == nil {
@@ -88,11 +91,7 @@ func (x *xmppClient) applyRoomName(ctx context.Context, portal *bridgev2.Portal,
 		meta.CustomName = name
 	}
 	if send && portal.MXID != "" {
-		// Try the caller's intent first (the user who ran the command is in the room; the bot may not be),
-		// and fall back to the bot when that intent cannot send (bridgev2 does not retry in this direction).
-		if !portal.Internal().UpdateName(ctx, name, sender, time.Time{}, false) && sender != nil {
-			portal.Internal().UpdateName(ctx, name, nil, time.Time{}, false)
-		}
+		x.sendRoomName(ctx, portal, name, sender)
 	} else {
 		portal.Name = name
 		portal.NameSet = true
@@ -104,9 +103,129 @@ func (x *xmppClient) applyRoomName(ctx context.Context, portal *bridgev2.Portal,
 		if !portal.NameSet {
 			return name, errRoomNameNotSent
 		}
-		portal.UpdateBridgeInfo(ctx)
+		if x.botInRoom(ctx, portal.MXID) {
+			portal.UpdateBridgeInfo(ctx) // the bot must be in the room to refresh m.bridge
+		}
 	}
 	return name, nil
+}
+
+// sendRoomName sends the m.room.name state event for portal. It tries the caller's intent first (a user
+// with enough power in the room), then the bridge bot. A bot that is not in the room is invited and joined
+// for the send and leaves again afterwards, so a portal whose bot was deliberately removed stays bot-free.
+func (x *xmppClient) sendRoomName(ctx context.Context, portal *bridgev2.Portal, name string, sender bridgev2.MatrixAPI) {
+	if portal.MXID == "" {
+		return
+	}
+	if sender != nil {
+		portal.Internal().UpdateName(ctx, name, sender, time.Time{}, false)
+		if portal.NameSet {
+			return
+		}
+	}
+	botInRoom := x.botInRoom(ctx, portal.MXID)
+	if !botInRoom {
+		x.botJoinTemporarily(ctx, portal.MXID, sender)
+	}
+	portal.Internal().UpdateName(ctx, name, nil, time.Time{}, false)
+	if !botInRoom {
+		x.botLeave(ctx, portal.MXID)
+	}
+}
+
+// botMXID returns the bridge bot's Matrix ID ("" when unavailable).
+func (x *xmppClient) botMXID() id.UserID {
+	if x.conn == nil || x.conn.br == nil || x.conn.br.Bot == nil {
+		return ""
+	}
+	return x.conn.br.Bot.GetMXID()
+}
+
+// botInRoom reports whether the bridge bot is currently joined to roomID (false when it cannot be checked).
+func (x *xmppClient) botInRoom(ctx context.Context, roomID id.RoomID) bool {
+	bot := x.botMXID()
+	mx, ok := x.conn.br.Matrix.(bridgev2.MatrixConnectorWithArbitraryRoomState)
+	if !ok || bot == "" || roomID == "" {
+		return false
+	}
+	evt, err := mx.GetStateEvent(ctx, roomID, event.StateMember, bot.String())
+	if err != nil || evt == nil {
+		return false
+	}
+	member := evt.Content.AsMember()
+	return member != nil && member.Membership == event.MembershipJoin
+}
+
+// botJoinTemporarily invites the bridge bot into roomID through sender and joins it. Best-effort: the
+// caller checks botInRoom before sending anything.
+func (x *xmppClient) botJoinTemporarily(ctx context.Context, roomID id.RoomID, sender bridgev2.MatrixAPI) {
+	bot := x.botMXID()
+	if bot == "" || roomID == "" {
+		return
+	}
+	if sender != nil {
+		if err := sender.EnsureInvited(ctx, roomID, bot); err != nil {
+			x.logFor(ctx).Debug().Err(err).Stringer("room_id", roomID).Msg("Could not invite the bridge bot")
+		}
+	}
+	if err := x.conn.br.Bot.EnsureJoined(ctx, roomID); err != nil {
+		x.logFor(ctx).Debug().Err(err).Stringer("room_id", roomID).Msg("Could not join the bridge bot")
+	}
+}
+
+// botLeave makes the bridge bot leave roomID (a user may remove it from a DM portal to keep the room a
+// two-member direct chat). A user always may leave a room, so no power level is needed. The appservice
+// intent updates its membership cache, so the next temporary join is not skipped as "already in room".
+func (x *xmppClient) botLeave(ctx context.Context, roomID id.RoomID) {
+	if roomID == "" || x.conn == nil || x.conn.br == nil {
+		return
+	}
+	if mc, ok := x.conn.br.Matrix.(*matrix.Connector); ok && mc.Bot != nil {
+		if _, err := mc.Bot.LeaveRoom(ctx, roomID); err != nil {
+			x.logFor(ctx).Debug().Err(err).Stringer("room_id", roomID).Msg("Could not make the bridge bot leave")
+		}
+		return
+	}
+	bot := x.botMXID()
+	if bot == "" {
+		return
+	}
+	_, err := x.conn.br.Bot.SendState(ctx, roomID, event.StateMember, bot.String(), &event.Content{
+		Parsed: &event.MemberEventContent{Membership: event.MembershipLeave},
+	}, time.Time{})
+	if err != nil {
+		x.logFor(ctx).Debug().Err(err).Stringer("room_id", roomID).Msg("Could not make the bridge bot leave")
+	}
+}
+
+// LeaveBotCommand is the handler of `leave-bot`: the bridge bot leaves the current portal room. Use it in a
+// DM portal whose room should stay a two-member direct chat (Matrix clients then offer a direct voice
+// call). The portal keeps working; the bridge temporarily rejoins the bot when it has to send state.
+func LeaveBotCommand(ce *commands.Event) {
+	prefix := "!jabber"
+	if ce.Bridge != nil && ce.Bridge.Config != nil && ce.Bridge.Config.CommandPrefix != "" {
+		prefix = ce.Bridge.Config.CommandPrefix
+	}
+	if ce.Portal == nil || ce.Portal.Portal == nil || ce.Portal.MXID == "" || ce.Portal.Receiver == "" {
+		ce.Reply("Run `%s leave-bot` inside a bridged room.", prefix)
+		return
+	}
+	login := ce.Bridge.GetCachedUserLoginByID(ce.Portal.Receiver)
+	if login == nil || ce.User == nil || login.UserMXID != ce.User.MXID {
+		ce.Reply("You are not logged in to this room's account. Use `%s login` first.", prefix)
+		return
+	}
+	x, _ := login.Client.(*xmppClient)
+	if x == nil {
+		ce.Reply("Log in to Jabber first.")
+		return
+	}
+	if !x.botInRoom(ce.Ctx, ce.Portal.MXID) {
+		ce.Reply("The bridge bot is already not in this room.")
+		return
+	}
+	ce.Reply("The bridge bot is leaving this room. It comes back only to send a state event (e.g. `setname`); the portal keeps working without it.")
+	x.botLeave(ce.Ctx, ce.Portal.MXID)
 }
 
 // HandleMatrixRoomName implements bridgev2.RoomNameHandlingNetworkAPI: a room name the user sets in

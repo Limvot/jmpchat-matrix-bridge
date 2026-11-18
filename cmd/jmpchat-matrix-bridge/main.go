@@ -197,6 +197,12 @@ func main() {
 			RequiresLogin: true,
 			Help:          commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Set this room's Matrix name (`reset` follows the name from the XMPP side again). The bridge never overwrites a pinned name. Usage: `%s setname <new name>` or `%s setname reset`", prefix, prefix)},
 		})
+		br.Bridge.Commands.(*commands.Processor).AddHandler(&commands.FullHandler{
+			Func:          withSpan("leave-bot", connector.LeaveBotCommand),
+			Name:          "leave-bot",
+			RequiresLogin: true,
+			Help:          commands.HelpMeta{Section: commands.HelpSectionChats, Description: fmt.Sprintf("Make the bridge bot leave this room. Use it in a DM portal room that should stay a two-member direct chat (Matrix clients then offer a direct voice call); the portal keeps working and the bot returns only to send a state event. Usage: `%s leave-bot`", prefix)},
+		})
 	}
 	br.PostStart = func() {
 		attrs := []attribute.KeyValue{
