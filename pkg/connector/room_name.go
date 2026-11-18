@@ -9,8 +9,12 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"maunium.net/go/mautrix/appservice"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/commands"
+	"maunium.net/go/mautrix/bridgev2/matrix"
+	"maunium.net/go/mautrix/event"
+	"maunium.net/go/mautrix/format"
 
 	"github.com/williamkray/jmpchat-matrix-bridge/pkg/telemetry"
 )
@@ -18,23 +22,6 @@ import (
 // maxRoomNameRunes bounds the name `setname` accepts. Matrix has no hard limit, but clients truncate
 // long names and a room name is a label, not a document.
 const maxRoomNameRunes = 255
-
-// ensureBotInRoom heals a portal whose room the bridge bot is no longer in (it can leave one while the
-// portal lives on): a bot outside the room cannot send its own state events or command replies, so the
-// user's intent invites it and the bot joins. Best-effort; errors are only logged.
-func (x *xmppClient) ensureBotInRoom(ctx context.Context, portal *bridgev2.Portal, sender bridgev2.MatrixAPI) {
-	if sender == nil || x.conn == nil || x.conn.br == nil || x.conn.br.Bot == nil || portal == nil || portal.MXID == "" {
-		return
-	}
-	botMXID := x.conn.br.Bot.GetMXID()
-	if err := sender.EnsureInvited(ctx, portal.MXID, botMXID); err != nil {
-		x.logFor(ctx).Debug().Err(err).Stringer("room_id", portal.MXID).Msg("Could not invite the bridge bot to the room")
-		return
-	}
-	if err := x.conn.br.Bot.EnsureJoined(ctx, portal.MXID); err != nil {
-		x.logFor(ctx).Debug().Err(err).Stringer("room_id", portal.MXID).Msg("Could not join the bridge bot to the room")
-	}
-}
 
 // errRoomNameNotSent means the override was stored but the m.room.name event was refused (the
 // bridge bot is not in the room and the user's double-puppet intent could not send it either).
@@ -101,7 +88,6 @@ func (x *xmppClient) applyRoomName(ctx context.Context, portal *bridgev2.Portal,
 		meta.CustomName = name
 	}
 	if send && portal.MXID != "" {
-		x.ensureBotInRoom(ctx, portal, sender)
 		// Try the caller's intent first (the user who ran the command is in the room; the bot may not be),
 		// and fall back to the bot when that intent cannot send (bridgev2 does not retry in this direction).
 		if !portal.Internal().UpdateName(ctx, name, sender, time.Time{}, false) && sender != nil {
@@ -149,7 +135,7 @@ func SetRoomNameCommand(ce *commands.Event) {
 	}
 	// An explicit leading login ID selects the account (the name is then the rest).
 	login, args, explicit := CommandLogin(ce, 1)
-	ce.Reply("%s", setRoomNameReply(ce.Ctx, prefix, ce.Portal, args, func(p *bridgev2.Portal) *bridgev2.UserLogin {
+	reply := setRoomNameReply(ce.Ctx, prefix, ce.Portal, args, func(p *bridgev2.Portal) *bridgev2.UserLogin {
 		if explicit {
 			return login
 		}
@@ -160,13 +146,44 @@ func SetRoomNameCommand(ce *commands.Event) {
 		}
 		return ul
 	}, func(ctx context.Context) bridgev2.MatrixAPI {
-		// Send as the user who ran the command: the bridge bot may not be in the room (it can leave one
-		// without the portal noticing), while the user is. bridgev2 falls back to the bot on M_FORBIDDEN.
+		// Send as the user who ran the command: the bridge bot may not be in the room (it can be removed
+		// to keep a portal a two-member DM), while the user is. bridgev2 falls back to the bot otherwise.
 		if ce.User == nil {
 			return nil
 		}
 		return ce.User.DoublePuppet(ctx)
-	}))
+	})
+	if ce.Reply("%s", reply) == "" {
+		// The bot cannot post here either: reply as the user so the command is not silent.
+		replyAsUser(ce, reply)
+	}
+}
+
+// replyAsUser posts a command reply as the sender's double-puppeted account. It is used when the bridge
+// bot is not in the room (a portal whose bot was deliberately removed to keep the room a two-member DM,
+// where ce.Reply cannot work). The event carries the double-puppet source marker, so the bridge ignores
+// it instead of sending the notice to XMPP as a message from the user.
+func replyAsUser(ce *commands.Event, text string) {
+	if ce == nil || ce.User == nil || ce.Bridge == nil {
+		return
+	}
+	mc, ok := ce.Bridge.Matrix.(*matrix.Connector)
+	if !ok || mc.AS == nil || mc.AS.DoublePuppetValue == "" {
+		return
+	}
+	intent := ce.User.DoublePuppet(ce.Ctx)
+	if intent == nil {
+		return
+	}
+	content := format.RenderMarkdown(text, true, false)
+	content.MsgType = event.MsgNotice
+	_, err := intent.SendMessage(ce.Ctx, ce.OrigRoomID, event.EventMessage, &event.Content{
+		Parsed: &content,
+		Raw:    map[string]any{appservice.DoublePuppetKey: mc.AS.DoublePuppetValue},
+	}, nil)
+	if err != nil && ce.Log != nil {
+		ce.Log.Err(err).Msg("Failed to reply to command as the user")
+	}
 }
 
 // senderOf returns the intent doublePuppet builds (nil when there is none, i.e. the bot is used).
